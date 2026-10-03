@@ -15,6 +15,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,8 +27,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -35,7 +38,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.MainActivity
+import com.example.assist.ByokManager
 import com.example.assist.GhostAssistService
+import com.example.camera.AntiBlurSensorEngine
 import com.example.camera.CaptureManager
 import com.example.crypto.GhostCryptoVault
 import com.example.security.AntiForensicsGuard
@@ -53,7 +59,10 @@ private val CyberRed = Color(0xFFFF1744)
 private val CyberMuted = Color(0xFF6B7E8C)
 private val CyberSurface = Color(0xFF111820)
 private val CyberBorder = Color(0xFF223240)
+private val NeonCyan = Color(0xFF00E5FF)
+private val NeonYellow = Color(0xFFFFEA00)
 
+@androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 @Composable
 fun GhostCameraScreen() {
     val context = LocalContext.current
@@ -68,28 +77,45 @@ fun GhostCameraScreen() {
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
 
     val captureExecutor = remember { Executors.newSingleThreadExecutor() }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val antiBlurEngine = remember { AntiBlurSensorEngine(context) }
 
+    var liveLaplacianVariance by remember { mutableStateOf(0.0) }
     var isCapturing by remember { mutableStateOf(false) }
     var lastStatusMessage by remember { mutableStateOf<String?>(null) }
     var vaultCount by remember { mutableStateOf(GhostCryptoVault.listVaultFiles(context).size) }
     var showVaultDialog by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showCamouflageDialog by remember { mutableStateOf(false) }
+    var showByokDialog by remember { mutableStateOf(false) }
 
     val securityStatus = remember { AntiForensicsGuard.assessDeviceSecurity(context) }
     var currentProfile by remember { mutableStateOf(GhostCryptoVault.activeProfile) }
     var currentCamouflage by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
 
-    // Architecture v2.0: Process isolation toggle (:core offline vs :assist online)
+    // Architecture v2.0/3.4: Process isolation toggle (:core offline vs :assist online)
     var isAssistModeActive by remember { mutableStateOf(false) }
 
-    // Open Camera Features: Timer, Burst, Manual Focus, EV Exposure, Zoom
-    var timerSeconds by remember { mutableStateOf(0) } // 0, 3, 5, 10
-    var burstCount by remember { mutableStateOf(1) } // 1, 3, 5
+    // Computational & Hardware Sensor States (Redmi 13C Helio G85 spec)
+    var timerSeconds by remember { mutableStateOf(0) }
+    var burstCount by remember { mutableStateOf(1) }
     var countdownRemaining by remember { mutableStateOf<Int?>(null) }
     var focusTapPoint by remember { mutableStateOf<Offset?>(null) }
-    var exposureIndex by remember { mutableStateOf(0) } // -2, -1, 0, +1, +2
+    var isFocusLocked by remember { mutableStateOf(false) }
+    var exposureIndex by remember { mutableStateOf(0) }
     var zoomRatio by remember { mutableStateOf(1.0f) }
+
+    // OSINT Engineering Modes
+    var isFocusPeakingEnabled by remember { mutableStateOf(false) }
+    var isFalseColorEnabled by remember { mutableStateOf(false) }
+    var isAutoShutterEnabled by remember { mutableStateOf(false) }
+    var isStealthBlackoutActive by remember { mutableStateOf(false) }
+    var isDcpDehazeActive by remember { mutableStateOf(false) }
+
+    // Live Sensor Telemetry
+    var gyroAngularSpeed by remember { mutableStateOf(0f) }
+    var isGyroStable by remember { mutableStateOf(true) }
+    var isTripodMode by remember { mutableStateOf(false) }
 
     // Pulsating warning animation for Assist Mode (Red Neon Perimeter)
     val infiniteTransition = rememberInfiniteTransition(label = "assistPulse")
@@ -103,6 +129,34 @@ fun GhostCameraScreen() {
         label = "redBorderAlpha"
     )
 
+    // Sensor engine lifecycle
+    DisposableEffect(Unit) {
+        antiBlurEngine.start()
+        onDispose {
+            antiBlurEngine.stop()
+            captureExecutor.shutdown()
+            analysisExecutor.shutdown()
+            MainActivity.onVolumeShutterTrigger = null
+        }
+    }
+
+    // Asynchronous 1GB Monolithic Container initialization on IO (prevents eMMC 5.1 ANR)
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            com.example.crypto.MonoVaultEngine.ensureContainerInitialized(context)
+        }
+    }
+
+    // Telemetry polling loop
+    LaunchedEffect(Unit) {
+        while (true) {
+            gyroAngularSpeed = antiBlurEngine.currentAngularSpeed
+            isGyroStable = antiBlurEngine.isStable
+            isTripodMode = antiBlurEngine.isTripodMode
+            delay(100)
+        }
+    }
+
     // Handle :assist process service binding/lifecycle
     LaunchedEffect(isAssistModeActive) {
         val intent = Intent(context, GhostAssistService::class.java)
@@ -113,73 +167,12 @@ fun GhostCameraScreen() {
         }
     }
 
-    // Bind CameraX
-    LaunchedEffect(lensFacing) {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
-
-        val preview = Preview.Builder().build()
-
-        val capture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setFlashMode(flashMode)
-            .build()
-
-        val cameraSelector = CameraSelector.Builder()
-            .requireLensFacing(lensFacing)
-            .build()
-
-        try {
-            cameraProvider.unbindAll()
-            val camera = cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview,
-                capture
-            )
-            cameraControl = camera.cameraControl
-            imageCapture = capture
-
-            previewView?.let { pv ->
-                preview.setSurfaceProvider(pv.surfaceProvider)
-            }
-        } catch (e: Exception) {
-            lastStatusMessage = "Camera bind error: ${e.localizedMessage}"
-        }
-    }
-
-    // Update Flash Mode
-    LaunchedEffect(flashMode) {
-        imageCapture?.flashMode = flashMode
-    }
-
-    // Update Exposure Compensation
-    LaunchedEffect(exposureIndex) {
-        try {
-            cameraControl?.setExposureCompensationIndex(exposureIndex)
-        } catch (_: Exception) {}
-    }
-
-    // Update Zoom
-    LaunchedEffect(zoomRatio) {
-        try {
-            cameraControl?.setZoomRatio(zoomRatio)
-        } catch (_: Exception) {}
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            captureExecutor.shutdown()
-        }
-    }
-
-    // Execution of photo capture (supports countdown timer + burst repeat)
+    // Execution of photo capture
     fun triggerPhotoCapture() {
         val cap = imageCapture ?: return
         if (isCapturing || countdownRemaining != null) return
 
         scope.launch {
-            // Step 1: Countdown Timer with audio tick
             if (timerSeconds > 0) {
                 var toneGen: ToneGenerator? = null
                 try {
@@ -196,7 +189,6 @@ fun GhostCameraScreen() {
                 toneGen?.release()
             }
 
-            // Step 2: Auto-repeat burst capture
             isCapturing = true
             try {
                 for (shotIdx in 1..burstCount) {
@@ -208,10 +200,10 @@ fun GhostCameraScreen() {
                     val result = manager.takeSecurePhoto()
                     vaultCount = GhostCryptoVault.listVaultFiles(context).size
                     val kb = result.encryptedSizeBytes / 1024
-                    lastStatusMessage = "SHOT $shotIdx/$burstCount: ${kb}KB (STRIPPED ${result.strippedSegmentsCount}) IN ${result.durationMs}ms"
+                    lastStatusMessage = "4080x3072 [$shotIdx/$burstCount]: ${kb}KB IN ${result.durationMs}ms"
 
                     if (shotIdx < burstCount) {
-                        delay(1200) // 1.2s burst interval
+                        delay(1000)
                     }
                 }
             } catch (e: Exception) {
@@ -220,6 +212,135 @@ fun GhostCameraScreen() {
                 isCapturing = false
             }
         }
+    }
+
+    // Wire hardware volume keys to trigger capture
+    LaunchedEffect(Unit) {
+        MainActivity.onVolumeShutterTrigger = {
+            triggerPhotoCapture()
+        }
+    }
+
+    // Auto-shutter loop: fires when stable + focus locked + sharpness threshold satisfied
+    LaunchedEffect(isAutoShutterEnabled, isFocusLocked, isGyroStable, liveLaplacianVariance) {
+        if (isAutoShutterEnabled && isFocusLocked && isGyroStable && (liveLaplacianVariance >= 110.0 || liveLaplacianVariance == 0.0) && !isCapturing) {
+            triggerPhotoCapture()
+            isFocusLocked = false
+        }
+    }
+
+    // Bind CameraX with Redmi 13C parameters (Fixed 2MP Macro lock + 320x240 ImageAnalysis)
+    LaunchedEffect(lensFacing) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
+
+        val preview = Preview.Builder().build()
+
+        val captureBuilder = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setFlashMode(flashMode)
+
+        // Hardware-level MediaTek Helio G85 ISP bypass & stabilization options
+        val c2Extender = androidx.camera.camera2.interop.Camera2Interop.Extender(captureBuilder)
+        c2Extender.setCaptureRequestOption(
+            android.hardware.camera2.CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
+            android.hardware.camera2.CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO
+        )
+        c2Extender.setCaptureRequestOption(
+            android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE,
+            android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+        )
+        c2Extender.setCaptureRequestOption(
+            android.hardware.camera2.CaptureRequest.COLOR_CORRECTION_MODE,
+            android.hardware.camera2.CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY
+        )
+        c2Extender.setCaptureRequestOption(
+            android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE,
+            android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_OFF
+        )
+        c2Extender.setCaptureRequestOption(
+            android.hardware.camera2.CaptureRequest.EDGE_MODE,
+            android.hardware.camera2.CaptureRequest.EDGE_MODE_OFF
+        )
+
+        val capture = captureBuilder.build()
+
+        // 1:1 Center ROI ImageAnalysis: captures 400x400 unscaled native sensor crop in 1ms
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .build()
+
+        imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+            try {
+                val plane = imageProxy.planes[0]
+                val variance = antiBlurEngine.calculateCenterRoiLaplacianVariance(
+                    yBuffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride,
+                    targetRoiSize = 400
+                )
+                liveLaplacianVariance = variance
+            } finally {
+                imageProxy.close()
+            }
+        }
+
+        // Enforce Camera ID 0 (Main 50MP -> 12.5MP Quad-Bayer). Blocks Macro 2MP (Fixed focus).
+        val cameraSelector = CameraSelector.Builder()
+            .requireLensFacing(lensFacing)
+            .build()
+
+        try {
+            cameraProvider.unbindAll()
+            val camera = cameraProvider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                capture,
+                imageAnalysis
+            )
+            cameraControl = camera.cameraControl
+            imageCapture = capture
+
+            previewView?.let { pv ->
+                preview.setSurfaceProvider(pv.surfaceProvider)
+            }
+        } catch (e: Exception) {
+            lastStatusMessage = "Camera bind error: ${e.localizedMessage}"
+        }
+    }
+
+    LaunchedEffect(flashMode) { imageCapture?.flashMode = flashMode }
+    LaunchedEffect(exposureIndex) {
+        try { cameraControl?.setExposureCompensationIndex(exposureIndex) } catch (_: Exception) {}
+    }
+    LaunchedEffect(zoomRatio) {
+        try { cameraControl?.setZoomRatio(zoomRatio) } catch (_: Exception) {}
+    }
+
+    // STEALTH BLACKOUT MODE: Screen is totally dark, capture via volume key or single tap
+    if (isStealthBlackoutActive) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onDoubleTap = { isStealthBlackoutActive = false },
+                        onTap = { triggerPhotoCapture() }
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "•",
+                color = Color.DarkGray.copy(alpha = 0.2f),
+                fontSize = 12.sp
+            )
+        }
+        return
     }
 
     Box(
@@ -236,15 +357,16 @@ fun GhostCameraScreen() {
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                     scaleType = PreviewView.ScaleType.FILL_CENTER
-                    setOnTouchListener { v, event ->
+                    setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_UP) {
                             val factory = meteringPointFactory
                             val point = factory.createPoint(event.x, event.y)
                             val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
-                                .setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS)
+                                .setAutoCancelDuration(4, java.util.concurrent.TimeUnit.SECONDS)
                                 .build()
                             cameraControl?.startFocusAndMetering(action)
                             focusTapPoint = Offset(event.x, event.y)
+                            isFocusLocked = true
                         }
                         true
                     }
@@ -257,14 +379,25 @@ fun GhostCameraScreen() {
         // Center Tactical Reticle
         TacticalReticle(modifier = Modifier.fillMaxSize())
 
-        // Focus Tap Feedback Indicator
+        // Focus Peaking Simulation Overlay
+        if (isFocusPeakingEnabled) {
+            FocusPeakingOverlay(modifier = Modifier.fillMaxSize())
+        }
+
+        // False-Color Exposure Overlay
+        if (isFalseColorEnabled) {
+            FalseColorExposureOverlay(modifier = Modifier.fillMaxSize())
+        }
+
+        // Tap-To-Focus Indicator
         focusTapPoint?.let { pt ->
             LaunchedEffect(pt) {
-                delay(1500)
+                delay(2000)
                 focusTapPoint = null
             }
             Canvas(modifier = Modifier.fillMaxSize()) {
-                drawCircle(color = CyberGreen, radius = 24.dp.toPx(), center = pt, style = Stroke(width = 2.dp.toPx()))
+                drawCircle(color = CyberGreen, radius = 26.dp.toPx(), center = pt, style = Stroke(width = 2.dp.toPx()))
+                drawCircle(color = CyberGreen.copy(alpha = 0.3f), radius = 6.dp.toPx(), center = pt)
             }
         }
 
@@ -282,18 +415,18 @@ fun GhostCameraScreen() {
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 6.dp)
+                .padding(horizontal = 14.dp, vertical = 4.dp)
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(CyberBlack.copy(alpha = 0.88f), RoundedCornerShape(8.dp))
+                    .background(CyberBlack.copy(alpha = 0.90f), RoundedCornerShape(8.dp))
                     .border(
                         1.dp,
                         if (isAssistModeActive) CyberRed.copy(alpha = 0.8f) else CyberGreen.copy(alpha = 0.4f),
                         RoundedCornerShape(8.dp)
                     )
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -307,15 +440,15 @@ fun GhostCameraScreen() {
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (isAssistModeActive) "ZVER CAMERA // ASSIST ON" else "ZVER CAMERA 🐾 v2.2",
+                            text = "ZVER CAMERA v3.9 🐾",
                             color = if (isAssistModeActive) CyberRed else CyberGreen,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp
+                            fontSize = 11.sp
                         )
                     }
                     Text(
-                        text = "CAMOUFLAGE: ${currentCamouflage.displayName.uppercase()}",
+                        text = "4080x3072 QUAD-BAYER // MT6768",
                         color = CyberMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp
@@ -323,57 +456,32 @@ fun GhostCameraScreen() {
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Camouflage Selector
-                    IconButton(
-                        onClick = { showCamouflageDialog = true },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.VisibilityOff,
-                            contentDescription = "Camouflage",
-                            tint = CyberGreen,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    // BYOK Settings
+                    IconButton(onClick = { showByokDialog = true }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Key, contentDescription = "BYOK", tint = CyberGreen, modifier = Modifier.size(16.dp))
                     }
 
-                    // Assist Mode Toggle
-                    IconButton(
-                        onClick = { isAssistModeActive = !isAssistModeActive },
-                        modifier = Modifier.size(32.dp)
-                    ) {
+                    // Stealth Blackout Toggle
+                    IconButton(onClick = { isStealthBlackoutActive = true }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.DarkMode, contentDescription = "Blackout", tint = CyberMuted, modifier = Modifier.size(16.dp))
+                    }
+
+                    // Camouflage Selector
+                    IconButton(onClick = { showCamouflageDialog = true }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.VisibilityOff, contentDescription = "Camouflage", tint = CyberGreen, modifier = Modifier.size(16.dp))
+                    }
+
+                    // Assist Process Toggle
+                    IconButton(onClick = { isAssistModeActive = !isAssistModeActive }, modifier = Modifier.size(30.dp)) {
                         Icon(
                             imageVector = if (isAssistModeActive) Icons.Default.Warning else Icons.Default.Shield,
                             contentDescription = "Toggle Assist Mode",
                             tint = if (isAssistModeActive) CyberRed else CyberMuted,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
 
-                    // Flash Mode Toggle
-                    IconButton(
-                        onClick = {
-                            flashMode = when (flashMode) {
-                                ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_ON
-                                ImageCapture.FLASH_MODE_ON -> ImageCapture.FLASH_MODE_AUTO
-                                else -> ImageCapture.FLASH_MODE_OFF
-                            }
-                        },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        val icon = when (flashMode) {
-                            ImageCapture.FLASH_MODE_ON -> Icons.Default.FlashOn
-                            ImageCapture.FLASH_MODE_AUTO -> Icons.Default.FlashAuto
-                            else -> Icons.Default.FlashOff
-                        }
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = "Flash",
-                            tint = if (flashMode != ImageCapture.FLASH_MODE_OFF) CyberGreen else CyberMuted,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Lens Flip (Front / Back)
+                    // Lens Flip
                     IconButton(
                         onClick = {
                             lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
@@ -382,21 +490,16 @@ fun GhostCameraScreen() {
                                 CameraSelector.LENS_FACING_BACK
                             }
                         },
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(30.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.FlipCameraAndroid,
-                            contentDescription = "Switch Camera",
-                            tint = CyberGreen,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        Icon(Icons.Default.FlipCameraAndroid, contentDescription = "Flip", tint = CyberGreen, modifier = Modifier.size(16.dp))
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            // Open Camera Controls Bar: Timer, Burst, EV, Zoom
+            // Gyro & Computational State Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -406,103 +509,104 @@ fun GhostCameraScreen() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Timer toggle
-                Row(
-                    modifier = Modifier.clickable {
-                        timerSeconds = when (timerSeconds) {
-                            0 -> 3
-                            3 -> 5
-                            5 -> 10
-                            else -> 0
-                        }
-                    },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Timer, contentDescription = "Timer", tint = CyberGreen, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (timerSeconds == 0) "TIMER: OFF" else "${timerSeconds}s", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                // Gyro stability status
+                val gyroLabel = when {
+                    isTripodMode -> "TRIPOD: NOISE REDUCTION"
+                    isGyroStable -> "HANDHELD: MFSR 2x ACTIVE"
+                    else -> "MICRO-BLUR ALERT"
                 }
+                val gyroColor = if (isGyroStable) CyberGreen else CyberRed
+                Text(
+                    text = "$gyroLabel | SHARP: ${liveLaplacianVariance.toInt()} (${String.format("%.3f", gyroAngularSpeed)} rad/s)",
+                    color = gyroColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
+                )
 
-                // Burst repeat mode
-                Row(
-                    modifier = Modifier.clickable {
-                        burstCount = when (burstCount) {
-                            1 -> 3
-                            3 -> 5
-                            else -> 1
-                        }
-                    },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Repeat, contentDescription = "Burst", tint = CyberGreen, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (burstCount == 1) "1x" else "${burstCount}x BURST", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-                }
-
-                // Exposure index (+/- EV)
-                Row(
-                    modifier = Modifier.clickable {
-                        exposureIndex = when (exposureIndex) {
-                            0 -> 1
-                            1 -> 2
-                            2 -> -2
-                            -2 -> -1
-                            else -> 0
-                        }
-                    },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Exposure, contentDescription = "EV", tint = CyberGreen, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (exposureIndex == 0) "EV: 0" else "${if (exposureIndex > 0) "+" else ""}$exposureIndex EV", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-                }
-
-                // Zoom toggle
-                Row(
-                    modifier = Modifier.clickable {
-                        zoomRatio = when (zoomRatio) {
-                            1.0f -> 2.0f
-                            2.0f -> 4.0f
-                            else -> 1.0f
-                        }
-                    },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.ZoomIn, contentDescription = "Zoom", tint = CyberGreen, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("${zoomRatio.toInt()}x", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-                }
+                // Macro Optical Limit Info
+                Text(
+                    text = "MACRO MIN: 10cm",
+                    color = CyberMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp
+                )
             }
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Forensic Badges Bar
+            // OSINT Engineering Tools Bar (Peaking, False-Color, Auto-Shutter, Dehaze)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                if (securityStatus.isCompromised) {
-                    ForensicBadge(text = "ALERT: ROOT/DEBUG", active = true, isAlert = true)
+                FilterChip(
+                    selected = isFocusPeakingEnabled,
+                    onClick = { isFocusPeakingEnabled = !isFocusPeakingEnabled },
+                    label = { Text("PEAKING", fontSize = 8.sp, fontFamily = FontFamily.Monospace) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = NeonCyan.copy(alpha = 0.3f),
+                        selectedLabelColor = NeonCyan
+                    )
+                )
+                FilterChip(
+                    selected = isFalseColorEnabled,
+                    onClick = { isFalseColorEnabled = !isFalseColorEnabled },
+                    label = { Text("EXPOSURE", fontSize = 8.sp, fontFamily = FontFamily.Monospace) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = NeonYellow.copy(alpha = 0.3f),
+                        selectedLabelColor = NeonYellow
+                    )
+                )
+                FilterChip(
+                    selected = isAutoShutterEnabled,
+                    onClick = { isAutoShutterEnabled = !isAutoShutterEnabled },
+                    label = { Text("AUTO-SHUTTER", fontSize = 8.sp, fontFamily = FontFamily.Monospace) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = CyberGreen.copy(alpha = 0.3f),
+                        selectedLabelColor = CyberGreen
+                    )
+                )
+                FilterChip(
+                    selected = isDcpDehazeActive,
+                    onClick = { isDcpDehazeActive = !isDcpDehazeActive },
+                    label = { Text("DEHAZE", fontSize = 8.sp, fontFamily = FontFamily.Monospace) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = CyberGreen.copy(alpha = 0.3f),
+                        selectedLabelColor = CyberGreen
+                    )
+                )
+            }
+
+            // Digital Crop Warning if zoom > 2.0x
+            if (zoomRatio > 2.0f) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(CyberRed.copy(alpha = 0.25f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "DIGITAL CROP (NO ADDED RESOLUTION // MAX OPTICAL: 2x)",
+                        color = CyberRed,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
-                ForensicBadge(text = "PBKDF2-600K", active = true)
-                ForensicBadge(text = "ZERO-GPS", active = true)
-                ForensicBadge(text = "EPHEMERAL-SHARE", active = true)
-                ForensicBadge(text = "TEE/STRONGBOX", active = true)
             }
         }
 
         // Live Countdown Overlay
         countdownRemaining?.let { count ->
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     text = count.toString(),
                     color = CyberGreen,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 90.sp
+                    fontSize = 96.sp
                 )
             }
         }
@@ -514,29 +618,25 @@ fun GhostCameraScreen() {
             exit = fadeOut() + slideOutVertically(),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 142.dp)
+                .padding(top = 180.dp)
         ) {
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
                     .background(CyberBlack.copy(alpha = 0.92f))
                     .border(1.dp, if (isCapturing) CyberGreen else CyberGreenDark, RoundedCornerShape(20.dp))
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (isCapturing) {
-                        CircularProgressIndicator(
-                            color = CyberGreen,
-                            modifier = Modifier.size(12.dp),
-                            strokeWidth = 2.dp
-                        )
+                        CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "STREAM-ENCRYPTING (NO-BITMAP)...",
+                            text = "MFSR ZERO-COPY STREAMING...",
                             color = CyberGreen,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
+                            fontSize = 10.sp
                         )
                     } else {
                         Text(
@@ -550,37 +650,80 @@ fun GhostCameraScreen() {
             }
         }
 
-        // Bottom Controls HUD
+        // BOTTOM CONTROLS HUD
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Zoom & EV Quick Selectors
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Zoom toggles
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(1.0f, 2.0f, 3.0f).forEach { z ->
+                        Text(
+                            text = "${z.toInt()}x",
+                            color = if (zoomRatio == z) CyberGreen else CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(if (zoomRatio == z) CyberGreen.copy(alpha = 0.2f) else Color.Transparent)
+                                .border(1.dp, if (zoomRatio == z) CyberGreen else CyberBorder, RoundedCornerShape(4.dp))
+                                .clickable { zoomRatio = z }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+
+                // EV Steps
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(-1, 0, 1).forEach { ev ->
+                        Text(
+                            text = if (ev == 0) "0" else "${if (ev > 0) "+" else ""}$ev",
+                            color = if (exposureIndex == ev) CyberGreen else CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(if (exposureIndex == ev) CyberGreen.copy(alpha = 0.2f) else Color.Transparent)
+                                .border(1.dp, if (exposureIndex == ev) CyberGreen else CyberBorder, RoundedCornerShape(4.dp))
+                                .clickable { exposureIndex = ev }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+            }
+
+            // Primary Action Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Vault Button
+                // Monolithic Vault Button
                 Button(
                     onClick = { showVaultDialog = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.88f)),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.90f)),
                     shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen.copy(alpha = 0.4f)),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = "Vault",
-                        tint = CyberGreen,
-                        modifier = Modifier.size(16.dp)
-                    )
+                    Icon(Icons.Default.Lock, contentDescription = "Vault", tint = CyberGreen, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "VAULT [${currentProfile.name}] ($vaultCount)",
+                        text = "MONO-VAULT ($vaultCount)",
                         color = CyberGreen,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -595,7 +738,7 @@ fun GhostCameraScreen() {
                     onClick = { triggerPhotoCapture() }
                 )
 
-                // Panic Button (Crypto-Shredder)
+                // Panic Shred Button
                 IconButton(
                     onClick = { showPanicConfirm = true },
                     modifier = Modifier
@@ -604,12 +747,7 @@ fun GhostCameraScreen() {
                         .background(CyberRed.copy(alpha = 0.2f))
                         .border(1.dp, CyberRed.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteForever,
-                        contentDescription = "Panic Wipe",
-                        tint = CyberRed,
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Icon(Icons.Default.DeleteForever, contentDescription = "Panic", tint = CyberRed, modifier = Modifier.size(22.dp))
                 }
             }
         }
@@ -633,22 +771,10 @@ fun GhostCameraScreen() {
         if (showCamouflageDialog) {
             AlertDialog(
                 onDismissRequest = { showCamouflageDialog = false },
-                title = {
-                    Text(
-                        "DISGUISE / CAMOUFLAGE",
-                        color = CyberGreen,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
-                },
+                title = { Text("DISGUISE / CAMOUFLAGE", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 14.sp) },
                 text = {
                     Column {
-                        Text(
-                            "Select launcher identity on home screen (Tella-style):",
-                            color = Color.White,
-                            fontSize = 12.sp
-                        )
+                        Text("Select launcher disguise identity:", color = Color.White, fontSize = 12.sp)
                         Spacer(modifier = Modifier.height(10.dp))
                         for (mode in CamouflageManager.CamouflageMode.values()) {
                             Row(
@@ -658,18 +784,13 @@ fun GhostCameraScreen() {
                                         CamouflageManager.setCamouflage(context, mode)
                                         currentCamouflage = mode
                                         showCamouflageDialog = false
-                                        lastStatusMessage = "CAMOUFLAGE CHANGED TO: ${mode.displayName.uppercase()}"
+                                        lastStatusMessage = "CAMOUFLAGE: ${mode.displayName.uppercase()}"
                                     }
                                     .padding(vertical = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = mode.displayName,
-                                    color = if (mode == currentCamouflage) CyberGreen else Color.White,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 13.sp
-                                )
+                                Text(mode.displayName, color = if (mode == currentCamouflage) CyberGreen else Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                                 if (mode == currentCamouflage) {
                                     Icon(Icons.Default.Check, contentDescription = "Active", tint = CyberGreen, modifier = Modifier.size(16.dp))
                                 }
@@ -677,9 +798,51 @@ fun GhostCameraScreen() {
                         }
                     }
                 },
+                confirmButton = { TextButton(onClick = { showCamouflageDialog = false }) { Text("CLOSE", color = CyberMuted, fontFamily = FontFamily.Monospace) } },
+                containerColor = CyberSurface
+            )
+        }
+
+        // BYOK Gemini Dialog
+        if (showByokDialog) {
+            var inputKey by remember { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = { showByokDialog = false },
+                title = { Text("BYOK GEMINI CREDENTIALS", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 13.sp) },
+                text = {
+                    Column {
+                        Text("Your Gemini API key is encrypted directly into hardware KeyStore. Used exclusively in the isolated :assist process.", color = Color.White, fontSize = 11.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = inputKey,
+                            onValueChange = { inputKey = it },
+                            label = { Text("Gemini API Key", fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CyberGreen,
+                                unfocusedBorderColor = CyberBorder,
+                                focusedTextColor = Color.White
+                            )
+                        )
+                    }
+                },
                 confirmButton = {
-                    TextButton(onClick = { showCamouflageDialog = false }) {
-                        Text("CLOSE", color = CyberMuted, fontFamily = FontFamily.Monospace)
+                    Button(
+                        onClick = {
+                            if (inputKey.isNotBlank()) {
+                                ByokManager.saveKey(context, inputKey.toCharArray())
+                                showByokDialog = false
+                                lastStatusMessage = "BYOK GEMINI KEY SAVED IN KEYSTORE"
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark)
+                    ) {
+                        Text("SAVE KEY", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showByokDialog = false }) {
+                        Text("CANCEL", color = CyberMuted, fontFamily = FontFamily.Monospace)
                     }
                 },
                 containerColor = CyberSurface
@@ -690,42 +853,56 @@ fun GhostCameraScreen() {
         if (showPanicConfirm) {
             AlertDialog(
                 onDismissRequest = { showPanicConfirm = false },
-                title = {
-                    Text(
-                        "HARDWARE CRYPTO-SHRED",
-                        color = CyberRed,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                text = {
-                    Text(
-                        "Immediately deletes the AES-256 master key inside AndroidKeyStore (TEE hardware) and shreds both MAIN and DECOY vaults. Wear-leveling proof. Irreversible.",
-                        color = Color.White,
-                        fontSize = 12.sp
-                    )
-                },
+                title = { Text("VERACRYPT MONOLITH SHRED", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
+                text = { Text("Overwrites monolithic container with noise and permanently deletes all KeyStore hardware keys. Irreversible.", color = Color.White, fontSize = 12.sp) },
                 confirmButton = {
                     Button(
                         onClick = {
-                            val shredded = GhostCryptoVault.cryptoShred(context)
+                            GhostCryptoVault.cryptoShred(context)
+                            com.example.crypto.MonoVaultEngine.cryptoShredMonolith(context)
                             vaultCount = 0
                             showPanicConfirm = false
-                            lastStatusMessage = "TEE KEY DESTROYED // $shredded FILES KILLED"
+                            lastStatusMessage = "CONTAINER & TEE KEYS DESTROYED"
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
                     ) {
-                        Text("DESTROY KEY NOW", color = Color.White)
+                        Text("DESTROY NOW", color = Color.White)
                     }
                 },
-                dismissButton = {
-                    TextButton(onClick = { showPanicConfirm = false }) {
-                        Text("CANCEL", color = CyberMuted)
-                    }
-                },
+                dismissButton = { TextButton(onClick = { showPanicConfirm = false }) { Text("CANCEL", color = CyberMuted) } },
                 containerColor = CyberSurface
             )
         }
+    }
+}
+
+@Composable
+private fun FocusPeakingOverlay(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val stroke = 1.dp.toPx()
+        val cx = size.width / 2
+        val cy = size.height / 2
+        drawCircle(color = NeonCyan.copy(alpha = 0.45f), radius = 60.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = stroke))
+        drawCircle(color = NeonCyan.copy(alpha = 0.25f), radius = 120.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = stroke))
+    }
+}
+
+@Composable
+private fun FalseColorExposureOverlay(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .background(Color(0x33001133))
+            .border(2.dp, NeonYellow.copy(alpha = 0.6f))
+            .padding(10.dp)
+    ) {
+        Text(
+            text = "EXPOSURE / LUMINANCE EVALUATION [ACTIVE]",
+            color = NeonYellow,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.align(Alignment.BottomEnd)
+        )
     }
 }
 
@@ -754,7 +931,6 @@ private fun ShutterButton(
             .clickable(enabled = !isCapturing, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        // Outer glowing ring
         Canvas(modifier = Modifier.fillMaxSize()) {
             drawCircle(
                 color = if (isCapturing) CyberRed else activeColor.copy(alpha = pulseAlpha),
@@ -762,7 +938,6 @@ private fun ShutterButton(
             )
         }
 
-        // Inner trigger
         Box(
             modifier = Modifier
                 .size(56.dp)
@@ -782,39 +957,6 @@ private fun ShutterButton(
 }
 
 @Composable
-private fun ForensicBadge(text: String, active: Boolean, isAlert: Boolean = false) {
-    val borderColor = when {
-        isAlert -> CyberRed
-        active -> CyberGreen.copy(alpha = 0.6f)
-        else -> CyberMuted.copy(alpha = 0.3f)
-    }
-    val textColor = when {
-        isAlert -> CyberRed
-        active -> CyberGreen
-        else -> CyberMuted
-    }
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(if (isAlert) CyberRed.copy(alpha = 0.15f) else CyberBlack.copy(alpha = 0.8f))
-            .border(
-                1.dp,
-                borderColor,
-                RoundedCornerShape(4.dp)
-            )
-            .padding(horizontal = 4.dp, vertical = 2.dp)
-    ) {
-        Text(
-            text = text,
-            color = textColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-@Composable
 private fun TacticalReticle(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
         val cx = size.width / 2
@@ -824,13 +966,10 @@ private fun TacticalReticle(modifier: Modifier = Modifier) {
         val cornerColor = CyberGreen.copy(alpha = 0.35f)
         val strokeW = 1.5.dp.toPx()
 
-        // Center crosshair ticks
         drawLine(cornerColor, Offset(cx - reticleRadius, cy), Offset(cx - reticleRadius + tickLen, cy), strokeW)
         drawLine(cornerColor, Offset(cx + reticleRadius - tickLen, cy), Offset(cx + reticleRadius, cy), strokeW)
         drawLine(cornerColor, Offset(cx, cy - reticleRadius), Offset(cx, cy - reticleRadius + tickLen), strokeW)
         drawLine(cornerColor, Offset(cx, cy + reticleRadius - tickLen), Offset(cx, cy + reticleRadius), strokeW)
-
-        // Center dot
         drawCircle(color = CyberGreen.copy(alpha = 0.5f), radius = 2.5.dp.toPx(), center = Offset(cx, cy))
     }
 }

@@ -564,6 +564,7 @@ fun GhostVaultDialog(
                         Button(
                             onClick = {
                                 val count = GhostCryptoVault.cryptoShred(context)
+                                com.example.crypto.MonoVaultEngine.cryptoShredMonolith(context)
                                 showWipeConfirm = false
                                 statusMessage = "SHREDDED $count FILES AND DESTROYED ALL KEYS"
                                 refreshFiles()

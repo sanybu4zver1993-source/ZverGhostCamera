@@ -3,6 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
     <uses-permission
         android:name="android.permission.INTERNET"
@@ -92,6 +93,7 @@
             android:name=".panic.PanicTriggerReceiver"
             android:exported="true">
             <intent-filter>
+                <action android:name="info.guardianproject.panic.action.CONNECT" />
                 <action android:name="info.guardianproject.panic.action.TRIGGER" />
                 <action android:name="info.guardianproject.panic.action.DISCONNECT" />
             </intent-filter>

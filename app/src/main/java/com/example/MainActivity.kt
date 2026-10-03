@@ -37,6 +37,21 @@ private val CyberMuted = Color(0xFF8A9BA8)
 private val CyberBorder = Color(0xFF223240)
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        var onVolumeShutterTrigger: (() -> Unit)? = null
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
+            val callback = onVolumeShutterTrigger
+            if (callback != null) {
+                callback.invoke()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onResume() {
         super.onResume()
         // Immediately shred any ephemeral shared files from cacheDir

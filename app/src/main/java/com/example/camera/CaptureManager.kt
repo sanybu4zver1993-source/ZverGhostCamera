@@ -56,6 +56,15 @@ class CaptureManager(
                         stream.flush()
                     }
 
+                    // Also mirror into Monolithic VeraCrypt Container
+                    try {
+                        val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN)
+                            com.example.crypto.MonoVaultEngine.VolumeType.MASTER
+                        else
+                            com.example.crypto.MonoVaultEngine.VolumeType.DECOY
+                        com.example.crypto.MonoVaultEngine.appendRecord(appContext, volume, rawShot.bytes)
+                    } catch (_: Exception) {}
+
                     CaptureResult(
                         encryptedFile = targetFile,
                         encryptedSizeBytes = targetFile.length(),
