@@ -37,6 +37,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".panic.PanicTriggerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="info.guardianproject.panic.action.TRIGGER" />
+                <action android:name="info.guardianproject.panic.action.DISCONNECT" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".assist.GhostAssistService"
+            android:exported="false"
+            android:process=":assist" />
     </application>
 
 </manifest>

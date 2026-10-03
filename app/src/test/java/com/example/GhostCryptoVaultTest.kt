@@ -35,4 +35,34 @@ class GhostCryptoVaultTest {
         assertEquals("GHOST_SUITE_PAYLOAD_TEST_ZERO_EXIF", String(decrypted, Charsets.UTF_8))
         assertTrue(ciphertext.size > plaintext.size)
     }
+
+    @Test
+    fun testCipherOutputStreamGcm() {
+        val keyGen = KeyGenerator.getInstance("AES")
+        keyGen.init(256)
+        val key = keyGen.generateKey()
+
+        val iv = ByteArray(12)
+        SecureRandom().nextBytes(iv)
+
+        val plaintext = "STREAMING_EXIF_PURGE_TEST_PAYLOAD".toByteArray(Charsets.UTF_8)
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val spec = GCMParameterSpec(128, iv)
+        cipher.init(Cipher.ENCRYPT_MODE, key, spec)
+
+        val baos = java.io.ByteArrayOutputStream()
+        javax.crypto.CipherOutputStream(baos, cipher).use { cos ->
+            cos.write(plaintext)
+        }
+
+        val encryptedBytes = baos.toByteArray()
+        assertTrue(encryptedBytes.isNotEmpty())
+
+        // Decrypt
+        val decryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+        decryptCipher.init(Cipher.DECRYPT_MODE, key, spec)
+        val decrypted = decryptCipher.doFinal(encryptedBytes)
+        assertEquals("STREAMING_EXIF_PURGE_TEST_PAYLOAD", String(decrypted, Charsets.UTF_8))
+    }
 }

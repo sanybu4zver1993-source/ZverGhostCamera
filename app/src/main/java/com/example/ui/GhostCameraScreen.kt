@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.content.Context
+import android.content.Intent
 import android.view.ViewGroup
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -31,7 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
+import com.example.assist.GhostAssistService
 import com.example.camera.CaptureManager
 import com.example.crypto.GhostCryptoVault
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +43,7 @@ import java.util.concurrent.Executors
 private val CyberBlack = Color(0xFF070B0E)
 private val CyberGreen = Color(0xFF00FF66)
 private val CyberGreenDark = Color(0xFF008F39)
-private val CyberRed = Color(0xFFFF2255)
+private val CyberRed = Color(0xFFFF1744)
 private val CyberMuted = Color(0xFF6B7E8C)
 private val CyberSurface = Color(0xFF111820)
 
@@ -66,6 +67,31 @@ fun GhostCameraScreen() {
     var vaultCount by remember { mutableStateOf(GhostCryptoVault.listVaultFiles(context).size) }
     var showVaultDialog by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
+
+    // Architecture v2.0: Process isolation toggle (:core offline vs :assist online)
+    var isAssistModeActive by remember { mutableStateOf(false) }
+
+    // Pulsating warning animation for Assist Mode (Red Neon Perimeter)
+    val infiniteTransition = rememberInfiniteTransition(label = "assistPulse")
+    val redBorderAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "redBorderAlpha"
+    )
+
+    // Handle :assist process service binding/lifecycle
+    LaunchedEffect(isAssistModeActive) {
+        val intent = Intent(context, GhostAssistService::class.java)
+        if (isAssistModeActive) {
+            context.startService(intent)
+        } else {
+            context.stopService(intent)
+        }
+    }
 
     // Bind CameraX
     LaunchedEffect(lensFacing) {
@@ -136,6 +162,15 @@ fun GhostCameraScreen() {
         // Tactical Reticle in Center
         TacticalReticle(modifier = Modifier.fillMaxSize())
 
+        // RED NEON PERIMETER BORDER when :assist process is active
+        if (isAssistModeActive) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(4.dp, CyberRed.copy(alpha = redBorderAlpha))
+            )
+        }
+
         // Top Tactical HUD
         Column(
             modifier = Modifier
@@ -146,8 +181,12 @@ fun GhostCameraScreen() {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(CyberBlack.copy(alpha = 0.85f), RoundedCornerShape(8.dp))
-                    .border(1.dp, CyberGreen.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                    .background(CyberBlack.copy(alpha = 0.88f), RoundedCornerShape(8.dp))
+                    .border(
+                        1.dp,
+                        if (isAssistModeActive) CyberRed.copy(alpha = 0.8f) else CyberGreen.copy(alpha = 0.4f),
+                        RoundedCornerShape(8.dp)
+                    )
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
@@ -158,26 +197,41 @@ fun GhostCameraScreen() {
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(CyberGreen)
+                                .background(if (isAssistModeActive) CyberRed else CyberGreen)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "GHOST CAMERA 👻",
-                            color = CyberGreen,
+                            text = if (isAssistModeActive) "GHOST CAMERA // ASSIST ONLINE" else "GHOST CAMERA 👻 v2.0",
+                            color = if (isAssistModeActive) CyberRed else CyberGreen,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
+                            fontSize = 12.sp
                         )
                     }
                     Text(
-                        text = "AIR-GAPPED // ZERO INTERNET",
-                        color = CyberMuted,
+                        text = if (isAssistModeActive) "PROCESS: :assist (NETWORK ACTIVE)" else "PROCESS: :core (AIR-GAPPED)",
+                        color = if (isAssistModeActive) CyberRed.copy(alpha = 0.8f) else CyberMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp
                     )
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Assist Mode Toggle
+                    IconButton(
+                        onClick = { isAssistModeActive = !isAssistModeActive },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isAssistModeActive) Icons.Default.Warning else Icons.Default.Shield,
+                            contentDescription = "Toggle Assist Mode",
+                            tint = if (isAssistModeActive) CyberRed else CyberMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(2.dp))
+
                     // Flash Mode Toggle
                     IconButton(
                         onClick = {
@@ -187,7 +241,7 @@ fun GhostCameraScreen() {
                                 else -> ImageCapture.FLASH_MODE_OFF
                             }
                         },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
                         val icon = when (flashMode) {
                             ImageCapture.FLASH_MODE_ON -> Icons.Default.FlashOn
@@ -198,11 +252,11 @@ fun GhostCameraScreen() {
                             imageVector = icon,
                             contentDescription = "Flash",
                             tint = if (flashMode != ImageCapture.FLASH_MODE_OFF) CyberGreen else CyberMuted,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(2.dp))
 
                     // Lens Flip (Front / Back)
                     IconButton(
@@ -213,13 +267,13 @@ fun GhostCameraScreen() {
                                 CameraSelector.LENS_FACING_BACK
                             }
                         },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.FlipCameraAndroid,
                             contentDescription = "Switch Camera",
                             tint = CyberGreen,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -227,15 +281,15 @@ fun GhostCameraScreen() {
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Forensic Badges Bar
+            // Forensic Badges Bar (Architecture v2.0)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                ForensicBadge(text = "EXIF PURGED", active = true)
-                ForensicBadge(text = "AES-256-GCM", active = true)
-                ForensicBadge(text = "RAM-WIPED", active = true)
-                ForensicBadge(text = "FLAG_SECURE", active = true)
+                ForensicBadge(text = "BYTE-STRIP", active = true)
+                ForensicBadge(text = "ZERO-BITMAP", active = true)
+                ForensicBadge(text = "AES-GCM", active = true)
+                ForensicBadge(text = "TEE-SHRED", active = true)
             }
         }
 
@@ -246,7 +300,7 @@ fun GhostCameraScreen() {
             exit = fadeOut() + slideOutVertically(),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 110.dp)
+                .padding(top = 114.dp)
         ) {
             Box(
                 modifier = Modifier
@@ -264,7 +318,7 @@ fun GhostCameraScreen() {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "STRIPPING EXIF -> ENCRYPTING...",
+                            text = "STREAM-STRIPPING -> CIPHEROUTPUTSTREAM...",
                             color = CyberGreen,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -299,7 +353,7 @@ fun GhostCameraScreen() {
                 // Vault Button
                 Button(
                     onClick = { showVaultDialog = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.85f)),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.88f)),
                     shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen.copy(alpha = 0.4f)),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
@@ -323,6 +377,7 @@ fun GhostCameraScreen() {
                 // Shutter Button
                 ShutterButton(
                     isCapturing = isCapturing,
+                    isAssistMode = isAssistModeActive,
                     onClick = {
                         val cap = imageCapture ?: return@ShutterButton
                         if (isCapturing) return@ShutterButton
@@ -337,7 +392,7 @@ fun GhostCameraScreen() {
                                 val result = manager.takeSecurePhoto()
                                 vaultCount = GhostCryptoVault.listVaultFiles(context).size
                                 val kb = result.encryptedSizeBytes / 1024
-                                lastStatusMessage = "SAVED: ${result.finalDimensions.first}x${result.finalDimensions.second} | ${kb}KB"
+                                lastStatusMessage = "SAVED: ${kb}KB (STRIPPED ${result.strippedSegmentsCount} APPn/COM) IN ${result.durationMs}ms"
                             } catch (e: Exception) {
                                 lastStatusMessage = "ERR: ${e.localizedMessage ?: "Capture failed"}"
                             } finally {
@@ -347,7 +402,7 @@ fun GhostCameraScreen() {
                     }
                 )
 
-                // Panic Button
+                // Panic Button (Crypto-Shredder)
                 IconButton(
                     onClick = { showPanicConfirm = true },
                     modifier = Modifier
@@ -366,7 +421,7 @@ fun GhostCameraScreen() {
             }
         }
 
-        // Vault Viewer Dialog
+        // Vault Viewer Dialog (Tella Decoy PIN enabled)
         if (showVaultDialog) {
             GhostVaultDialog(
                 onDismiss = { showVaultDialog = false },
@@ -376,13 +431,13 @@ fun GhostCameraScreen() {
             )
         }
 
-        // Emergency Panic Confirmation
+        // Emergency Crypto-Shred Confirmation
         if (showPanicConfirm) {
             AlertDialog(
                 onDismissRequest = { showPanicConfirm = false },
                 title = {
                     Text(
-                        "PANIC: SHRED VAULT?",
+                        "HARDWARE CRYPTO-SHRED",
                         color = CyberRed,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold
@@ -390,7 +445,7 @@ fun GhostCameraScreen() {
                 },
                 text = {
                     Text(
-                        "Will overwrite all encrypted photos with random noise and zeroes, then shred KeyStore keys. No trace left.",
+                        "Immediately deletes the AES-256 master key inside AndroidKeyStore (TEE hardware). All files on flash storage instantly turn into random unrecoverable noise. Safe against wear leveling.",
                         color = Color.White,
                         fontSize = 12.sp
                     )
@@ -398,14 +453,14 @@ fun GhostCameraScreen() {
                 confirmButton = {
                     Button(
                         onClick = {
-                            val shredded = GhostCryptoVault.emergencyWipeAll(context)
+                            val shredded = GhostCryptoVault.cryptoShred(context)
                             vaultCount = 0
                             showPanicConfirm = false
-                            lastStatusMessage = "PANIC WIPE: $shredded PHOTOS SHREDDED"
+                            lastStatusMessage = "TEE KEY DESTROYED // $shredded FILES KILLED"
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
                     ) {
-                        Text("CONFIRM WIPE", color = Color.White)
+                        Text("DESTROY KEY NOW", color = Color.White)
                     }
                 },
                 dismissButton = {
@@ -422,6 +477,7 @@ fun GhostCameraScreen() {
 @Composable
 private fun ShutterButton(
     isCapturing: Boolean,
+    isAssistMode: Boolean,
     onClick: () -> Unit
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -435,33 +491,35 @@ private fun ShutterButton(
         label = "pulseAlpha"
     )
 
+    val activeColor = if (isAssistMode) CyberRed else CyberGreen
+
     Box(
         modifier = Modifier
             .size(76.dp)
             .clickable(enabled = !isCapturing, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        // Outer glowing cyber ring
+        // Outer glowing ring
         Canvas(modifier = Modifier.fillMaxSize()) {
             drawCircle(
-                color = if (isCapturing) CyberRed else CyberGreen.copy(alpha = pulseAlpha),
+                color = if (isCapturing) CyberRed else activeColor.copy(alpha = pulseAlpha),
                 style = Stroke(width = 3.dp.toPx())
             )
         }
 
-        // Inner trigger button
+        // Inner trigger
         Box(
             modifier = Modifier
                 .size(60.dp)
                 .clip(CircleShape)
-                .background(if (isCapturing) CyberRed.copy(alpha = 0.4f) else CyberGreen.copy(alpha = 0.25f))
-                .border(2.dp, if (isCapturing) CyberRed else CyberGreen, CircleShape),
+                .background(if (isCapturing) CyberRed.copy(alpha = 0.4f) else activeColor.copy(alpha = 0.25f))
+                .border(2.dp, if (isCapturing) CyberRed else activeColor, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Default.CameraAlt,
                 contentDescription = "Capture",
-                tint = if (isCapturing) CyberRed else CyberGreen,
+                tint = if (isCapturing) CyberRed else activeColor,
                 modifier = Modifier.size(28.dp)
             )
         }
@@ -479,7 +537,7 @@ private fun ForensicBadge(text: String, active: Boolean) {
                 if (active) CyberGreen.copy(alpha = 0.6f) else CyberMuted.copy(alpha = 0.3f),
                 RoundedCornerShape(4.dp)
             )
-            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .padding(horizontal = 4.dp, vertical = 2.dp)
     ) {
         Text(
             text = text,
