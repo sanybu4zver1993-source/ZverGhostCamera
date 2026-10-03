@@ -1,0 +1,6 @@
+{
+  "name": "Ghost Suite",
+  "description": "Zero-telemetry privacy suite and secure modular tools hub for Android",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
