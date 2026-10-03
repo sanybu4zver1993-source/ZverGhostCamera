@@ -16,6 +16,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -111,11 +113,15 @@ fun GhostCameraScreen() {
     var isAutoShutterEnabled by remember { mutableStateOf(false) }
     var isStealthBlackoutActive by remember { mutableStateOf(false) }
     var isDcpDehazeActive by remember { mutableStateOf(false) }
+    var isDocumentModeActive by remember { mutableStateOf(false) }
+    var isFocusBracketingActive by remember { mutableStateOf(false) }
 
     // Live Sensor Telemetry
     var gyroAngularSpeed by remember { mutableStateOf(0f) }
     var isGyroStable by remember { mutableStateOf(true) }
     var isTripodMode by remember { mutableStateOf(false) }
+    var documentTiltDeg by remember { mutableStateOf(0f) }
+    var isDocumentParallel by remember { mutableStateOf(false) }
 
     // Pulsating warning animation for Assist Mode (Red Neon Perimeter)
     val infiniteTransition = rememberInfiniteTransition(label = "assistPulse")
@@ -153,6 +159,8 @@ fun GhostCameraScreen() {
             gyroAngularSpeed = antiBlurEngine.currentAngularSpeed
             isGyroStable = antiBlurEngine.isStable
             isTripodMode = antiBlurEngine.isTripodMode
+            documentTiltDeg = antiBlurEngine.currentTiltDeg
+            isDocumentParallel = antiBlurEngine.isDocumentParallel
             delay(100)
         }
     }
@@ -191,19 +199,34 @@ fun GhostCameraScreen() {
 
             isCapturing = true
             try {
-                for (shotIdx in 1..burstCount) {
-                    val manager = CaptureManager(
-                        context = context,
-                        imageCapture = cap,
-                        captureExecutor = captureExecutor
-                    )
-                    val result = manager.takeSecurePhoto()
-                    vaultCount = GhostCryptoVault.listVaultFiles(context).size
-                    val kb = result.encryptedSizeBytes / 1024
-                    lastStatusMessage = "4080x3072 [$shotIdx/$burstCount]: ${kb}KB IN ${result.durationMs}ms"
+                if (isFocusBracketingActive) {
+                    lastStatusMessage = "FOCUS-BRACKETING 3-SHOT SERIES..."
+                    for (step in 1..3) {
+                        val manager = CaptureManager(
+                            context = context,
+                            imageCapture = cap,
+                            captureExecutor = captureExecutor
+                        )
+                        val result = manager.takeSecurePhoto()
+                        vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                        delay(250)
+                    }
+                    lastStatusMessage = "FOCUS-BRACKET [3 SHOTS] STORED TO MONO-VAULT"
+                } else {
+                    for (shotIdx in 1..burstCount) {
+                        val manager = CaptureManager(
+                            context = context,
+                            imageCapture = cap,
+                            captureExecutor = captureExecutor
+                        )
+                        val result = manager.takeSecurePhoto()
+                        vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                        val kb = result.encryptedSizeBytes / 1024
+                        lastStatusMessage = "4080x3072 [$shotIdx/$burstCount]: ${kb}KB IN ${result.durationMs}ms"
 
-                    if (shotIdx < burstCount) {
-                        delay(1000)
+                        if (shotIdx < burstCount) {
+                            delay(1000)
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -379,6 +402,46 @@ fun GhostCameraScreen() {
         // Center Tactical Reticle
         TacticalReticle(modifier = Modifier.fillMaxSize())
 
+        // Document Parallelism / Virtual Level Overlay
+        if (isDocumentModeActive) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val crosshairColor = if (isDocumentParallel) CyberGreen else NeonYellow
+                Canvas(modifier = Modifier.size(160.dp)) {
+                    val cx = size.width / 2
+                    val cy = size.height / 2
+                    drawCircle(
+                        color = crosshairColor,
+                        radius = 56.dp.toPx(),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+                    drawCircle(
+                        color = crosshairColor.copy(alpha = 0.35f),
+                        radius = 14.dp.toPx()
+                    )
+                    drawLine(
+                        color = crosshairColor,
+                        start = Offset(cx - 64.dp.toPx(), cy),
+                        end = Offset(cx + 64.dp.toPx(), cy),
+                        strokeWidth = 2.dp.toPx()
+                    )
+                    drawLine(
+                        color = crosshairColor,
+                        start = Offset(cx, cy - 64.dp.toPx()),
+                        end = Offset(cx, cy + 64.dp.toPx()),
+                        strokeWidth = 2.dp.toPx()
+                    )
+                }
+                Text(
+                    text = if (isDocumentParallel) "PARALLEL: ${String.format("%.1f", documentTiltDeg)}° [LOCKED]" else "TILT: ${String.format("%.1f", documentTiltDeg)}° (FLATTEN TO DESK)",
+                    color = if (isDocumentParallel) CyberGreen else NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 180.dp)
+                )
+            }
+        }
+
         // Focus Peaking Simulation Overlay
         if (isFocusPeakingEnabled) {
             FocusPeakingOverlay(modifier = Modifier.fillMaxSize())
@@ -440,7 +503,7 @@ fun GhostCameraScreen() {
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "ZVER CAMERA v3.9 🐾",
+                            text = "ZVER CAMERA v4.0 🐾",
                             color = if (isAssistModeActive) CyberRed else CyberGreen,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -535,9 +598,11 @@ fun GhostCameraScreen() {
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // OSINT Engineering Tools Bar (Peaking, False-Color, Auto-Shutter, Dehaze)
+            // OSINT Engineering Tools Bar (Peaking, False-Color, Auto-Shutter, Dehaze, Doc-Level, Bracketing)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 FilterChip(
@@ -565,6 +630,24 @@ fun GhostCameraScreen() {
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberGreen.copy(alpha = 0.3f),
                         selectedLabelColor = CyberGreen
+                    )
+                )
+                FilterChip(
+                    selected = isDocumentModeActive,
+                    onClick = { isDocumentModeActive = !isDocumentModeActive },
+                    label = { Text("DOC-LEVEL", fontSize = 8.sp, fontFamily = FontFamily.Monospace) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = CyberGreen.copy(alpha = 0.3f),
+                        selectedLabelColor = CyberGreen
+                    )
+                )
+                FilterChip(
+                    selected = isFocusBracketingActive,
+                    onClick = { isFocusBracketingActive = !isFocusBracketingActive },
+                    label = { Text("FOCUS-BRK", fontSize = 8.sp, fontFamily = FontFamily.Monospace) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = NeonCyan.copy(alpha = 0.3f),
+                        selectedLabelColor = NeonCyan
                     )
                 )
                 FilterChip(

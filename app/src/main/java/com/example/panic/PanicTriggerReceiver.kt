@@ -13,11 +13,10 @@ import java.security.MessageDigest
 import java.util.UUID
 
 /**
- * PanicTriggerReceiver v3.9 (Android 14/15 Dual-Auth Hardened):
- * 1. If getSentFromUid() != -1: Checks authentic APK signing certificate SHA-256 fingerprint.
- * 2. If getSentFromUid() == -1 (caller didn't pass setShareIdentityEnabled(true)):
- *    Validates incoming intent against a pre-shared cryptographic secret nonce (Shared Secret).
- * Prevents spoofing DoS while ensuring Ripple and PanicKit triggers can never be locked out!
+ * PanicTriggerReceiver v4.0 (Anti-Timing Attack & KeyStore Hardware Purge):
+ * - Constant-time token verification via MessageDigest.isEqual() to prevent timing side-channel leaks.
+ * - Hardware KeyStore purge execution order: keys revoked first, followed by foreground disk zeroing.
+ * - Dual-path Android 14/15 authorization (UID + APK cert signature or Shared Secret Nonce).
  */
 class PanicTriggerReceiver : BroadcastReceiver() {
     companion object {
@@ -39,6 +38,13 @@ class PanicTriggerReceiver : BroadcastReceiver() {
             }
             return secret
         }
+
+        fun constantTimeEquals(a: String, b: String): Boolean {
+            return MessageDigest.isEqual(
+                a.toByteArray(Charsets.UTF_8),
+                b.toByteArray(Charsets.UTF_8)
+            )
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent?) {
@@ -55,7 +61,6 @@ class PanicTriggerReceiver : BroadcastReceiver() {
         when (action) {
             ACTION_CONNECT -> {
                 Log.i("PanicKit", "Handling ACTION_CONNECT (UID: $callerUid)")
-                // Store caller certificate if UID is exposed
                 if (callerUid != -1) {
                     val callerPackages = context.packageManager.getPackagesForUid(callerUid)
                     if (!callerPackages.isNullOrEmpty()) {
@@ -68,7 +73,6 @@ class PanicTriggerReceiver : BroadcastReceiver() {
                     }
                 }
 
-                // If sender passed a secret or we negotiate one
                 val secret = incomingSecret ?: getOrGenerateSharedSecret(context)
                 prefs.edit().putString(KEY_SHARED_SECRET, secret).apply()
                 Log.i("PanicKit", "PanicKit Shared Secret Nonce established.")
@@ -83,7 +87,7 @@ class PanicTriggerReceiver : BroadcastReceiver() {
                 Log.w("PanicKit", "Received ACTION_TRIGGER. Verifying caller authenticity...")
                 var isAuthorized = false
 
-                // Path A: Verified UID and Signing Certificate (if setShareIdentityEnabled was passed)
+                // Path A: Verified UID and Signing Certificate (Android 14+)
                 if (callerUid != -1) {
                     val callerPackages = context.packageManager.getPackagesForUid(callerUid)
                     if (!callerPackages.isNullOrEmpty()) {
@@ -96,11 +100,11 @@ class PanicTriggerReceiver : BroadcastReceiver() {
                     }
                 }
 
-                // Path B: Fallback for Android 14/15 where getSentFromUid() == -1
+                // Path B: Fallback for Android 14/15 where getSentFromUid() == -1 via Constant-Time comparison
                 if (!isAuthorized && incomingSecret != null && storedSecret != null) {
-                    if (incomingSecret == storedSecret) {
+                    if (constantTimeEquals(incomingSecret, storedSecret)) {
                         isAuthorized = true
-                        Log.i("PanicKit", "Authorized via Cryptographic Shared Secret Nonce match.")
+                        Log.i("PanicKit", "Authorized via Cryptographic Shared Secret Nonce match (constant-time).")
                     }
                 }
 
@@ -116,9 +120,10 @@ class PanicTriggerReceiver : BroadcastReceiver() {
                 if (isAuthorized) {
                     Log.w("PanicKit", "PANIC TRIGGER VALIDATED! Initiating instant hardware purge...")
                     try {
-                        val c1 = GhostCryptoVault.cryptoShred(context)
+                        // Execution order: Revoke TEE hardware keys FIRST, then wipe disk bytes
                         val c2 = MonoVaultEngine.cryptoShredMonolith(context)
-                        Log.w("PanicKit", "PANIC PURGE COMPLETED (Vault files: $c1, Monolith: $c2).")
+                        val c1 = GhostCryptoVault.cryptoShred(context)
+                        Log.w("PanicKit", "PANIC PURGE COMPLETED (Monolith: $c2, Individual files: $c1).")
                     } catch (e: Exception) {
                         Log.e("PanicKit", "Error during panic execution", e)
                     }
