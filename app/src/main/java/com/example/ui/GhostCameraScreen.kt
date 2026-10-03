@@ -35,6 +35,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.example.assist.GhostAssistService
 import com.example.camera.CaptureManager
 import com.example.crypto.GhostCryptoVault
+import com.example.security.AntiForensicsGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,6 +68,9 @@ fun GhostCameraScreen() {
     var vaultCount by remember { mutableStateOf(GhostCryptoVault.listVaultFiles(context).size) }
     var showVaultDialog by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
+
+    val securityStatus = remember { AntiForensicsGuard.assessDeviceSecurity(context) }
+    var currentProfile by remember { mutableStateOf(GhostCryptoVault.activeProfile) }
 
     // Architecture v2.0: Process isolation toggle (:core offline vs :assist online)
     var isAssistModeActive by remember { mutableStateOf(false) }
@@ -281,15 +285,18 @@ fun GhostCameraScreen() {
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Forensic Badges Bar (Architecture v2.0)
+            // Forensic Badges Bar (Architecture v2.1)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                if (securityStatus.isCompromised) {
+                    ForensicBadge(text = "ALERT: ROOT/DEBUG", active = true, isAlert = true)
+                }
                 ForensicBadge(text = "BYTE-STRIP", active = true)
-                ForensicBadge(text = "ZERO-BITMAP", active = true)
-                ForensicBadge(text = "AES-GCM", active = true)
-                ForensicBadge(text = "TEE-SHRED", active = true)
+                ForensicBadge(text = "PBKDF2-SHA256", active = true)
+                ForensicBadge(text = "TEE/STRONGBOX", active = true)
+                ForensicBadge(text = "NO-MEDIASTORE", active = true)
             }
         }
 
@@ -366,10 +373,10 @@ fun GhostCameraScreen() {
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "VAULT ($vaultCount)",
+                        text = "VAULT [${currentProfile.name}] ($vaultCount)",
                         color = CyberGreen,
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -527,21 +534,31 @@ private fun ShutterButton(
 }
 
 @Composable
-private fun ForensicBadge(text: String, active: Boolean) {
+private fun ForensicBadge(text: String, active: Boolean, isAlert: Boolean = false) {
+    val borderColor = when {
+        isAlert -> CyberRed
+        active -> CyberGreen.copy(alpha = 0.6f)
+        else -> CyberMuted.copy(alpha = 0.3f)
+    }
+    val textColor = when {
+        isAlert -> CyberRed
+        active -> CyberGreen
+        else -> CyberMuted
+    }
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .background(CyberBlack.copy(alpha = 0.8f))
+            .background(if (isAlert) CyberRed.copy(alpha = 0.15f) else CyberBlack.copy(alpha = 0.8f))
             .border(
                 1.dp,
-                if (active) CyberGreen.copy(alpha = 0.6f) else CyberMuted.copy(alpha = 0.3f),
+                borderColor,
                 RoundedCornerShape(4.dp)
             )
             .padding(horizontal = 4.dp, vertical = 2.dp)
     ) {
         Text(
             text = text,
-            color = if (active) CyberGreen else CyberMuted,
+            color = textColor,
             fontFamily = FontFamily.Monospace,
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold

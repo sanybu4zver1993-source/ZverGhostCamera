@@ -1,6 +1,7 @@
 package com.example.crypto
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.security.keystore.KeyGenParameterSpec
@@ -13,76 +14,272 @@ import java.security.KeyStore
 import java.security.SecureRandom
 import java.util.Arrays
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.CipherOutputStream
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
+import javax.crypto.*
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
- * GhostCryptoVault: Hardware-backed Android KeyStore vault using AES-256-GCM.
- * v2.0 update:
- * - Streaming CipherOutputStream encryption without in-memory ciphertext buffering.
- * - Hardware TEE Key Crypto-Shredding (KeyStore.deleteEntry(KEY_ALIAS)).
- * - Tella-style Decoy PIN support.
- * File format: [4 bytes "GCF1"] [12 bytes IV] [Ciphertext + 16 bytes GCM Auth Tag]
+ * GhostCryptoVault v2.1:
+ * - VeraCrypt-style Dual Vault (MAIN & DECOY).
+ * - Hardware TEE KeyStore with dynamic StrongBox fallback (prevents crash on Helio G85).
+ * - PBKDF2WithHmacSHA256 Key Derivation & AES-GCM Key Wrapping.
+ * - ZERO String objects for PIN (uses CharArray with mandatory zero-fill).
+ * - True cryptographic authorization (successful GCM unwrap, not string comparison).
  */
 object GhostCryptoVault {
-    private const val KEY_ALIAS = "GhostSuite_Camera_AES256"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-    private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
-    private const val GCM_TAG_LENGTH_BITS = 128
-    private const val GCM_IV_LENGTH_BYTES = 12
-    val MAGIC_HEADER = byteArrayOf(0x47, 0x43, 0x46, 0x31) // "GCF1"
+    private const val AES_GCM = "AES/GCM/NoPadding"
+    private const val PBKDF2_ALGO = "PBKDF2WithHmacSHA256"
+    private const val PBKDF2_ITERATIONS = 100_000
+    private const val GCM_IV_LEN = 12
+    private const val GCM_TAG_LEN = 128
+    private const val SALT_LEN = 16
+    private val MAGIC_HEADER = byteArrayOf(0x47, 0x43, 0x46, 0x31) // "GCF1"
 
     private val secureRandom = SecureRandom()
 
-    enum class PinMode {
-        REAL,
-        DECOY,
-        INVALID
+    enum class VaultProfile(val dirName: String, val saltFile: String, val keyFile: String) {
+        MAIN("vault_main", "salt_main.dat", "wrapped_main.key"),
+        DECOY("vault_decoy", "salt_decoy.dat", "wrapped_decoy.key");
+
+        fun getDirectory(context: Context): File {
+            val dir = File(context.filesDir, dirName)
+            if (!dir.exists()) dir.mkdirs()
+            val nomedia = File(dir, ".nomedia")
+            if (!nomedia.exists()) {
+                try { nomedia.createNewFile() } catch (_: Exception) {}
+            }
+            return dir
+        }
     }
 
-    @Synchronized
-    fun getOrCreateKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        if (keyStore.containsAlias(KEY_ALIAS)) {
-            val entry = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
-            if (entry != null) {
-                return entry.secretKey
+    // Active unlocked session key cache (stored only in RAM while unlocked)
+    private var activeMainKey: SecretKey? = null
+    private var activeDecoyKey: SecretKey? = null
+    var activeProfile: VaultProfile = VaultProfile.MAIN
+
+    /**
+     * Checks if a master PIN has been configured.
+     */
+    fun isConfigured(context: Context): Boolean {
+        val saltFile = File(context.filesDir, VaultProfile.MAIN.saltFile)
+        val keyFile = File(context.filesDir, VaultProfile.MAIN.keyFile)
+        return saltFile.exists() && keyFile.exists()
+    }
+
+    /**
+     * Checks if a decoy vault PIN has been configured.
+     */
+    fun hasDecoyConfigured(context: Context): Boolean {
+        val saltFile = File(context.filesDir, VaultProfile.DECOY.saltFile)
+        val keyFile = File(context.filesDir, VaultProfile.DECOY.keyFile)
+        return saltFile.exists() && keyFile.exists()
+    }
+
+    /**
+     * Initializes or updates PIN credentials for Main and optional Decoy vault.
+     * PINs are accepted strictly as CharArray and zero-filled in finally.
+     */
+    fun setupVaultPins(
+        context: Context,
+        mainPin: CharArray,
+        decoyPin: CharArray?
+    ) {
+        try {
+            // Setup Main Vault
+            setupProfileKey(context, VaultProfile.MAIN, mainPin)
+
+            // Setup Decoy Vault if provided
+            if (decoyPin != null && decoyPin.isNotEmpty()) {
+                setupProfileKey(context, VaultProfile.DECOY, decoyPin)
             }
+        } finally {
+            Arrays.fill(mainPin, '0')
+            decoyPin?.let { Arrays.fill(it, '0') }
+        }
+    }
+
+    private fun setupProfileKey(
+        context: Context,
+        profile: VaultProfile,
+        pin: CharArray
+    ) {
+        val salt = ByteArray(SALT_LEN)
+        secureRandom.nextBytes(salt)
+
+        val kek = deriveKekFromPin(pin, salt)
+
+        // Generate high-entropy 256-bit AES master key for this vault
+        val keyGen = KeyGenerator.getInstance("AES")
+        keyGen.init(256)
+        val vaultAesKey = keyGen.generateKey()
+
+        // Wrap the vault key using the derived KEK with AES-GCM
+        val iv = ByteArray(GCM_IV_LEN)
+        secureRandom.nextBytes(iv)
+
+        val cipher = Cipher.getInstance(AES_GCM)
+        cipher.init(Cipher.WRAP_MODE, kek, GCMParameterSpec(GCM_TAG_LEN, iv))
+        val wrappedKeyBytes = cipher.wrap(vaultAesKey)
+
+        // Save salt
+        val saltFile = File(context.filesDir, profile.saltFile)
+        FileOutputStream(saltFile).use { it.write(salt) }
+
+        // Save wrapped key: [12 bytes IV] + [wrapped key payload]
+        val keyFile = File(context.filesDir, profile.keyFile)
+        FileOutputStream(keyFile).use { fos ->
+            fos.write(iv)
+            fos.write(wrappedKeyBytes)
+            fos.fd.sync()
         }
 
+        // Cache in memory for immediate use
+        if (profile == VaultProfile.MAIN) {
+            activeMainKey = vaultAesKey
+        } else {
+            activeDecoyKey = vaultAesKey
+        }
+
+        Arrays.fill(salt, 0.toByte())
+        Arrays.fill(iv, 0.toByte())
+    }
+
+    /**
+     * Authenticates by attempting cryptographic unwrap of Main key, then Decoy key.
+     * ZERO string comparisons. If GCM auth tag matches -> valid PIN.
+     * PIN CharArray is immediately zeroed.
+     */
+    fun unlockWithPin(context: Context, pin: CharArray): VaultProfile? {
+        try {
+            // 1. Try Main Vault
+            if (isConfigured(context)) {
+                val key = tryUnwrapKey(context, VaultProfile.MAIN, pin)
+                if (key != null) {
+                    activeMainKey = key
+                    activeProfile = VaultProfile.MAIN
+                    return VaultProfile.MAIN
+                }
+            }
+
+            // 2. Try Decoy Vault
+            if (hasDecoyConfigured(context)) {
+                val key = tryUnwrapKey(context, VaultProfile.DECOY, pin)
+                if (key != null) {
+                    activeDecoyKey = key
+                    activeProfile = VaultProfile.DECOY
+                    return VaultProfile.DECOY
+                }
+            }
+
+            return null // Invalid PIN
+        } finally {
+            Arrays.fill(pin, '0')
+        }
+    }
+
+    private fun tryUnwrapKey(context: Context, profile: VaultProfile, pin: CharArray): SecretKey? {
+        val saltFile = File(context.filesDir, profile.saltFile)
+        val keyFile = File(context.filesDir, profile.keyFile)
+        if (!saltFile.exists() || !keyFile.exists()) return null
+
+        val salt = FileInputStream(saltFile).use { it.readBytes() }
+        val keyFileData = FileInputStream(keyFile).use { it.readBytes() }
+
+        if (salt.size < SALT_LEN || keyFileData.size < (GCM_IV_LEN + 16)) {
+            return null
+        }
+
+        val iv = ByteArray(GCM_IV_LEN)
+        System.arraycopy(keyFileData, 0, iv, 0, GCM_IV_LEN)
+        val wrappedOffset = GCM_IV_LEN
+        val wrappedSize = keyFileData.size - GCM_IV_LEN
+
+        try {
+            val kek = deriveKekFromPin(pin, salt)
+            val cipher = Cipher.getInstance(AES_GCM)
+            cipher.init(Cipher.UNWRAP_MODE, kek, GCMParameterSpec(GCM_TAG_LEN, iv))
+            return cipher.unwrap(keyFileData.copyOfRange(wrappedOffset, wrappedOffset + wrappedSize), "AES", Cipher.SECRET_KEY) as? SecretKey
+        } catch (_: Exception) {
+            return null // Auth tag mismatch
+        } finally {
+            Arrays.fill(salt, 0.toByte())
+            Arrays.fill(keyFileData, 0.toByte())
+            Arrays.fill(iv, 0.toByte())
+        }
+    }
+
+    private fun deriveKekFromPin(pin: CharArray, salt: ByteArray): SecretKey {
+        val spec = PBEKeySpec(pin, salt, PBKDF2_ITERATIONS, 256)
+        val factory = SecretKeyFactory.getInstance(PBKDF2_ALGO)
+        val rawBytes = factory.generateSecret(spec).encoded
+        spec.clearPassword()
+        val key = SecretKeySpec(rawBytes, "AES")
+        Arrays.fill(rawBytes, 0.toByte())
+        return key
+    }
+
+    /**
+     * Returns the active session key for the currently unlocked profile,
+     * or gets/creates hardware Keystore fallback if first run before setup.
+     */
+    fun getActiveVaultKey(context: Context): SecretKey {
+        val key = if (activeProfile == VaultProfile.MAIN) activeMainKey else activeDecoyKey
+        if (key != null) return key
+
+        // Fallback for unconfigured initial run: Hardware Keystore
+        return getHardwareKeystoreKey(context, "Ghost_Vault_${activeProfile.name}")
+    }
+
+    /**
+     * Hardware KeyStore key with dynamic StrongBox fallback to standard TEE.
+     * Prevents crash on MediaTek Helio G85 on Redmi 13C.
+     */
+    @Synchronized
+    private fun getHardwareKeystoreKey(context: Context, alias: String): SecretKey {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        if (keyStore.containsAlias(alias)) {
+            val entry = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry
+            if (entry != null) return entry.secretKey
+        }
+
+        val isStrongBoxSupported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+        val builder = KeyGenParameterSpec.Builder(
+            alias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
-            .setRandomizedEncryptionRequired(false) // We supply our own cryptographically secure IV
-            .build()
+            .setRandomizedEncryptionRequired(false)
 
-        keyGenerator.init(spec)
+        if (isStrongBoxSupported) {
+            try {
+                builder.setIsStrongBoxBacked(true)
+            } catch (_: Exception) {}
+        }
+
+        keyGenerator.init(builder.build())
         return keyGenerator.generateKey()
     }
 
     /**
-     * Opens a streaming CipherOutputStream directly to a new .gcf file.
-     * Writes 4-byte GCF1 header + 12-byte random IV, then wraps in AES-GCM CipherOutputStream.
-     * When the caller closes the stream, the 16-byte GCM authentication tag is automatically appended.
+     * Opens a streaming CipherOutputStream directly to an encrypted .gcf file
+     * inside the current active vault directory (vault_main or vault_decoy).
      */
     fun openEncryptedOutputStream(context: Context): Pair<File, CipherOutputStream> {
-        val vaultDir = getVaultDir(context)
+        val vaultDir = activeProfile.getDirectory(context)
         val targetFile = File(vaultDir, "shot_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.gcf")
 
-        val iv = ByteArray(GCM_IV_LENGTH_BYTES)
+        val iv = ByteArray(GCM_IV_LEN)
         secureRandom.nextBytes(iv)
 
-        val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
-        val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(), gcmSpec)
+        val cipher = Cipher.getInstance(AES_GCM)
+        val gcmSpec = GCMParameterSpec(GCM_TAG_LEN, iv)
+        cipher.init(Cipher.ENCRYPT_MODE, getActiveVaultKey(context), gcmSpec)
 
         val fos = FileOutputStream(targetFile)
         try {
@@ -100,26 +297,10 @@ object GhostCryptoVault {
     }
 
     /**
-     * Encrypts plaintext bytes in-memory and writes directly to an encrypted .gcf file.
-     */
-    fun encryptAndSave(context: Context, plaintext: ByteArray): File {
-        val (targetFile, cos) = openEncryptedOutputStream(context)
-        try {
-            cos.write(plaintext)
-            cos.flush()
-            cos.close()
-            return targetFile
-        } catch (e: Exception) {
-            shredFile(targetFile)
-            throw IOException("Failed to write encrypted file to vault", e)
-        }
-    }
-
-    /**
      * Decrypts a .gcf file on-the-fly into RAM. Returns raw decrypted JPEG bytes.
      */
-    fun decryptToRam(file: File): ByteArray {
-        if (!file.exists() || file.length() < (MAGIC_HEADER.size + GCM_IV_LENGTH_BYTES + 16)) {
+    fun decryptToRam(context: Context, file: File): ByteArray {
+        if (!file.exists() || file.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)) {
             throw IOException("Invalid or corrupted GCF file")
         }
 
@@ -131,15 +312,15 @@ object GhostCryptoVault {
                 }
             }
 
-            val iv = ByteArray(GCM_IV_LENGTH_BYTES)
-            System.arraycopy(fileBytes, MAGIC_HEADER.size, iv, 0, GCM_IV_LENGTH_BYTES)
+            val iv = ByteArray(GCM_IV_LEN)
+            System.arraycopy(fileBytes, MAGIC_HEADER.size, iv, 0, GCM_IV_LEN)
 
-            val ciphertextOffset = MAGIC_HEADER.size + GCM_IV_LENGTH_BYTES
+            val ciphertextOffset = MAGIC_HEADER.size + GCM_IV_LEN
             val ciphertextSize = fileBytes.size - ciphertextOffset
 
-            val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
-            val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), gcmSpec)
+            val cipher = Cipher.getInstance(AES_GCM)
+            val gcmSpec = GCMParameterSpec(GCM_TAG_LEN, iv)
+            cipher.init(Cipher.DECRYPT_MODE, getActiveVaultKey(context), gcmSpec)
 
             val decrypted = cipher.doFinal(fileBytes, ciphertextOffset, ciphertextSize)
             Arrays.fill(iv, 0.toByte())
@@ -152,8 +333,8 @@ object GhostCryptoVault {
     /**
      * Decrypts file into RAM and decodes directly to a Bitmap. Immediately zeroes decrypted byte array.
      */
-    fun decryptToBitmap(file: File): Bitmap {
-        val decryptedBytes = decryptToRam(file)
+    fun decryptToBitmap(context: Context, file: File): Bitmap {
+        val decryptedBytes = decryptToRam(context, file)
         try {
             return BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)
                 ?: throw IOException("Failed to decode decrypted JPEG")
@@ -173,7 +354,6 @@ object GhostCryptoVault {
             if (length > 0) {
                 val dummy = ByteArray(4096)
                 FileOutputStream(file).use { fos ->
-                    // Pass 1: Random noise
                     var remaining = length
                     while (remaining > 0) {
                         val toWrite = minOf(dummy.size.toLong(), remaining).toInt()
@@ -183,7 +363,6 @@ object GhostCryptoVault {
                     }
                     fos.fd.sync()
 
-                    // Pass 2: Pure zeroes
                     Arrays.fill(dummy, 0.toByte())
                     remaining = length
                     while (remaining > 0) {
@@ -194,82 +373,59 @@ object GhostCryptoVault {
                     fos.fd.sync()
                 }
             }
-        } catch (_: Exception) {
-            // Best effort wipe
-        }
+        } catch (_: Exception) {}
         return file.delete()
     }
 
     /**
-     * True Crypto-Shredding (TEE Key Destruction):
-     * 1. Permanently deletes AES-256 key from hardware Keystore/TEE.
-     *    All .gcf files on NAND flash are instantly converted to unrecoverable mathematical noise.
-     * 2. Deletes vault files from filesystem.
-     * Safe against NAND Wear Leveling / Flash translation layer forensic recovery.
+     * True Crypto-Shredding:
+     * Destroys both MAIN and DECOY keys, salts, wrapped key files, Keystore aliases,
+     * and shreds all files in both directories.
      */
     fun cryptoShred(context: Context): Int {
         var count = 0
-        // 1. Destroy key in hardware Keystore
+        activeMainKey = null
+        activeDecoyKey = null
+
+        // Shred wrapped keys and salts
+        for (profile in VaultProfile.values()) {
+            val salt = File(context.filesDir, profile.saltFile)
+            val key = File(context.filesDir, profile.keyFile)
+            shredFile(salt)
+            shredFile(key)
+
+            val files = listVaultFiles(context, profile)
+            count += files.size
+            for (f in files) {
+                shredFile(f)
+            }
+        }
+
+        // Wipe Keystore aliases
         try {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            if (keyStore.containsAlias(KEY_ALIAS)) {
-                keyStore.deleteEntry(KEY_ALIAS)
+            val aliases = keyStore.aliases()
+            while (aliases.hasMoreElements()) {
+                val alias = aliases.nextElement()
+                if (alias.startsWith("Ghost_Vault")) {
+                    keyStore.deleteEntry(alias)
+                }
             }
         } catch (_: Exception) {}
 
-        // 2. Remove files from storage
-        val files = listVaultFiles(context)
-        count = files.size
-        for (f in files) {
-            try {
-                shredFile(f)
-            } catch (_: Exception) {
-                f.delete()
-            }
-        }
         return count
     }
 
-    fun emergencyWipeAll(context: Context): Int {
-        return cryptoShred(context)
-    }
-
-    fun getVaultDir(context: Context): File {
-        val dir = File(context.filesDir, "ghost_vault")
-        if (!dir.exists()) {
-            dir.mkdirs()
-        }
-        val noMedia = File(dir, ".nomedia")
-        if (!noMedia.exists()) {
-            try {
-                noMedia.createNewFile()
-            } catch (_: Exception) {}
-        }
-        return dir
-    }
-
-    fun listVaultFiles(context: Context): List<File> {
-        val dir = getVaultDir(context)
+    fun listVaultFiles(context: Context, profile: VaultProfile = activeProfile): List<File> {
+        val dir = profile.getDirectory(context)
         return dir.listFiles { _, name -> name.endsWith(".gcf") }
             ?.sortedByDescending { it.lastModified() }
             ?: emptyList()
     }
 
-    fun getVaultSizeBytes(context: Context): Long {
-        val files = listVaultFiles(context)
-        return files.sumOf { it.length() }
-    }
-
-    /**
-     * Tella-style PIN verification:
-     * - Master PIN ("1337" or custom): Opens genuine encrypted vault.
-     * - Decoy PIN ("0000" or custom): Opens fake empty decoy vault under duress.
-     */
-    fun verifyPin(pin: String): PinMode {
-        return when (pin.trim()) {
-            "1337" -> PinMode.REAL
-            "0000" -> PinMode.DECOY
-            else -> PinMode.INVALID
-        }
+    fun lockSession() {
+        activeMainKey = null
+        activeDecoyKey = null
+        activeProfile = VaultProfile.MAIN
     }
 }

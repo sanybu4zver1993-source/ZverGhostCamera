@@ -51,8 +51,13 @@ fun GhostVaultDialog(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var unlockedMode by remember { mutableStateOf<GhostCryptoVault.PinMode?>(null) }
-    var enteredPin by remember { mutableStateOf("") }
+    val isAlreadyConfigured = remember { GhostCryptoVault.isConfigured(context) }
+    var inSetupFlow by remember { mutableStateOf(!isAlreadyConfigured) }
+    var setupStep by remember { mutableStateOf(1) } // 1: Main PIN, 2: Decoy PIN
+    var setupMainPin by remember { mutableStateOf(charArrayOf()) }
+
+    var unlockedProfile by remember { mutableStateOf<GhostCryptoVault.VaultProfile?>(null) }
+    var enteredPinChars by remember { mutableStateOf(charArrayOf()) }
     var pinError by remember { mutableStateOf(false) }
 
     var vaultFiles by remember { mutableStateOf(emptyList<File>()) }
@@ -63,11 +68,7 @@ fun GhostVaultDialog(
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
     fun refreshFiles() {
-        if (unlockedMode == GhostCryptoVault.PinMode.REAL) {
-            vaultFiles = GhostCryptoVault.listVaultFiles(context)
-        } else if (unlockedMode == GhostCryptoVault.PinMode.DECOY) {
-            vaultFiles = emptyList() // Clean empty state for decoy mode under duress
-        }
+        vaultFiles = GhostCryptoVault.listVaultFiles(context)
         onVaultUpdated()
     }
 
@@ -75,6 +76,7 @@ fun GhostVaultDialog(
         onDismissRequest = {
             decryptedBitmap?.recycle()
             decryptedBitmap = null
+            GhostCryptoVault.lockSession()
             onDismiss()
         },
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -82,157 +84,187 @@ fun GhostVaultDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(CyberBlack.copy(alpha = 0.96f))
+                .background(CyberBlack.copy(alpha = 0.97f))
                 .padding(16.dp)
         ) {
-            // STEP 1: TELLA-STYLE PIN CHALLENGE
-            if (unlockedMode == null) {
+            // STEP A: INITIAL PBKDF2 SETUP (First run)
+            if (inSetupFlow) {
                 Column(
                     modifier = Modifier
-                        .fillMaxWidth(0.9f)
+                        .fillMaxWidth(0.92f)
                         .align(Alignment.Center)
                         .background(CyberSurface, RoundedCornerShape(14.dp))
                         .border(1.dp, CyberGreen.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-                        .padding(24.dp),
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shield,
+                        contentDescription = "Setup",
+                        tint = CyberGreen,
+                        modifier = Modifier.size(36.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (setupStep == 1) "SET MASTER PIN" else "SET DECOY PIN (OPTIONAL)",
+                        color = CyberGreen,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        text = if (setupStep == 1) "Derives 256-bit PBKDF2 key for REAL vault" else "Alternative PIN that unlocks benign decoy vault",
+                        color = CyberMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // PIN Dots
+                    PinDotsRow(count = enteredPinChars.size, max = 6)
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    SecureKeypad(
+                        onKeyPressed = { char ->
+                            if (enteredPinChars.size < 6) {
+                                enteredPinChars = enteredPinChars + char
+                            }
+                        },
+                        onClear = {
+                            enteredPinChars.fill('0')
+                            enteredPinChars = charArrayOf()
+                        },
+                        onConfirm = {
+                            if (enteredPinChars.size >= 4) {
+                                if (setupStep == 1) {
+                                    setupMainPin = enteredPinChars.clone()
+                                    enteredPinChars.fill('0')
+                                    enteredPinChars = charArrayOf()
+                                    setupStep = 2
+                                } else {
+                                    // Complete setup
+                                    val decoyClone = if (enteredPinChars.size >= 4) enteredPinChars.clone() else null
+                                    GhostCryptoVault.setupVaultPins(context, setupMainPin, decoyClone)
+                                    enteredPinChars.fill('0')
+                                    enteredPinChars = charArrayOf()
+                                    inSetupFlow = false
+                                    unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
+                                    refreshFiles()
+                                }
+                            }
+                        }
+                    )
+
+                    if (setupStep == 2) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = {
+                            // Skip decoy setup
+                            GhostCryptoVault.setupVaultPins(context, setupMainPin, null)
+                            enteredPinChars.fill('0')
+                            enteredPinChars = charArrayOf()
+                            inSetupFlow = false
+                            unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
+                            refreshFiles()
+                        }) {
+                            Text("SKIP DECOY PIN", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+            // STEP B: UNLOCK PIN CHALLENGE
+            else if (unlockedProfile == null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .align(Alignment.Center)
+                        .background(CyberSurface, RoundedCornerShape(14.dp))
+                        .border(1.dp, CyberGreen.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                        .padding(20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Icon(
                         imageVector = Icons.Default.Lock,
                         contentDescription = "Lock",
                         tint = CyberGreen,
-                        modifier = Modifier.size(40.dp)
+                        modifier = Modifier.size(36.dp)
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "TELLA STEALTH VAULT",
+                        text = "VERACRYPT-STYLE VAULT",
                         color = CyberGreen,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
+                        fontSize = 14.sp
                     )
                     Text(
-                        text = "ENTER SECURE PIN",
+                        text = "NO STRINGS IN RAM // PBKDF2 UNWRAP",
                         color = CyberMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // PIN Dots indicator
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        repeat(4) { idx ->
-                            val filled = idx < enteredPin.length
-                            Box(
-                                modifier = Modifier
-                                    .size(14.dp)
-                                    .clip(RoundedCornerShape(7.dp))
-                                    .background(if (filled) CyberGreen else CyberBorder)
-                                    .border(1.dp, if (filled) CyberGreen else CyberMuted, RoundedCornerShape(7.dp))
-                            )
-                        }
-                    }
-
-                    if (pinError) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "INVALID PIN",
-                            color = CyberRed,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Numpad 0-9
-                    val digits = listOf(
-                        listOf("1", "2", "3"),
-                        listOf("4", "5", "6"),
-                        listOf("7", "8", "9"),
-                        listOf("CLR", "0", "OK")
-                    )
-
-                    for (row in digits) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        ) {
-                            for (key in row) {
-                                Button(
-                                    onClick = {
-                                        pinError = false
-                                        when (key) {
-                                            "CLR" -> enteredPin = ""
-                                            "OK" -> {
-                                                val mode = GhostCryptoVault.verifyPin(enteredPin)
-                                                if (mode != GhostCryptoVault.PinMode.INVALID) {
-                                                    unlockedMode = mode
-                                                    refreshFiles()
-                                                } else {
-                                                    pinError = true
-                                                    enteredPin = ""
-                                                }
-                                            }
-                                            else -> {
-                                                if (enteredPin.length < 4) {
-                                                    enteredPin += key
-                                                    if (enteredPin.length == 4) {
-                                                        val mode = GhostCryptoVault.verifyPin(enteredPin)
-                                                        if (mode != GhostCryptoVault.PinMode.INVALID) {
-                                                            unlockedMode = mode
-                                                            refreshFiles()
-                                                        } else {
-                                                            pinError = true
-                                                            enteredPin = ""
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.size(64.dp, 48.dp),
-                                    shape = RoundedCornerShape(8.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = CyberBorder.copy(alpha = 0.6f)),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Text(
-                                        text = key,
-                                        color = if (key == "OK") CyberGreen else if (key == "CLR") CyberRed else Color.White,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 14.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = "Real PIN: 1337 | Decoy PIN: 0000",
-                        color = CyberMuted.copy(alpha = 0.6f),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp
                     )
 
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    PinDotsRow(count = enteredPinChars.size, max = 6)
+
+                    if (pinError) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "AUTH FAILED: INVALID TAG",
+                            color = CyberRed,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    SecureKeypad(
+                        onKeyPressed = { char ->
+                            pinError = false
+                            if (enteredPinChars.size < 6) {
+                                enteredPinChars = enteredPinChars + char
+                            }
+                        },
+                        onClear = {
+                            enteredPinChars.fill('0')
+                            enteredPinChars = charArrayOf()
+                        },
+                        onConfirm = {
+                            if (enteredPinChars.isNotEmpty()) {
+                                val profile = GhostCryptoVault.unlockWithPin(context, enteredPinChars.clone())
+                                enteredPinChars.fill('0')
+                                enteredPinChars = charArrayOf()
+                                if (profile != null) {
+                                    unlockedProfile = profile
+                                    refreshFiles()
+                                } else {
+                                    pinError = true
+                                }
+                            }
+                        }
+                    )
+
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    TextButton(onClick = onDismiss) {
-                        Text("CANCEL", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    TextButton(onClick = {
+                        enteredPinChars.fill('0')
+                        onDismiss()
+                    }) {
+                        Text("CANCEL", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                     }
                 }
-            } else {
-                // STEP 2: VAULT CONTENT
+            }
+            // STEP C: VAULT BROWSER
+            else {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .border(1.dp, CyberGreen.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
-                        .padding(16.dp)
+                        .padding(14.dp)
                 ) {
                     // Header
                     Row(
@@ -243,22 +275,23 @@ fun GhostVaultDialog(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = Icons.Default.LockOpen,
-                                contentDescription = "Vault",
+                                contentDescription = "Unlocked",
                                 tint = CyberGreen,
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (unlockedMode == GhostCryptoVault.PinMode.REAL) "SECURE VAULT // AUTHENTIC" else "VAULT // SYSTEM ARCHIVE",
+                                text = if (unlockedProfile == GhostCryptoVault.VaultProfile.MAIN) "VAULT: MAIN (AUTHENTIC)" else "VAULT: DECOY (SECURE)",
                                 color = CyberGreen,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
+                                fontSize = 13.sp
                             )
                         }
                         IconButton(onClick = {
                             decryptedBitmap?.recycle()
                             decryptedBitmap = null
+                            GhostCryptoVault.lockSession()
                             onDismiss()
                         }) {
                             Icon(
@@ -269,25 +302,25 @@ fun GhostVaultDialog(
                         }
                     }
 
-                    // Stats subheader
+                    // Subheader
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = 6.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         val totalSizeKb = vaultFiles.sumOf { it.length() } / 1024
                         Text(
-                            text = "OBJECTS: ${vaultFiles.size} | TOTAL: ${totalSizeKb} KB",
+                            text = "FILES: ${vaultFiles.size} | SIZE: ${totalSizeKb} KB",
                             color = CyberMuted,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
+                            fontSize = 10.sp
                         )
                         Text(
-                            text = if (unlockedMode == GhostCryptoVault.PinMode.REAL) "KEY: TEE-HARDWARE" else "MODE: ISOLATED",
+                            text = "PBKDF2-SHA256 // AES-256",
                             color = CyberGreen.copy(alpha = 0.8f),
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
+                            fontSize = 10.sp
                         )
                     }
 
@@ -296,16 +329,16 @@ fun GhostVaultDialog(
                             text = msg,
                             color = CyberGreen,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(bottom = 8.dp)
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(bottom = 6.dp)
                         )
                     }
 
                     HorizontalDivider(color = CyberBorder, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    // Detail viewer if an image is selected
                     if (selectedFile != null) {
+                        // Image Viewer
                         Column(
                             modifier = Modifier
                                 .weight(1f)
@@ -321,7 +354,7 @@ fun GhostVaultDialog(
                                     text = "<- BACK TO LIST",
                                     color = CyberGreen,
                                     fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     modifier = Modifier
                                         .clickable {
                                             decryptedBitmap?.recycle()
@@ -337,47 +370,25 @@ fun GhostVaultDialog(
                                             decryptedBitmap?.recycle()
                                             decryptedBitmap = null
                                             selectedFile = null
-                                            statusMessage = "FILE ZERO-SHREDDED FROM DISK"
+                                            statusMessage = "FILE SHREDDED"
                                             refreshFiles()
                                         }
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
                                     shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.DeleteForever,
-                                        contentDescription = "Shred",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = Color.White
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        "SHRED FILE",
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.sp,
-                                        color = Color.White
-                                    )
+                                    Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("SHRED", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
 
                             if (isDecrypting) {
-                                Box(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        CircularProgressIndicator(color = CyberGreen)
-                                        Spacer(modifier = Modifier.height(8.dp))
-                                        Text(
-                                            "DECRYPTING IN RAM...",
-                                            color = CyberGreen,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 12.sp
-                                        )
-                                    }
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(color = CyberGreen, strokeWidth = 2.dp)
                                 }
                             } else if (decryptedBitmap != null) {
                                 Box(
@@ -391,38 +402,38 @@ fun GhostVaultDialog(
                                 ) {
                                     Image(
                                         bitmap = decryptedBitmap!!.asImageBitmap(),
-                                        contentDescription = "Decrypted photo",
+                                        contentDescription = "Decrypted",
                                         contentScale = ContentScale.Fit,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
 
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
 
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(CyberSurface, RoundedCornerShape(8.dp))
-                                        .padding(8.dp)
+                                        .background(CyberSurface, RoundedCornerShape(6.dp))
+                                        .padding(6.dp)
                                 ) {
                                     Text(
-                                        text = "FORENSIC STATUS: 100% STRIPPED",
+                                        text = "FORENSIC STATUS: 100% CLEAN",
                                         color = CyberGreen,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp
+                                        fontSize = 10.sp
                                     )
                                     Text(
-                                        text = "EXIF/GPS/MAKER-NOTES PURGED AT BYTE LEVEL // RAM RE-RENDER ONLY",
+                                        text = "STREAM-STRIPPED EXIF // NO STRINGS IN RAM // ZERO MEDIASTORE LEAKS",
                                         color = CyberMuted,
                                         fontFamily = FontFamily.Monospace,
-                                        fontSize = 10.sp
+                                        fontSize = 9.sp
                                     )
                                 }
                             }
                         }
                     } else {
-                        // List of files
+                        // File List
                         if (vaultFiles.isEmpty()) {
                             Box(
                                 modifier = Modifier
@@ -431,53 +442,43 @@ fun GhostVaultDialog(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(
-                                        imageVector = Icons.Default.Shield,
-                                        contentDescription = "Empty",
-                                        tint = CyberMuted,
-                                        modifier = Modifier.size(48.dp)
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Icon(Icons.Default.Shield, contentDescription = "Empty", tint = CyberMuted, modifier = Modifier.size(40.dp))
+                                    Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        if (unlockedMode == GhostCryptoVault.PinMode.DECOY) "VAULT IS EMPTY" else "NO FILES IN VAULT",
+                                        if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "DECOY VAULT EMPTY" else "NO FILES STORED",
                                         color = CyberMuted,
                                         fontFamily = FontFamily.Monospace,
-                                        fontSize = 14.sp
+                                        fontSize = 13.sp
                                     )
                                     Text(
-                                        text = if (unlockedMode == GhostCryptoVault.PinMode.DECOY) "Decoy profile active. Zero artifacts detected." else "Take shots to store encrypted images here.",
+                                        text = if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "Take shots while in decoy mode to create an innocent cover." else "Shots are encrypted with PBKDF2-derived master key.",
                                         color = CyberMuted.copy(alpha = 0.7f),
-                                        fontSize = 12.sp,
+                                        fontSize = 11.sp,
                                         textAlign = TextAlign.Center
                                     )
                                 }
                             }
                         } else {
-                            LazyColumn(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth()
-                            ) {
+                            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
                                 items(vaultFiles) { file ->
                                     val dateStr = remember(file) {
-                                        val sdf = SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault())
-                                        sdf.format(Date(file.lastModified()))
+                                        SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(file.lastModified()))
                                     }
                                     val sizeKb = remember(file) { file.length() / 1024 }
 
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(vertical = 4.dp)
-                                            .background(CyberSurface, RoundedCornerShape(8.dp))
-                                            .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
+                                            .padding(vertical = 3.dp)
+                                            .background(CyberSurface, RoundedCornerShape(6.dp))
+                                            .border(1.dp, CyberBorder, RoundedCornerShape(6.dp))
                                             .clickable {
                                                 selectedFile = file
                                                 isDecrypting = true
                                                 scope.launch {
                                                     try {
                                                         val bmp = withContext(Dispatchers.IO) {
-                                                            GhostCryptoVault.decryptToBitmap(file)
+                                                            GhostCryptoVault.decryptToBitmap(context, file)
                                                         }
                                                         decryptedBitmap?.recycle()
                                                         decryptedBitmap = bmp
@@ -488,122 +489,130 @@ fun GhostVaultDialog(
                                                     }
                                                 }
                                             }
-                                            .padding(12.dp),
+                                            .padding(10.dp),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Column {
-                                            Text(
-                                                text = file.name,
-                                                color = Color.White,
-                                                fontFamily = FontFamily.Monospace,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                            Text(
-                                                text = "$dateStr | $sizeKb KB | AES-256-GCM",
-                                                color = CyberMuted,
-                                                fontFamily = FontFamily.Monospace,
-                                                fontSize = 10.sp
-                                            )
+                                            Text(file.name, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                                            Text("$dateStr | $sizeKb KB", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
                                         }
-
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = Icons.Default.Visibility,
-                                                contentDescription = "View",
-                                                tint = CyberGreen,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(12.dp))
-                                            IconButton(
-                                                onClick = {
-                                                    GhostCryptoVault.shredFile(file)
-                                                    refreshFiles()
-                                                    statusMessage = "FILE SHREDDED"
-                                                },
-                                                modifier = Modifier.size(24.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.DeleteForever,
-                                                    contentDescription = "Delete",
-                                                    tint = CyberRed
-                                                )
-                                            }
-                                        }
+                                        Icon(Icons.Default.Visibility, contentDescription = "View", tint = CyberGreen, modifier = Modifier.size(16.dp))
                                     }
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        // Emergency Crypto-Shredder Button
-                        if (vaultFiles.isNotEmpty()) {
-                            Button(
-                                onClick = { showWipeConfirm = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Warning,
-                                    contentDescription = "Crypto-Shred",
-                                    tint = Color.White
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    "CRYPTO-SHRED: DESTROY TEE KEY & VAULT",
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
-                                    fontSize = 12.sp
-                                )
-                            }
+                        // Crypto-shred button
+                        Button(
+                            onClick = { showWipeConfirm = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = "Crypto-Shred", tint = Color.White, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("CRYPTO-SHRED EVERYTHING", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 11.sp)
                         }
                     }
                 }
             }
 
-            // Crypto-Shred confirmation dialog
             if (showWipeConfirm) {
                 AlertDialog(
                     onDismissRequest = { showWipeConfirm = false },
-                    title = {
-                        Text(
-                            "CRYPTO-SHRED CONFIRMATION",
-                            color = CyberRed,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    text = {
-                        Text(
-                            "This will immediately destroy the AES-256 key inside the hardware TEE/KeyStore. All files become mathematically unrecoverable noise, immune to NAND wear-leveling forensics. Irreversible!",
-                            color = Color.White,
-                            fontSize = 13.sp
-                        )
-                    },
+                    title = { Text("CRYPTO-SHRED ALL KEYS", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
+                    text = { Text("Immediately destroys wrapped keys, salts, Keystore TEE keys, and shreds all files in both MAIN and DECOY vaults. Irreversible.", color = Color.White, fontSize = 12.sp) },
                     confirmButton = {
                         Button(
                             onClick = {
                                 val count = GhostCryptoVault.cryptoShred(context)
                                 showWipeConfirm = false
-                                statusMessage = "CRYPTO-SHRED COMPLETE: $count FILES DESTROYED"
+                                statusMessage = "SHREDDED $count FILES AND DESTROYED ALL KEYS"
                                 refreshFiles()
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
                         ) {
-                            Text("DESTROY KEY & ERASE", color = Color.White)
+                            Text("CONFIRM DESTRUCTION", color = Color.White)
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showWipeConfirm = false }) {
-                            Text("CANCEL", color = CyberMuted)
-                        }
+                        TextButton(onClick = { showWipeConfirm = false }) { Text("CANCEL", color = CyberMuted) }
                     },
                     containerColor = CyberSurface
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PinDotsRow(count: Int, max: Int) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(max) { idx ->
+            val filled = idx < count
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (filled) CyberGreen else CyberBorder)
+                    .border(1.dp, if (filled) CyberGreen else CyberMuted, RoundedCornerShape(6.dp))
+            )
+        }
+    }
+}
+
+/**
+ * On-screen isolated keypad:
+ * Prevents clipboard leaks, ignores system autofill, operates strictly with Char events.
+ */
+@Composable
+private fun SecureKeypad(
+    onKeyPressed: (Char) -> Unit,
+    onClear: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val layout = listOf(
+        listOf('1', '2', '3'),
+        listOf('4', '5', '6'),
+        listOf('7', '8', '9'),
+        listOf('C', '0', 'V')
+    )
+
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        for (row in layout) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(vertical = 3.dp)
+            ) {
+                for (key in row) {
+                    Button(
+                        onClick = {
+                            when (key) {
+                                'C' -> onClear()
+                                'V' -> onConfirm()
+                                else -> onKeyPressed(key)
+                            }
+                        },
+                        modifier = Modifier.size(60.dp, 44.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = CyberBorder.copy(alpha = 0.7f)),
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text(
+                            text = if (key == 'C') "CLR" else if (key == 'V') "OK" else key.toString(),
+                            color = if (key == 'V') CyberGreen else if (key == 'C') CyberRed else Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
             }
         }
     }

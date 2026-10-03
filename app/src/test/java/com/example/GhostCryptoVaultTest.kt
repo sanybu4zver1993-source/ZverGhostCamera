@@ -65,4 +65,37 @@ class GhostCryptoVaultTest {
         val decrypted = decryptCipher.doFinal(encryptedBytes)
         assertEquals("STREAMING_EXIF_PURGE_TEST_PAYLOAD", String(decrypted, Charsets.UTF_8))
     }
+
+    @Test
+    fun testPbkdf2KeyDerivationAndWrapping() {
+        val pin = charArrayOf('4', '8', '1', '5', '1', '6')
+        val salt = ByteArray(16)
+        SecureRandom().nextBytes(salt)
+
+        val spec = javax.crypto.spec.PBEKeySpec(pin, salt, 100_000, 256)
+        val factory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val kekBytes = factory.generateSecret(spec).encoded
+        spec.clearPassword()
+        val kek = javax.crypto.spec.SecretKeySpec(kekBytes, "AES")
+
+        // Vault master key
+        val keyGen = KeyGenerator.getInstance("AES")
+        keyGen.init(256)
+        val vaultKey = keyGen.generateKey()
+
+        // Wrap
+        val iv = ByteArray(12)
+        SecureRandom().nextBytes(iv)
+        val wrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
+        wrapCipher.init(Cipher.WRAP_MODE, kek, GCMParameterSpec(128, iv))
+        val wrappedKey = wrapCipher.wrap(vaultKey)
+
+        // Unwrap
+        val unwrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
+        unwrapCipher.init(Cipher.UNWRAP_MODE, kek, GCMParameterSpec(128, iv))
+        val unwrappedKey = unwrapCipher.unwrap(wrappedKey, "AES", Cipher.SECRET_KEY)
+
+        assertEquals(vaultKey.algorithm, unwrappedKey.algorithm)
+        assertEquals(vaultKey.encoded.size, unwrappedKey.encoded.size)
+    }
 }
