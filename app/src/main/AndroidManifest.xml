@@ -30,13 +30,63 @@
             android:exported="true"
             android:label="@string/app_name"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:theme="@style/Theme.MyApplication">
+            android:theme="@style/Theme.MyApplication" />
+
+        <!-- Activity Alias 1: Zver Camera (Default) -->
+        <activity-alias
+            android:name=".MainActivityDefault"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher_round"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <!-- Activity Alias 2: Calculator Camouflage -->
+        <activity-alias
+            android:name=".MainActivityCalculator"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@drawable/ic_calc_launcher"
+            android:roundIcon="@drawable/ic_calc_launcher"
+            android:label="@string/app_name_calc"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Activity Alias 3: System Tools Camouflage -->
+        <activity-alias
+            android:name=".MainActivitySystem"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@drawable/ic_system_launcher"
+            android:roundIcon="@drawable/ic_system_launcher"
+            android:label="@string/app_name_system"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Secure Ephemeral FileProvider -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <receiver
             android:name=".panic.PanicTriggerReceiver"

@@ -1,6 +1,6 @@
 {
-  "name": "Ghost Suite",
-  "description": "Zero-telemetry privacy suite and secure modular tools hub for Android",
+  "name": "Zver Camera",
+  "description": "Zero-telemetry air-gapped cryptographic camera and hardware TEE vault for Android",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

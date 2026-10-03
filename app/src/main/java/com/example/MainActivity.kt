@@ -37,6 +37,12 @@ private val CyberMuted = Color(0xFF8A9BA8)
 private val CyberBorder = Color(0xFF223240)
 
 class MainActivity : ComponentActivity() {
+    override fun onResume() {
+        super.onResume()
+        // Immediately shred any ephemeral shared files from cacheDir
+        com.example.crypto.GhostCryptoVault.shredEphemeralShareFiles(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Strictly internal cache directory. External storage is completely excluded. -->
+    <cache-path name="ephemeral_share" path="ephemeral_shared/" />
+</paths>

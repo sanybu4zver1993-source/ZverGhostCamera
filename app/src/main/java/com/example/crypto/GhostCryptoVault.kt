@@ -31,7 +31,7 @@ object GhostCryptoVault {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val AES_GCM = "AES/GCM/NoPadding"
     private const val PBKDF2_ALGO = "PBKDF2WithHmacSHA256"
-    private const val PBKDF2_ITERATIONS = 100_000
+    private const val PBKDF2_ITERATIONS = 600_000
     private const val GCM_IV_LEN = 12
     private const val GCM_TAG_LEN = 128
     private const val SALT_LEN = 16
@@ -427,5 +427,39 @@ object GhostCryptoVault {
         activeMainKey = null
         activeDecoyKey = null
         activeProfile = VaultProfile.MAIN
+    }
+
+    /**
+     * Decrypts a file strictly to internal cacheDir for temporary sharing via FileProvider.
+     * External storage is never used.
+     */
+    fun createEphemeralShareFile(context: Context, sourceFile: File): File {
+        val shareDir = File(context.cacheDir, "ephemeral_shared")
+        if (!shareDir.exists()) shareDir.mkdirs()
+        val tmpFile = File(shareDir, "share_${UUID.randomUUID().toString().take(8)}.jpg")
+        val decryptedBytes = decryptToRam(context, sourceFile)
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(decryptedBytes)
+                fos.fd.sync()
+            }
+            return tmpFile
+        } finally {
+            Arrays.fill(decryptedBytes, 0.toByte())
+        }
+    }
+
+    /**
+     * Immediately zero-overwrites and shreds all temporary share files in cacheDir.
+     */
+    fun shredEphemeralShareFiles(context: Context): Int {
+        val shareDir = File(context.cacheDir, "ephemeral_shared")
+        if (!shareDir.exists()) return 0
+        val files = shareDir.listFiles() ?: return 0
+        var count = 0
+        for (f in files) {
+            if (shredFile(f)) count++
+        }
+        return count
     }
 }

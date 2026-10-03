@@ -363,24 +363,59 @@ fun GhostVaultDialog(
                                         }
                                         .padding(4.dp)
                                 )
-                                Button(
-                                    onClick = {
-                                        selectedFile?.let { f ->
-                                            GhostCryptoVault.shredFile(f)
-                                            decryptedBitmap?.recycle()
-                                            decryptedBitmap = null
-                                            selectedFile = null
-                                            statusMessage = "FILE SHREDDED"
-                                            refreshFiles()
-                                        }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
-                                    shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                                ) {
-                                    Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("SHRED", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Button(
+                                        onClick = {
+                                            selectedFile?.let { f ->
+                                                try {
+                                                    val shareTmp = GhostCryptoVault.createEphemeralShareFile(context, f)
+                                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                                        context,
+                                                        "${context.packageName}.fileprovider",
+                                                        shareTmp
+                                                    )
+                                                    val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                        type = "image/jpeg"
+                                                        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                    }
+                                                    context.startActivity(android.content.Intent.createChooser(shareIntent, "Ephemeral Share"))
+                                                    statusMessage = "EPHEMERAL SHARE: WIPES ON RETURN"
+                                                } catch (e: Exception) {
+                                                    statusMessage = "SHARE ERR: ${e.message}"
+                                                }
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberBorder),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Icon(Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(14.dp), tint = CyberGreen)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("SHARE", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    Button(
+                                        onClick = {
+                                            selectedFile?.let { f ->
+                                                GhostCryptoVault.shredFile(f)
+                                                decryptedBitmap?.recycle()
+                                                decryptedBitmap = null
+                                                selectedFile = null
+                                                statusMessage = "FILE SHREDDED"
+                                                refreshFiles()
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                                    ) {
+                                        Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("SHRED", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
+                                    }
                                 }
                             }
 

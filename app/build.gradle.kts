@@ -136,8 +136,8 @@ dependencies {
   "ksp"(libs.moshi.kotlin.codegen)
 }
 
-// Reproducible builds: Deterministic archive ordering and stripped timestamps
-tasks.withType<org.gradle.jvm.tasks.Jar>().configureEach {
+// Reproducible builds: Deterministic archive ordering and stripped timestamps for all archive tasks
+tasks.withType<org.gradle.api.tasks.bundling.AbstractArchiveTask>().configureEach {
   isReproducibleFileOrder = true
   isPreserveFileTimestamps = false
 }
