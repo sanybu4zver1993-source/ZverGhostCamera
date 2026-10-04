@@ -70,6 +70,22 @@ class MainActivity : ComponentActivity() {
         com.example.crypto.GhostCryptoVault.shredEphemeralShareFiles(this)
     }
 
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        handleCustomUri(intent)
+    }
+
+    private fun handleCustomUri(intent: android.content.Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme == "zver") {
+            when (uri.host) {
+                "capture" -> onVolumeShutterTrigger?.invoke()
+                "torch" -> onTorchToggleTrigger?.invoke()
+                "stealth" -> onBlackoutToggleTrigger?.invoke()
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         try {
@@ -95,6 +111,8 @@ class MainActivity : ComponentActivity() {
 
         // Block screenshots, screen recording, and task switcher thumbnail leaks
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+
+        handleCustomUri(intent)
 
         enableEdgeToEdge()
 

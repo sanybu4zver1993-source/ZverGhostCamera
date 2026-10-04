@@ -319,54 +319,96 @@ fun GhostSettingsDialog(
                         SettingsTab.TERMUX_AUTOMATION -> {
                             Text("СИМБИОЗ: TERMUX, SHIZUKU И MACRODROID", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "Камера слушает широковещательные интенты Android (Broadcast) с флагом EXPORTED. Это позволяет запускать съемку, фонарик и стелс из Termux (даже через shizuku shell rish) или по любым триггерам MacroDroid:",
+                                "Прямая связь на уровне системы Android. Zver Camera слушает широковещательные интенты и прямой протокол zver://",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
-                                modifier = Modifier.padding(vertical = 6.dp)
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+
+                            // Live App Ecosystem Detection
+                            val isTermuxInstalled = remember {
+                                try { context.packageManager.getPackageInfo("com.termux", 0); true } catch (_: Exception) { false }
+                            }
+                            val isTermuxApiInstalled = remember {
+                                try { context.packageManager.getPackageInfo("com.termux.api", 0); true } catch (_: Exception) { false }
+                            }
+                            val isShizukuInstalled = remember {
+                                try { context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0); true } catch (_: Exception) { false }
+                            }
+                            val isMacroDroidInstalled = remember {
+                                try { context.packageManager.getPackageInfo("com.arlosoft.macrodroid", 0); true } catch (_: Exception) { false }
+                            }
+
+                            Text("СТАТУС ПОДКЛЮЧЕНИЯ В СИСТЕМЕ:", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                AppBadge("Termux", isTermuxInstalled) {
+                                    val intent = context.packageManager.getLaunchIntentForPackage("com.termux")
+                                    if (intent != null) context.startActivity(intent)
+                                }
+                                AppBadge("Termux:API", isTermuxApiInstalled) {
+                                    val intent = context.packageManager.getLaunchIntentForPackage("com.termux.api")
+                                    if (intent != null) context.startActivity(intent)
+                                }
+                                AppBadge("Shizuku", isShizukuInstalled) {
+                                    val intent = context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                                    if (intent != null) context.startActivity(intent)
+                                }
+                                AppBadge("MacroDroid", isMacroDroidInstalled) {
+                                    val intent = context.packageManager.getLaunchIntentForPackage("com.arlosoft.macrodroid")
+                                    if (intent != null) context.startActivity(intent)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            Text("БЫСТРЫЙ ВЫЗОВ (DEEP-LINK URI):", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                            AutomationCommandCard(
+                                label = "Прямой запуск из Termux (одной строкой):",
+                                cmd = "am start -d zver://capture",
+                                onCopy = {
+                                    clipboardManager.setText(AnnotatedString("am start -d zver://capture"))
+                                    onStatusMessage("СКОПИРОВАНО: am start -d zver://capture")
+                                }
                             )
 
                             AutomationCommandCard(
-                                label = "1. Сделать снимок в сейф (Termux / MacroDroid):",
+                                label = "Широковещательный интент (MacroDroid / Termux):",
                                 cmd = "am broadcast -a com.example.camera.TRIGGER_CAPTURE",
                                 onCopy = {
                                     clipboardManager.setText(AnnotatedString("am broadcast -a com.example.camera.TRIGGER_CAPTURE"))
-                                    onStatusMessage("КОМАНДА СКОПИРОВАНА В БУФЕР")
+                                    onStatusMessage("СКОПИРОВАН INTENT")
                                 }
                             )
 
                             AutomationCommandCard(
-                                label = "2. Переключить тактический фонарик:",
+                                label = "Переключение фонарика из скрипта:",
                                 cmd = "am broadcast -a com.example.camera.TOGGLE_TORCH",
                                 onCopy = {
                                     clipboardManager.setText(AnnotatedString("am broadcast -a com.example.camera.TOGGLE_TORCH"))
-                                    onStatusMessage("КОМАНДА СКОПИРОВАНА В БУФЕР")
-                                }
-                            )
-
-                            AutomationCommandCard(
-                                label = "3. Включить/выключить стелс-экран:",
-                                cmd = "am broadcast -a com.example.camera.TOGGLE_BLACKOUT",
-                                onCopy = {
-                                    clipboardManager.setText(AnnotatedString("am broadcast -a com.example.camera.TOGGLE_BLACKOUT"))
-                                    onStatusMessage("КОМАНДА СКОПИРОВАНА В БУФЕР")
-                                }
-                            )
-
-                            AutomationCommandCard(
-                                label = "4. Вызов из Shizuku (rish shell в Termux):",
-                                cmd = "rish -c 'am broadcast -a com.example.camera.TRIGGER_CAPTURE'",
-                                onCopy = {
-                                    clipboardManager.setText(AnnotatedString("rish -c 'am broadcast -a com.example.camera.TRIGGER_CAPTURE'"))
-                                    onStatusMessage("КОМАНДА RISH СКОПИРОВАНА")
+                                    onStatusMessage("СКОПИРОВАН INTENT ФОНАРИКА")
                                 }
                             )
 
                             Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                "💡 В MacroDroid: Создай действие «Отправить Intent» (Send Intent) -> Действие: com.example.camera.TRIGGER_CAPTURE -> Цель: Broadcast.",
-                                color = NeonYellow,
-                                fontSize = 10.sp
-                            )
+
+                            // Test Impulse Button
+                            Button(
+                                onClick = {
+                                    val testIntent = android.content.Intent("com.example.camera.TRIGGER_CAPTURE")
+                                    context.sendBroadcast(testIntent)
+                                    onStatusMessage("⚡ ТЕСТОВЫЙ ИМПУЛЬС ОТПРАВЛЕН В КАМЕРУ!")
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Default.Bolt, contentDescription = "Тест", tint = Color.White, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("ОТПРАВИТЬ ТЕСТОВЫЙ ИМПУЛЬС (СДЕЛАТЬ КАДР)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -426,3 +468,26 @@ private fun AutomationCommandCard(label: String, cmd: String, onCopy: () -> Unit
         }
     }
 }
+
+@Composable
+private fun AppBadge(name: String, isInstalled: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (isInstalled) CyberGreen.copy(alpha = 0.15f) else CyberSurface)
+            .border(1.dp, if (isInstalled) CyberGreen.copy(alpha = 0.5f) else CyberBorder, RoundedCornerShape(6.dp))
+            .clickable(enabled = isInstalled, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(androidx.compose.foundation.shape.CircleShape)
+                .background(if (isInstalled) CyberGreen else CyberRed)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(name, color = if (isInstalled) Color.White else CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+    }
+}
+

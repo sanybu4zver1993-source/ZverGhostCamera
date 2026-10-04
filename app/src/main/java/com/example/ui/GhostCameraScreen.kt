@@ -922,25 +922,32 @@ fun GhostCameraScreen() {
                     }
                 }
 
-                // EV Steps
+                // EV Steps (Exposure: Brightness control)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(-1, 0, 1).forEach { ev ->
-                        val evLabel = when {
-                            ev == 0 -> "EV 0"
-                            ev > 0 -> "EV +$ev"
-                            else -> "EV $ev"
+                        val evLabel = when (ev) {
+                            0 -> "АВТО"
+                            1 -> "+СВЕТ"
+                            else -> "-ТЕНЬ"
                         }
                         Text(
                             text = evLabel,
                             color = if (exposureIndex == ev) CyberGreen else CyberMuted,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(if (exposureIndex == ev) CyberGreen.copy(alpha = 0.35f) else CyberBlack.copy(alpha = 0.45f))
                                 .border(1.dp, if (exposureIndex == ev) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
-                                .clickable { exposureIndex = ev }
+                                .clickable {
+                                    exposureIndex = ev
+                                    lastStatusMessage = when (ev) {
+                                        1 -> "ЯРКОСТЬ: +1 (СВЕТ В ТЕМНОТЕ)"
+                                        -1 -> "ЯРКОСТЬ: -1 (ЗАТЕМНЕНИЕ БЛИКОВ)"
+                                        else -> "ЯРКОСТЬ: АВТО"
+                                    }
+                                }
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                         )
                     }
