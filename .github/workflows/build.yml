@@ -30,8 +30,14 @@ jobs:
           touch .env
           touch .env.example
           if [ -f "debug.keystore.base64" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+            base64 -d debug.keystore.base64 > debug.keystore || base64 --decode debug.keystore.base64 > debug.keystore || true
           fi
+          if [ ! -s "debug.keystore" ]; then
+            echo "Keystore not found or empty, generating debug.keystore with keytool..."
+            keytool -genkeypair -alias androiddebugkey -keypass android -keystore debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
+          fi
+          cp -f debug.keystore app/debug.keystore || true
+          ls -lh debug.keystore
           if [ -f "./gradlew" ]; then
             chmod +x gradlew
           fi
