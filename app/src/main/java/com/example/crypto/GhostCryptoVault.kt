@@ -297,6 +297,24 @@ object GhostCryptoVault {
     }
 
     /**
+     * Streams and encrypts any raw file (e.g. video MP4 from cache) into the vault,
+     * then immediately shreds the source file with random bytes.
+     */
+    fun encryptFileToVault(context: Context, sourceFile: File): File {
+        val (targetFile, cipherOut) = openEncryptedOutputStream(context)
+        try {
+            FileInputStream(sourceFile).use { input ->
+                input.copyTo(cipherOut)
+            }
+            cipherOut.flush()
+        } finally {
+            try { cipherOut.close() } catch (_: Exception) {}
+            shredFile(sourceFile)
+        }
+        return targetFile
+    }
+
+    /**
      * Decrypts a .gcf file on-the-fly into RAM. Returns raw decrypted JPEG bytes.
      */
     fun decryptToRam(context: Context, file: File): ByteArray {

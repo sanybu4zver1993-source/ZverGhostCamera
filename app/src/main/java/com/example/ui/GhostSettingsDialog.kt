@@ -47,7 +47,8 @@ enum class SettingsTab(val titleRu: String) {
 @Composable
 fun GhostSettingsDialog(
     onDismiss: () -> Unit,
-    onStatusMessage: (String) -> Unit
+    onStatusMessage: (String) -> Unit,
+    onSelectMode: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -291,28 +292,67 @@ fun GhostSettingsDialog(
                             Spacer(modifier = Modifier.height(10.dp))
 
                             ModeExplanationCard(
-                                title = "☀️ ДНЕВНОЙ РЕЖИМ (ПО УМОЛЧАНИЮ)",
-                                desc = "Основная матрица 50МП работает на полной детализации. Фокусировка мгновенная, стабилизация гироскопа и антисмаз включены."
+                                title = "☀️ ФОТО (ОСНОВНОЙ РЕЖИМ)",
+                                desc = "Основная матрица 50МП работает на полной детализации. Фокусировка мгновенная, стабилизация гироскопа и антисмаз включены.",
+                                modeKey = "PHOTO",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
+                            )
+                            ModeExplanationCard(
+                                title = "🎥 ВИДЕОСЪЁМКА (СЕЙФ)",
+                                desc = "Запись защищённого видео со звуком. После остановки файл сразу шифруется в сейф по стандарту AES-256 с очисткой кэша.",
+                                modeKey = "VIDEO",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
                             )
                             ModeExplanationCard(
                                 title = "🌙 НОЧНОЙ РЕЖИМ (СВЕТОСИЛА)",
-                                desc = "Выдержка и экспозиция увеличиваются на +1 EV. Затвор делает снимок только в момент полного замирания рук (гироскоп < 0.05 рад/с), чтобы кадр не размазался."
+                                desc = "Выдержка и экспозиция увеличиваются на +1. Затвор делает снимок только в момент полного замирания рук, чтобы кадр не размазался.",
+                                modeKey = "NIGHT",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
                             )
                             ModeExplanationCard(
                                 title = "📄 ДОКУМЕНТЫ (ЛАЗЕРНЫЙ УРОВЕНЬ)",
-                                desc = "Включает прицел параллельности. Когда телефон лежит строго параллельно столу, круг загорается зелёным. Текст получается без трапеций и искажений."
+                                desc = "Включает прицел параллельности. Когда телефон лежит строго параллельно столу, круг загорается зелёным. Текст получается без трапеций и искажений.",
+                                modeKey = "DOCUMENTS",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
                             )
                             ModeExplanationCard(
                                 title = "🔍 МАКРО (УЛИКИ И МЕЛКИЙ ТЕКСТ)",
-                                desc = "Минимальная дистанция оптики Redmi 13C — от 10 см. Включай зум 2x для фиксации номеров, пломб, замков и печатей."
+                                desc = "Оптика Redmi 13C фокусируется от 10 см. Включает зум для фиксации номеров, пломб, замков и печатей.",
+                                modeKey = "MACRO",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
                             )
                             ModeExplanationCard(
                                 title = "🎙️ ГОЛОСОВОЙ РЕЖИМ (БЕЗ РУК)",
-                                desc = "Командуй голосом: скажи «Снять» или «Фотка», «Приблизить», «Сброс», «Фонарик». Работает без интернета через локальный микрофон!"
+                                desc = "Командуй голосом: скажи «Снять», «Приблизь к лицу», «Сброс», «Фонарик». Работает без интернета через локальный микрофон!",
+                                modeKey = "VOICE",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
                             )
                             ModeExplanationCard(
                                 title = "🕶️ СТЕЛС / FODCam (БЕЗ ПАЛЕВА)",
-                                desc = "Яркость экрана падает в 0%. Можно включить фон часов (как на заблокированном телефоне) или браузера. Снимок делается по кнопкам громкости или тапу!"
+                                desc = "Яркость экрана падает в 0%. Можно включить фон часов (как на заблокированном телефоне) или браузера. Снимок делается по кнопкам громкости или тапу!",
+                                modeKey = "STEALTH",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
                             )
                         }
 
@@ -429,7 +469,12 @@ fun GhostSettingsDialog(
 }
 
 @Composable
-private fun ModeExplanationCard(title: String, desc: String) {
+private fun ModeExplanationCard(
+    title: String,
+    desc: String,
+    modeKey: String? = null,
+    onSelectMode: ((String) -> Unit)? = null
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -438,9 +483,26 @@ private fun ModeExplanationCard(title: String, desc: String) {
             .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
             .padding(10.dp)
     ) {
-        Text(title, color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-        Spacer(modifier = Modifier.height(3.dp))
-        Text(desc, color = Color.White, fontSize = 11.sp, lineHeight = 15.sp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            if (modeKey != null && onSelectMode != null) {
+                Button(
+                    onClick = { onSelectMode(modeKey) },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(26.dp)
+                ) {
+                    Text("ВКЛЮЧИТЬ", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(desc, color = Color.White, fontSize = 10.sp, lineHeight = 14.sp)
     }
 }
 

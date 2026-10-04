@@ -108,6 +108,25 @@ fun GhostCameraScreen() {
     var showSettingsDialog by remember { mutableStateOf(false) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
 
+    // MIUI-style Camera Mode Carousel
+    var selectedCameraMode by remember { mutableStateOf("PHOTO") }
+
+    // Video Recording States
+    var videoCapture by remember { mutableStateOf<androidx.camera.video.VideoCapture<androidx.camera.video.Recorder>?>(null) }
+    var activeRecording by remember { mutableStateOf<androidx.camera.video.Recording?>(null) }
+    var isRecordingVideo by remember { mutableStateOf(false) }
+    var recordingDurationSeconds by remember { mutableStateOf(0) }
+
+    LaunchedEffect(isRecordingVideo) {
+        if (isRecordingVideo) {
+            recordingDurationSeconds = 0
+            while (isRecordingVideo) {
+                delay(1000)
+                recordingDurationSeconds++
+            }
+        }
+    }
+
     val securityStatus = remember { AntiForensicsGuard.assessDeviceSecurity(context) }
     var currentProfile by remember { mutableStateOf(GhostCryptoVault.activeProfile) }
     var currentCamouflage by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
@@ -317,10 +336,82 @@ fun GhostCameraScreen() {
         }
     }
 
+    fun triggerVideoRecordingToggle() {
+        val vCap = videoCapture
+        if (vCap == null) {
+            lastStatusMessage = "ИНИЦИАЛИЗАЦИЯ ВИДЕО..."
+            return
+        }
+
+        if (isRecordingVideo) {
+            try {
+                activeRecording?.stop()
+                activeRecording = null
+                isRecordingVideo = false
+                triggerHapticFeedback(isStealthBlackoutActive)
+                lastStatusMessage = "⏳ ШИФРОВАНИЕ ВИДЕО В СЕЙФ..."
+            } catch (e: Exception) {
+                lastStatusMessage = "СБОЙ ОСТАНОВКИ: ${e.message}"
+            }
+        } else {
+            val tempVideoFile = java.io.File(context.cacheDir, "raw_video_${System.currentTimeMillis()}.mp4")
+            val outputOptions = androidx.camera.video.FileOutputOptions.Builder(tempVideoFile).build()
+
+            try {
+                val pendingRec = vCap.output.prepareRecording(context, outputOptions)
+                if (androidx.core.content.ContextCompat.checkSelfPermission(
+                        context,
+                        android.Manifest.permission.RECORD_AUDIO
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    pendingRec.withAudioEnabled()
+                }
+
+                val rec = pendingRec.start(androidx.core.content.ContextCompat.getMainExecutor(context)) { event ->
+                    when (event) {
+                        is androidx.camera.video.VideoRecordEvent.Start -> {
+                            isRecordingVideo = true
+                            recordingDurationSeconds = 0
+                            triggerHapticFeedback(isStealthBlackoutActive)
+                            lastStatusMessage = "🔴 ИДЁТ ЗАПИСЬ ВИДЕО..."
+                        }
+                        is androidx.camera.video.VideoRecordEvent.Finalize -> {
+                            isRecordingVideo = false
+                            if (!event.hasError()) {
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        GhostCryptoVault.encryptFileToVault(context, tempVideoFile)
+                                        vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                                        withContext(Dispatchers.Main) {
+                                            lastStatusMessage = "🎥 ВИДЕО ЗАШИФРОВАНО В СЕЙФ! [#$vaultCount]"
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            lastStatusMessage = "ОШИБКА ШИФРОВАНИЯ: ${e.message}"
+                                        }
+                                    }
+                                }
+                            } else {
+                                tempVideoFile.delete()
+                                lastStatusMessage = "ОШИБКА: ${event.cause?.message ?: "Сбой"}"
+                            }
+                        }
+                    }
+                }
+                activeRecording = rec
+            } catch (e: Exception) {
+                lastStatusMessage = "ОШИБКА СТАРТА: ${e.message}"
+            }
+        }
+    }
+
     // Wire hardware volume keys and external Termux / MacroDroid Broadcast triggers
     LaunchedEffect(Unit) {
         MainActivity.onVolumeShutterTrigger = {
-            triggerPhotoCapture()
+            if (selectedCameraMode == "VIDEO") triggerVideoRecordingToggle() else triggerPhotoCapture()
+        }
+        MainActivity.onVideoToggleTrigger = {
+            triggerVideoRecordingToggle()
         }
         MainActivity.onTorchToggleTrigger = {
             isTorchActive = !isTorchActive
@@ -328,6 +419,11 @@ fun GhostCameraScreen() {
         MainActivity.onBlackoutToggleTrigger = {
             isStealthBlackoutActive = !isStealthBlackoutActive
         }
+    }
+
+    // Dynamic zoom ratio controller
+    LaunchedEffect(zoomRatio) {
+        try { cameraControl?.setZoomRatio(zoomRatio) } catch (_: Exception) {}
     }
 
     val voiceControlManager = remember {
@@ -349,6 +445,7 @@ fun GhostCameraScreen() {
                     com.example.camera.VoiceControlManager.VoiceCommand.TIMER_OFF -> timerSeconds = 0
                     com.example.camera.VoiceControlManager.VoiceCommand.TOGGLE_STEALTH -> isStealthBlackoutActive = !isStealthBlackoutActive
                     com.example.camera.VoiceControlManager.VoiceCommand.OPEN_VAULT -> showVaultDialog = true
+                    com.example.camera.VoiceControlManager.VoiceCommand.TOGGLE_VIDEO -> triggerVideoRecordingToggle()
                     com.example.camera.VoiceControlManager.VoiceCommand.FLIP_CAMERA -> {
                         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
                             CameraSelector.LENS_FACING_FRONT
@@ -431,6 +528,11 @@ fun GhostCameraScreen() {
             .requireLensFacing(lensFacing)
             .build()
 
+        val recorder = androidx.camera.video.Recorder.Builder()
+            .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD))
+            .build()
+        val vCapture = androidx.camera.video.VideoCapture.withOutput(recorder)
+
         try {
             cameraProvider.unbindAll()
             val camera = cameraProvider.bindToLifecycle(
@@ -438,16 +540,52 @@ fun GhostCameraScreen() {
                 cameraSelector,
                 preview,
                 capture,
-                imageAnalysis
+                imageAnalysis,
+                vCapture
             )
             cameraControl = camera.cameraControl
             imageCapture = capture
+            videoCapture = vCapture
 
             previewView?.let { pv ->
                 preview.setSurfaceProvider(pv.surfaceProvider)
             }
-        } catch (e: Exception) {
-            lastStatusMessage = "Ошибка камеры: ${e.localizedMessage}"
+        } catch (_: Exception) {
+            try {
+                cameraProvider.unbindAll()
+                val camera = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    preview,
+                    capture,
+                    vCapture
+                )
+                cameraControl = camera.cameraControl
+                imageCapture = capture
+                videoCapture = vCapture
+
+                previewView?.let { pv ->
+                    preview.setSurfaceProvider(pv.surfaceProvider)
+                }
+            } catch (_: Exception) {
+                try {
+                    cameraProvider.unbindAll()
+                    val camera = cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        capture
+                    )
+                    cameraControl = camera.cameraControl
+                    imageCapture = capture
+
+                    previewView?.let { pv ->
+                        preview.setSurfaceProvider(pv.surfaceProvider)
+                    }
+                } catch (e: Exception) {
+                    lastStatusMessage = "Ошибка камеры: ${e.localizedMessage}"
+                }
+            }
         }
     }
 
@@ -848,7 +986,7 @@ fun GhostCameraScreen() {
 
         // Notification Banner: Prominent clear status badge
         AnimatedVisibility(
-            visible = isCapturing || lastStatusMessage != null,
+            visible = isCapturing || lastStatusMessage != null || isRecordingVideo,
             enter = fadeIn() + slideInVertically(),
             exit = fadeOut() + slideOutVertically(),
             modifier = Modifier
@@ -859,11 +997,29 @@ fun GhostCameraScreen() {
                 modifier = Modifier
                     .clip(RoundedCornerShape(16.dp))
                     .background(CyberBlack.copy(alpha = 0.85f))
-                    .border(1.5.dp, if (isCapturing) CyberGreen else CyberGreenDark, RoundedCornerShape(16.dp))
+                    .border(1.5.dp, if (isRecordingVideo) CyberRed else if (isCapturing) CyberGreen else CyberGreenDark, RoundedCornerShape(16.dp))
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isCapturing) {
+                    if (isRecordingVideo) {
+                        val m = recordingDurationSeconds / 60
+                        val s = recordingDurationSeconds % 60
+                        val timerStr = String.format(java.util.Locale.ROOT, "%02d:%02d", m, s)
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .background(CyberRed)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "🔴 ЗАПИСЬ ВИДЕО В СЕЙФ: $timerStr",
+                            color = CyberRed,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    } else if (isCapturing) {
                         CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
@@ -903,21 +1059,24 @@ fun GhostCameraScreen() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Zoom toggles
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(1.0f, 2.0f, 3.0f).forEach { z ->
+                // Zoom toggles (1x, 2x, 4x, 6x, 10x as in stock camera!)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(1.0f, 2.0f, 4.0f, 6.0f, 10.0f).forEach { z ->
                         Text(
                             text = "${z.toInt()}x",
                             color = if (zoomRatio == z) CyberGreen else CyberMuted,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(if (zoomRatio == z) CyberGreen.copy(alpha = 0.35f) else CyberBlack.copy(alpha = 0.45f))
                                 .border(1.dp, if (zoomRatio == z) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
-                                .clickable { zoomRatio = z }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                .clickable {
+                                    zoomRatio = z
+                                    lastStatusMessage = "ЗУМ: ${z.toInt()}x"
+                                }
+                                .padding(horizontal = 7.dp, vertical = 4.dp)
                         )
                     }
                 }
@@ -954,7 +1113,75 @@ fun GhostCameraScreen() {
                 }
             }
 
-            // Primary Action Row: Vault, Shutter, Panic Shred
+            // Xiaomi / MIUI-style Mode Carousel with yellow active dot!
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf(
+                    "СТЕЛС" to "STEALTH",
+                    "ВИДЕО" to "VIDEO",
+                    "ФОТО" to "PHOTO",
+                    "НОЧЬ" to "NIGHT",
+                    "ДОКУМЕНТЫ" to "DOCUMENTS",
+                    "ГОЛОС" to "VOICE"
+                ).forEach { (title, key) ->
+                    val isSelected = selectedCameraMode == key
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clickable {
+                                selectedCameraMode = key
+                                when (key) {
+                                    "STEALTH" -> isStealthBlackoutActive = true
+                                    "PHOTO" -> {
+                                        exposureIndex = 0
+                                        isDocumentModeActive = false
+                                        isVoiceControlActive = false
+                                        lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
+                                    }
+                                    "VIDEO" -> {
+                                        lastStatusMessage = "РЕЖИМ: ВИДЕОСЪЁМКА В СЕЙФ"
+                                    }
+                                    "NIGHT" -> {
+                                        exposureIndex = 1
+                                        lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+                                    }
+                                    "DOCUMENTS" -> {
+                                        isDocumentModeActive = true
+                                        lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (ЛАЗЕРНЫЙ ПРИЦЕЛ)"
+                                    }
+                                    "VOICE" -> {
+                                        isVoiceControlActive = true
+                                        lastStatusMessage = "РЕЖИМ: ГОЛОСОВОЕ УПРАВЛЕНИЕ"
+                                    }
+                                }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = title,
+                            color = if (isSelected) Color.White else CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(4.dp)
+                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .background(if (isSelected) NeonYellow else Color.Transparent)
+                        )
+                    }
+                }
+            }
+
+            // Primary Action Row: Vault, Photo/Video Shutters, Panic Shred
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -983,12 +1210,67 @@ fun GhostCameraScreen() {
                     )
                 }
 
-                // Tactile Shutter Button
-                ShutterButton(
-                    isCapturing = isCapturing || countdownRemaining != null,
-                    isAssistMode = isAssistModeActive,
-                    onClick = { triggerPhotoCapture() }
-                )
+                // Center Action: Dual Photo & Video Controls
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    if (selectedCameraMode == "VIDEO") {
+                        // Large Red Video Record Button
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .border(3.dp, CyberRed, androidx.compose.foundation.shape.CircleShape)
+                                .clickable { triggerVideoRecordingToggle() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isRecordingVideo) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(CyberRed)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(54.dp)
+                                        .clip(androidx.compose.foundation.shape.CircleShape)
+                                        .background(CyberRed)
+                                )
+                            }
+                        }
+                    } else {
+                        // Standard Mode: White Photo Shutter + Dedicated Red Video button right next to it!
+                        ShutterButton(
+                            isCapturing = isCapturing || countdownRemaining != null,
+                            isAssistMode = isAssistModeActive,
+                            onClick = { triggerPhotoCapture() }
+                        )
+
+                        // Dedicated Red Video Button (Quick start recording!)
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .background(CyberRed.copy(alpha = 0.25f))
+                                .border(1.5.dp, CyberRed, androidx.compose.foundation.shape.CircleShape)
+                                .clickable {
+                                    selectedCameraMode = "VIDEO"
+                                    triggerVideoRecordingToggle()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Videocam,
+                                contentDescription = "Запись видео",
+                                tint = CyberRed,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                }
 
                 // Panic Shred Button
                 IconButton(
@@ -1064,7 +1346,36 @@ fun GhostCameraScreen() {
         if (showSettingsDialog) {
             GhostSettingsDialog(
                 onDismiss = { showSettingsDialog = false },
-                onStatusMessage = { msg -> lastStatusMessage = msg }
+                onStatusMessage = { msg -> lastStatusMessage = msg },
+                onSelectMode = { modeKey ->
+                    selectedCameraMode = modeKey
+                    when (modeKey) {
+                        "STEALTH" -> isStealthBlackoutActive = true
+                        "PHOTO" -> {
+                            exposureIndex = 0
+                            isDocumentModeActive = false
+                            isVoiceControlActive = false
+                            lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
+                        }
+                        "VIDEO" -> lastStatusMessage = "РЕЖИМ: ВИДЕОСЪЁМКА В СЕЙФ"
+                        "NIGHT" -> {
+                            exposureIndex = 1
+                            lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+                        }
+                        "DOCUMENTS" -> {
+                            isDocumentModeActive = true
+                            lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (ЛАЗЕРНЫЙ ПРИЦЕЛ)"
+                        }
+                        "MACRO" -> {
+                            zoomRatio = 2.0f
+                            lastStatusMessage = "РЕЖИМ: МАКРО (2x ЗУМ)"
+                        }
+                        "VOICE" -> {
+                            isVoiceControlActive = true
+                            lastStatusMessage = "РЕЖИМ: ГОЛОСОВОЕ УПРАВЛЕНИЕ"
+                        }
+                    }
+                }
             )
         }
 

@@ -35,7 +35,8 @@ class VoiceControlManager(
         TIMER_OFF,
         TOGGLE_STEALTH,
         OPEN_VAULT,
-        FLIP_CAMERA
+        FLIP_CAMERA,
+        TOGGLE_VIDEO
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -94,6 +95,11 @@ class VoiceControlManager(
         for (raw in matches) {
             val lower = raw.lowercase(Locale.ROOT)
             when {
+                // Видеосъемка (Запись, видео, начни видео, останови запись)
+                lower.contains("видео") || lower.contains("запись") || lower.contains("сними видео") || lower.contains("запиши") -> {
+                    onCommandRecognized(VoiceCommand.TOGGLE_VIDEO)
+                    return
+                }
                 // Съемка (Сделай снимок, сфоткай, фото, огонь)
                 lower.contains("снять") || lower.contains("снимок") || lower.contains("сфотк") || lower.contains("фотк") ||
                 lower.contains("фото") || lower.contains("огонь") || lower.contains("кадр") || lower.contains("чик") -> {

@@ -39,6 +39,7 @@ private val CyberBorder = Color(0xFF223240)
 class MainActivity : ComponentActivity() {
     companion object {
         var onVolumeShutterTrigger: (() -> Unit)? = null
+        var onVideoToggleTrigger: (() -> Unit)? = null
         var onTorchToggleTrigger: (() -> Unit)? = null
         var onBlackoutToggleTrigger: (() -> Unit)? = null
     }
@@ -47,6 +48,7 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
             when (intent?.action) {
                 "com.example.camera.TRIGGER_CAPTURE" -> onVolumeShutterTrigger?.invoke()
+                "com.example.camera.TOGGLE_VIDEO" -> onVideoToggleTrigger?.invoke()
                 "com.example.camera.TOGGLE_TORCH" -> onTorchToggleTrigger?.invoke()
                 "com.example.camera.TOGGLE_BLACKOUT" -> onBlackoutToggleTrigger?.invoke()
             }
@@ -80,6 +82,7 @@ class MainActivity : ComponentActivity() {
         if (uri.scheme == "zver") {
             when (uri.host) {
                 "capture" -> onVolumeShutterTrigger?.invoke()
+                "video" -> onVideoToggleTrigger?.invoke()
                 "torch" -> onTorchToggleTrigger?.invoke()
                 "stealth" -> onBlackoutToggleTrigger?.invoke()
             }
@@ -99,6 +102,7 @@ class MainActivity : ComponentActivity() {
         // Register external Broadcast receiver for Termux and MacroDroid automation
         val filter = android.content.IntentFilter().apply {
             addAction("com.example.camera.TRIGGER_CAPTURE")
+            addAction("com.example.camera.TOGGLE_VIDEO")
             addAction("com.example.camera.TOGGLE_TORCH")
             addAction("com.example.camera.TOGGLE_BLACKOUT")
         }
