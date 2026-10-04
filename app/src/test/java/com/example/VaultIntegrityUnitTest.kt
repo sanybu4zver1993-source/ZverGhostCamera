@@ -26,8 +26,9 @@ class VaultIntegrityUnitTest {
         val timestamp = 1727950000000L
         val zoneId = 1
         val sequence = 0
+        val padLen = 64
 
-        val aad = MonoVaultEngine.buildBlockAAD(offset, timestamp, zoneId, sequence)
+        val aad = MonoVaultEngine.buildBlockAAD(offset, timestamp, zoneId, sequence, padLen)
 
         val encryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
         encryptCipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
@@ -72,9 +73,10 @@ class VaultIntegrityUnitTest {
         val timestamp = 1727950000000L
         val zoneId = 0
         val sequence = 0
+        val padLen = 32
 
-        val originalAad = MonoVaultEngine.buildBlockAAD(originalOffset, timestamp, zoneId, sequence)
-        val replayedAad = MonoVaultEngine.buildBlockAAD(movedOffset, timestamp, zoneId, sequence)
+        val originalAad = MonoVaultEngine.buildBlockAAD(originalOffset, timestamp, zoneId, sequence, padLen)
+        val replayedAad = MonoVaultEngine.buildBlockAAD(movedOffset, timestamp, zoneId, sequence, padLen)
 
         val encryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
         encryptCipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))

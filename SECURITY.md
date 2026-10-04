@@ -4,6 +4,7 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 4.1.x   | :white_check_mark: |
 | 4.0.x   | :white_check_mark: |
 | < 4.0   | :x:                |
 
@@ -13,6 +14,7 @@ ZVER CAMERA is an operational security camera application. The security assumpti
 1. Android OS integrity (Non-rooted, unmodified SELinux enforcing kernel).
 2. Hardware-backed KeyStore (TEE / StrongBox) for key isolation.
 3. Plausible deniability via symmetric uniform-entropy container formatting.
+4. Cryptographic erasure as the primary defense against flash memory FTL wear-leveling remanence.
 
 ## Reporting a Vulnerability
 

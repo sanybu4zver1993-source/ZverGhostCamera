@@ -503,7 +503,7 @@ fun GhostCameraScreen() {
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "ZVER CAMERA v4.0 🐾",
+                            text = "ZVER CAMERA v4.1 🐾",
                             color = if (isAssistModeActive) CyberRed else CyberGreen,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -825,7 +825,7 @@ fun GhostCameraScreen() {
                 IconButton(
                     onClick = { showPanicConfirm = true },
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(CyberRed.copy(alpha = 0.2f))
                         .border(1.dp, CyberRed.copy(alpha = 0.6f), RoundedCornerShape(12.dp))

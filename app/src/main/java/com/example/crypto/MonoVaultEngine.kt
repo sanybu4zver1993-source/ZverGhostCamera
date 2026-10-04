@@ -19,15 +19,15 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * MonoVaultEngine v4.0 (Military-Grade VeraCrypt Monolith):
+ * MonoVaultEngine v4.1 (VeraCrypt Monolith with Stochastic Padding):
  * - ZERO open plaintext magic bytes ("VMON" / "GCF1" eradicated).
- * - Uniform cryptographic white noise layout across 1024 MB volume.
- * - HKDF (RFC 5869) independent subkey derivation for Master and Decoy zones.
+ * - 1024 MB TrueCrypt/VeraCrypt uniform noise partition layout.
+ * - Stochastic Padding (0..511 bytes CSPRNG noise) per record to prevent differential side-channel analysis.
  * - Block Replay Protection: AES-256-GCM with Additional Authenticated Data (AAD)
- *   binding [fileOffset, timestamp, zoneId, sequenceIndex]. Swapping or replaying
- *   blocks immediately causes AEADBadTagException.
+ *   binding [fileOffset, timestamp, zoneId, sequenceIndex, padLen].
+ * - HKDF (RFC 5869) independent subkey derivation for Master and Decoy zones.
  * - Hardware KeyStore ECDSA (secp256r1) digital signatures for tamper-proof authenticity.
- * - Asynchronous chunked (64KB) initialization to prevent eMMC 5.1 ANR.
+ * - 256KB-512KB chunked IO with high-priority Dispatchers.IO.
  */
 object MonoVaultEngine {
     const val CONTAINER_NAME = "storage_block.bin"
@@ -104,20 +104,21 @@ object MonoVaultEngine {
 
     /**
      * Builds Additional Authenticated Data (AAD) for Block Replay Protection.
-     * Binds physical offset, timestamp, zone ordinal, and sequence number.
+     * Binds physical offset, timestamp, zone ordinal, sequence number, and stochastic padding length.
      */
-    fun buildBlockAAD(fileOffset: Long, timestamp: Long, zoneId: Int, sequence: Int): ByteArray {
-        val buf = ByteBuffer.allocate(24)
+    fun buildBlockAAD(fileOffset: Long, timestamp: Long, zoneId: Int, sequence: Int, padLen: Int = 0): ByteArray {
+        val buf = ByteBuffer.allocate(28)
         buf.putLong(fileOffset)
         buf.putLong(timestamp)
         buf.putInt(zoneId)
         buf.putInt(sequence)
+        buf.putInt(padLen)
         return buf.array()
     }
 
     /**
-     * Initializes the 1GB Monolithic container asynchronously in 64KB chunks on Dispatchers.IO.
-     * Prevents ANR freezes on eMMC 5.1 storage while maintaining TrueCrypt/VeraCrypt entropy.
+     * Initializes the 1GB Monolithic container asynchronously in 256KB chunks on Dispatchers.IO.
+     * Prevents ANR freezes on eMMC 5.1 storage while establishing uniform TrueCrypt/VeraCrypt entropy.
      */
     suspend fun ensureContainerInitialized(
         context: Context,
@@ -129,7 +130,7 @@ object MonoVaultEngine {
             RandomAccessFile(file, "rw").use { raf ->
                 raf.setLength(ZONE_CAPACITY_BYTES * 2)
 
-                val chunkSize = 65536
+                val chunkSize = 262144 // 256 KB chunks
                 val chunk = ByteArray(chunkSize)
                 secureRandom.nextBytes(chunk)
 
@@ -213,7 +214,7 @@ object MonoVaultEngine {
     }
 
     /**
-     * Appends an encrypted record with Block Replay Protection (AAD binding).
+     * Appends an encrypted record with Stochastic Padding (0..511B) and Block Replay Protection (AAD binding).
      */
     fun appendRecord(context: Context, volume: VolumeType, plaintext: ByteArray): String {
         val file = getContainerFile(context)
@@ -225,6 +226,7 @@ object MonoVaultEngine {
         val id = UUID.randomUUID().toString().take(16)
         val timestamp = System.currentTimeMillis()
         val signature = signData(plaintext)
+        val padLen = secureRandom.nextInt(512) // Stochastic padding (0..511 bytes)
 
         RandomAccessFile(file, "rw").use { raf ->
             val zoneStart = volume.baseOffset
@@ -248,19 +250,19 @@ object MonoVaultEngine {
                     val readH = raf.read(testEncHeader)
                     if (readH < HEADER_CIPHERTEXT_LEN) break
 
-                    val testAad = buildBlockAAD(scanPtr, 0L, volume.ordinal, sequence)
+                    val testAad = buildBlockAAD(scanPtr, 0L, volume.ordinal, sequence, 0)
                     try {
                         val testCipher = Cipher.getInstance(AES_GCM)
                         testCipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, testIv))
-                        // We check header authenticity
-                        testCipher.updateAAD(testAad.copyOfRange(0, 12)) // check partial AAD
+                        testCipher.updateAAD(testAad.copyOfRange(0, 12))
                         val decrypted = testCipher.doFinal(testEncHeader)
                         val hBuf = ByteBuffer.wrap(decrypted)
                         hBuf.position(16 + 8) // skip id + timestamp
                         val sigLen = hBuf.getInt()
                         val cLen = hBuf.getInt()
+                        val pLen = hBuf.getInt()
 
-                        scanPtr = raf.filePointer + sigLen + GCM_IV_LEN + cLen
+                        scanPtr = raf.filePointer + sigLen + GCM_IV_LEN + cLen + pLen
                         writePtr = scanPtr
                         sequence++
                     } catch (_: Exception) {
@@ -269,8 +271,8 @@ object MonoVaultEngine {
                 }
             }
 
-            // Cryptographic AAD for this block
-            val aad = buildBlockAAD(writePtr, timestamp, volume.ordinal, sequence)
+            // Cryptographic AAD for this block including stochastic padding
+            val aad = buildBlockAAD(writePtr, timestamp, volume.ordinal, sequence, padLen)
 
             // Encrypt Payload with AES-GCM + AAD
             val payloadIv = ByteArray(GCM_IV_LEN)
@@ -289,9 +291,10 @@ object MonoVaultEngine {
             buf.putLong(timestamp)
             buf.putInt(signature.size)
             buf.putInt(ciphertext.size)
-            val pad = ByteArray(16)
-            secureRandom.nextBytes(pad)
-            buf.put(pad)
+            buf.putInt(padLen)
+            val padRandom = ByteArray(12)
+            secureRandom.nextBytes(padRandom)
+            buf.put(padRandom)
 
             val headerCipher = Cipher.getInstance(AES_GCM)
             headerCipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, headerIv))
@@ -304,6 +307,13 @@ object MonoVaultEngine {
             raf.write(signature)
             raf.write(payloadIv)
             raf.write(ciphertext)
+
+            // Write Stochastic CSPRNG Padding
+            if (padLen > 0) {
+                val paddingBytes = ByteArray(padLen)
+                secureRandom.nextBytes(paddingBytes)
+                raf.write(paddingBytes)
+            }
             raf.fd.sync()
 
             Arrays.fill(headerBytes, 0.toByte())
@@ -314,7 +324,7 @@ object MonoVaultEngine {
     }
 
     /**
-     * Reads a record and verifies AAD block replay protection and ECDSA signature.
+     * Reads a record and verifies AAD block replay protection, stochastic padding, and ECDSA signature.
      */
     fun readRecord(context: Context, volume: VolumeType, recordId: String): Pair<ByteArray, Boolean> {
         val file = getContainerFile(context)
@@ -341,7 +351,7 @@ object MonoVaultEngine {
                 val decHeader = try {
                     val c = Cipher.getInstance(AES_GCM)
                     c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, headerIv))
-                    c.updateAAD(buildBlockAAD(blockOffset, 0L, volume.ordinal, sequence).copyOfRange(0, 12))
+                    c.updateAAD(buildBlockAAD(blockOffset, 0L, volume.ordinal, sequence, 0).copyOfRange(0, 12))
                     c.doFinal(encHeader)
                 } catch (_: Exception) {
                     break
@@ -354,6 +364,7 @@ object MonoVaultEngine {
                 val timestamp = hBuf.getLong()
                 val sigLen = hBuf.getInt()
                 val cipherLen = hBuf.getInt()
+                val padLen = hBuf.getInt()
 
                 if (idStr == recordId) {
                     val signature = ByteArray(sigLen)
@@ -367,14 +378,14 @@ object MonoVaultEngine {
 
                     val pCipher = Cipher.getInstance(AES_GCM)
                     pCipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, payloadIv))
-                    val aad = buildBlockAAD(blockOffset, timestamp, volume.ordinal, sequence)
+                    val aad = buildBlockAAD(blockOffset, timestamp, volume.ordinal, sequence, padLen)
                     pCipher.updateAAD(aad)
                     val plaintext = pCipher.doFinal(ciphertext)
                     val isSigValid = verifySignature(plaintext, signature)
                     return Pair(plaintext, isSigValid)
                 }
 
-                pointer = raf.filePointer + sigLen + GCM_IV_LEN + cipherLen
+                pointer = raf.filePointer + sigLen + GCM_IV_LEN + cipherLen + padLen
                 sequence++
             }
         }
@@ -412,7 +423,7 @@ object MonoVaultEngine {
                     val decHeader = try {
                         val c = Cipher.getInstance(AES_GCM)
                         c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, headerIv))
-                        c.updateAAD(buildBlockAAD(blockOffset, 0L, volume.ordinal, sequence).copyOfRange(0, 12))
+                        c.updateAAD(buildBlockAAD(blockOffset, 0L, volume.ordinal, sequence, 0).copyOfRange(0, 12))
                         c.doFinal(encHeader)
                     } catch (_: Exception) {
                         break
@@ -425,9 +436,10 @@ object MonoVaultEngine {
                     val timestamp = hBuf.getLong()
                     val sigLen = hBuf.getInt()
                     val cipherLen = hBuf.getInt()
+                    val padLen = hBuf.getInt()
 
                     records.add(StoredRecord(idStr, timestamp, cipherLen.toLong(), true))
-                    pointer = raf.filePointer + sigLen + GCM_IV_LEN + cipherLen
+                    pointer = raf.filePointer + sigLen + GCM_IV_LEN + cipherLen + padLen
                     sequence++
                 }
             }
@@ -441,7 +453,6 @@ object MonoVaultEngine {
      * Overwrites container sectors with cryptographic noise and deletes hardware keys.
      */
     fun cryptoShredMonolith(context: Context): Boolean {
-        // Step 1: Immediately destroy hardware keys in TEE KeyStore
         try {
             val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
             if (ks.containsAlias(KS_ALIAS_MASTER)) ks.deleteEntry(KS_ALIAS_MASTER)
@@ -449,12 +460,11 @@ object MonoVaultEngine {
             if (ks.containsAlias(KS_ALIAS_SIGN)) ks.deleteEntry(KS_ALIAS_SIGN)
         } catch (_: Exception) {}
 
-        // Step 2: Overwrite physical disk sectors with pseudo-random noise
         val file = getContainerFile(context)
         try {
             if (file.exists()) {
                 RandomAccessFile(file, "rw").use { raf ->
-                    val dummy = ByteArray(65536)
+                    val dummy = ByteArray(262144)
                     val wipeLen = minOf(file.length(), 10485760L)
                     var rem = wipeLen
                     raf.seek(DECOY_ZONE_OFFSET)
