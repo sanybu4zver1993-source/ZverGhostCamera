@@ -106,14 +106,14 @@ fun GhostVaultDialog(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = if (setupStep == 1) "SET MASTER PIN" else "SET DECOY PIN (OPTIONAL)",
+                        text = if (setupStep == 1) "ЗАДАЙ МАСТЕР-ПИН СЕЙФА" else "ЛОЖНЫЙ ПИН (ПРИКРЫТИЕ)",
                         color = CyberGreen,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
                     )
                     Text(
-                        text = if (setupStep == 1) "Derives 256-bit PBKDF2 key for REAL vault" else "Alternative PIN that unlocks benign decoy vault",
+                        text = if (setupStep == 1) "Генерирует 256-битный ключ PBKDF2 для НАСТОЯЩЕГО сейфа" else "Открывает пустой/фейковый раздел при досмотре",
                         color = CyberMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -169,7 +169,7 @@ fun GhostVaultDialog(
                             unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
                             refreshFiles()
                         }) {
-                            Text("SKIP DECOY PIN", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                            Text("ПРОПУСТИТЬ ЛОЖНЫЙ ПИН", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         }
                     }
                 }
@@ -193,14 +193,14 @@ fun GhostVaultDialog(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "VERACRYPT-STYLE VAULT",
+                        text = "ВВЕДИ ПИН СЕЙФА",
                         color = CyberGreen,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
                     )
                     Text(
-                        text = "NO STRINGS IN RAM // PBKDF2 UNWRAP",
+                        text = "БЕЗ СЛЕДОВ В ОЗУ // PBKDF2 КЛЮЧ",
                         color = CyberMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp
@@ -213,7 +213,7 @@ fun GhostVaultDialog(
                     if (pinError) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "AUTH FAILED: INVALID TAG",
+                            text = "ОШИБКА: НЕВЕРНЫЙ ПИН",
                             color = CyberRed,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp
@@ -254,7 +254,7 @@ fun GhostVaultDialog(
                         enteredPinChars.fill('0')
                         onDismiss()
                     }) {
-                        Text("CANCEL", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        Text("ОТМЕНА", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                     }
                 }
             }
@@ -281,7 +281,7 @@ fun GhostVaultDialog(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (unlockedProfile == GhostCryptoVault.VaultProfile.MAIN) "VAULT: MAIN (AUTHENTIC)" else "VAULT: DECOY (SECURE)",
+                                text = if (unlockedProfile == GhostCryptoVault.VaultProfile.MAIN) "СХРОН: БОЕВОЙ (ОСНОВНОЙ)" else "СХРОН: ЛОЖНЫЙ (ПРИКРЫТИЕ)",
                                 color = CyberGreen,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
@@ -311,7 +311,7 @@ fun GhostVaultDialog(
                     ) {
                         val totalSizeKb = vaultFiles.sumOf { it.length() } / 1024
                         Text(
-                            text = "FILES: ${vaultFiles.size} | SIZE: ${totalSizeKb} KB",
+                            text = "ФАЙЛОВ: ${vaultFiles.size} | РАЗМЕР: ${totalSizeKb} КБ",
                             color = CyberMuted,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp
@@ -351,7 +351,7 @@ fun GhostVaultDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "<- BACK TO LIST",
+                                    text = "<- НАЗАД В СПИСОК",
                                     color = CyberGreen,
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
@@ -379,10 +379,10 @@ fun GhostVaultDialog(
                                                         putExtra(android.content.Intent.EXTRA_STREAM, uri)
                                                         addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                                     }
-                                                    context.startActivity(android.content.Intent.createChooser(shareIntent, "Ephemeral Share"))
-                                                    statusMessage = "EPHEMERAL SHARE: WIPES ON RETURN"
+                                                    context.startActivity(android.content.Intent.createChooser(shareIntent, "Передать фото"))
+                                                    statusMessage = "ВРЕМЕННЫЙ ФАЙЛ: УДАЛИТСЯ ПОСЛЕ ОТПРАВКИ"
                                                 } catch (e: Exception) {
-                                                    statusMessage = "SHARE ERR: ${e.message}"
+                                                    statusMessage = "ОШИБКА: ${e.message}"
                                                 }
                                             }
                                         },
@@ -392,7 +392,7 @@ fun GhostVaultDialog(
                                     ) {
                                         Icon(Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(14.dp), tint = CyberGreen)
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("SHARE", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
+                                        Text("ПОДЕЛИТЬСЯ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
                                     }
 
                                     Spacer(modifier = Modifier.width(8.dp))
@@ -404,7 +404,7 @@ fun GhostVaultDialog(
                                                 decryptedBitmap?.recycle()
                                                 decryptedBitmap = null
                                                 selectedFile = null
-                                                statusMessage = "FILE SHREDDED"
+                                                statusMessage = "ФАЙЛ УНИЧТОЖЕН ИЗ СЕЙФА"
                                                 refreshFiles()
                                             }
                                         },
@@ -414,7 +414,7 @@ fun GhostVaultDialog(
                                     ) {
                                         Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("SHRED", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
+                                        Text("СТЕРЕТЬ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
                                     }
                                 }
                             }
@@ -452,14 +452,14 @@ fun GhostVaultDialog(
                                         .padding(6.dp)
                                 ) {
                                     Text(
-                                        text = "FORENSIC STATUS: 100% CLEAN",
+                                        text = "СТАТУС: 100% ЧИСТО // БЕЗ СЛЕДОВ",
                                         color = CyberGreen,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 10.sp
                                     )
                                     Text(
-                                        text = "STREAM-STRIPPED EXIF // NO STRINGS IN RAM // ZERO MEDIASTORE LEAKS",
+                                        text = "EXIF СТЁРТ // БЕЗ ЗАПИСИ В ОБЩУЮ ГАЛЕРЕЮ // ТОЛЬКО ОЗУ",
                                         color = CyberMuted,
                                         fontFamily = FontFamily.Monospace,
                                         fontSize = 9.sp
@@ -480,13 +480,13 @@ fun GhostVaultDialog(
                                     Icon(Icons.Default.Shield, contentDescription = "Empty", tint = CyberMuted, modifier = Modifier.size(40.dp))
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "DECOY VAULT EMPTY" else "NO FILES STORED",
+                                        if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "ЛОЖНЫЙ СХРОН ПУСТ" else "В СЕЙФЕ ПОКА НЕТ ФОТО",
                                         color = CyberMuted,
                                         fontFamily = FontFamily.Monospace,
                                         fontSize = 13.sp
                                     )
                                     Text(
-                                        text = if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "Take shots while in decoy mode to create an innocent cover." else "Shots are encrypted with PBKDF2-derived master key.",
+                                        text = if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "Сделай пару снимков цветов или улицы для алиби." else "Все фото шифруются ключом PBKDF2 в закрытый контейнер.",
                                         color = CyberMuted.copy(alpha = 0.7f),
                                         fontSize = 11.sp,
                                         textAlign = TextAlign.Center
@@ -549,7 +549,7 @@ fun GhostVaultDialog(
                         ) {
                             Icon(Icons.Default.Warning, contentDescription = "Crypto-Shred", tint = Color.White, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("CRYPTO-SHRED EVERYTHING", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 11.sp)
+                            Text("ЭКСТРЕННО СТЕРЕТЬ ВСЕ ДАННЫЕ", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 11.sp)
                         }
                     }
                 }
@@ -558,24 +558,24 @@ fun GhostVaultDialog(
             if (showWipeConfirm) {
                 AlertDialog(
                     onDismissRequest = { showWipeConfirm = false },
-                    title = { Text("CRYPTO-SHRED ALL KEYS", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    text = { Text("Immediately destroys wrapped keys, salts, Keystore TEE keys, and shreds all files in both MAIN and DECOY vaults. Irreversible.", color = Color.White, fontSize = 12.sp) },
+                    title = { Text("УНИЧТОЖИТЬ ВСЕ КЛЮЧИ И СХРОН", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
+                    text = { Text("Мгновенно перезаписывает контейнер шумом, удаляет ключи TEE Keystore и стирает все файлы в обоих сейфах. Восстановление невозможно.", color = Color.White, fontSize = 12.sp) },
                     confirmButton = {
                         Button(
                             onClick = {
                                 val count = GhostCryptoVault.cryptoShred(context)
                                 com.example.crypto.MonoVaultEngine.cryptoShredMonolith(context)
                                 showWipeConfirm = false
-                                statusMessage = "SHREDDED $count FILES AND DESTROYED ALL KEYS"
+                                statusMessage = "УНИЧТОЖЕНО $count ФАЙЛОВ И ВСЕ КЛЮЧИ"
                                 refreshFiles()
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
                         ) {
-                            Text("CONFIRM DESTRUCTION", color = Color.White)
+                            Text("ДА, УНИЧТОЖИТЬ", color = Color.White)
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showWipeConfirm = false }) { Text("CANCEL", color = CyberMuted) }
+                        TextButton(onClick = { showWipeConfirm = false }) { Text("ОТМЕНА", color = CyberMuted) }
                     },
                     containerColor = CyberSurface
                 )
