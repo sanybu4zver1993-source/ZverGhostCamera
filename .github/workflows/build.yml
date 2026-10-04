@@ -25,9 +25,17 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
       - name: Prepare environment & Keystore
         run: |
           touch .env
+          touch .env.example
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           fi
@@ -38,9 +46,9 @@ jobs:
       - name: Build with Gradle
         run: |
           if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug --no-daemon --stacktrace
+            ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
           else
-            gradle assembleDebug --no-daemon --stacktrace
+            gradle assembleDebug --no-daemon --no-configuration-cache --stacktrace
           fi
 
       - name: Upload Debug APK Artifact
@@ -48,6 +56,7 @@ jobs:
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
 
       - name: Attach APK to GitHub Release
         if: github.event_name == 'release'
