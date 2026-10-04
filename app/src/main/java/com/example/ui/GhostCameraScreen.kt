@@ -105,6 +105,8 @@ fun GhostCameraScreen() {
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showCamouflageDialog by remember { mutableStateOf(false) }
     var showByokDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var isVoiceControlActive by remember { mutableStateOf(false) }
 
     val securityStatus = remember { AntiForensicsGuard.assessDeviceSecurity(context) }
     var currentProfile by remember { mutableStateOf(GhostCryptoVault.activeProfile) }
@@ -131,6 +133,11 @@ fun GhostCameraScreen() {
     var isDcpDehazeActive by remember { mutableStateOf(false) }
     var isDocumentModeActive by remember { mutableStateOf(false) }
     var isFocusBracketingActive by remember { mutableStateOf(false) }
+    var isTorchActive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isTorchActive) {
+        try { cameraControl?.enableTorch(isTorchActive) } catch (_: Exception) {}
+    }
 
     // Live Sensor Telemetry
     var gyroAngularSpeed by remember { mutableStateOf(0f) }
@@ -310,10 +317,61 @@ fun GhostCameraScreen() {
         }
     }
 
-    // Wire hardware volume keys to trigger capture
+    // Wire hardware volume keys and external Termux / MacroDroid Broadcast triggers
     LaunchedEffect(Unit) {
         MainActivity.onVolumeShutterTrigger = {
             triggerPhotoCapture()
+        }
+        MainActivity.onTorchToggleTrigger = {
+            isTorchActive = !isTorchActive
+        }
+        MainActivity.onBlackoutToggleTrigger = {
+            isStealthBlackoutActive = !isStealthBlackoutActive
+        }
+    }
+
+    val voiceControlManager = remember {
+        com.example.camera.VoiceControlManager(
+            context = context,
+            onCommandRecognized = { cmd ->
+                when (cmd) {
+                    com.example.camera.VoiceControlManager.VoiceCommand.CAPTURE -> triggerPhotoCapture()
+                    com.example.camera.VoiceControlManager.VoiceCommand.ZOOM_IN -> zoomRatio = 2.0f
+                    com.example.camera.VoiceControlManager.VoiceCommand.ZOOM_MAX -> zoomRatio = 3.0f
+                    com.example.camera.VoiceControlManager.VoiceCommand.ZOOM_RESET -> zoomRatio = 1.0f
+                    com.example.camera.VoiceControlManager.VoiceCommand.TOGGLE_TORCH -> isTorchActive = !isTorchActive
+                    com.example.camera.VoiceControlManager.VoiceCommand.TORCH_ON -> isTorchActive = true
+                    com.example.camera.VoiceControlManager.VoiceCommand.TORCH_OFF -> isTorchActive = false
+                    com.example.camera.VoiceControlManager.VoiceCommand.TIMER_5 -> {
+                        timerSeconds = 5
+                        lastStatusMessage = "ТАЙМЕР УСТАНОВЛЕН: 5 СЕК"
+                    }
+                    com.example.camera.VoiceControlManager.VoiceCommand.TIMER_OFF -> timerSeconds = 0
+                    com.example.camera.VoiceControlManager.VoiceCommand.TOGGLE_STEALTH -> isStealthBlackoutActive = !isStealthBlackoutActive
+                    com.example.camera.VoiceControlManager.VoiceCommand.OPEN_VAULT -> showVaultDialog = true
+                    com.example.camera.VoiceControlManager.VoiceCommand.FLIP_CAMERA -> {
+                        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+                            CameraSelector.LENS_FACING_FRONT
+                        } else {
+                            CameraSelector.LENS_FACING_BACK
+                        }
+                    }
+                }
+            },
+            onStatusUpdate = { msg ->
+                lastStatusMessage = msg
+            }
+        )
+    }
+
+    DisposableEffect(isVoiceControlActive) {
+        if (isVoiceControlActive) {
+            voiceControlManager.startListening()
+        } else {
+            voiceControlManager.stopListening()
+        }
+        onDispose {
+            voiceControlManager.stopListening()
         }
     }
 
@@ -583,9 +641,19 @@ fun GhostCameraScreen() {
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // BYOK Gemini Key
-                    IconButton(onClick = { showByokDialog = true }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Key, contentDescription = "Ключ", tint = CyberGreen, modifier = Modifier.size(17.dp))
+                    // Tactical Torch
+                    IconButton(onClick = { isTorchActive = !isTorchActive }, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            imageVector = if (isTorchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                            contentDescription = "Фонарик",
+                            tint = if (isTorchActive) NeonYellow else CyberMuted,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+
+                    // Settings & AI Center (Vika & Prompts)
+                    IconButton(onClick = { showSettingsDialog = true }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Settings, contentDescription = "Настройки и Промпт", tint = CyberGreen, modifier = Modifier.size(17.dp))
                     }
 
                     // Stealth Blackout Toggle
@@ -729,6 +797,35 @@ fun GhostCameraScreen() {
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberGreen.copy(alpha = 0.35f),
                         selectedLabelColor = CyberGreen,
+                        containerColor = CyberBlack.copy(alpha = 0.45f),
+                        labelColor = CyberMuted
+                    )
+                )
+                FilterChip(
+                    selected = timerSeconds > 0,
+                    onClick = {
+                        timerSeconds = when (timerSeconds) {
+                            0 -> 3
+                            3 -> 5
+                            5 -> 10
+                            else -> 0
+                        }
+                    },
+                    label = { Text(if (timerSeconds == 0) "ТАЙМЕР" else "ТАЙМЕР: ${timerSeconds}С", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = NeonYellow.copy(alpha = 0.35f),
+                        selectedLabelColor = NeonYellow,
+                        containerColor = CyberBlack.copy(alpha = 0.45f),
+                        labelColor = CyberMuted
+                    )
+                )
+                FilterChip(
+                    selected = isVoiceControlActive,
+                    onClick = { isVoiceControlActive = !isVoiceControlActive },
+                    label = { Text(if (isVoiceControlActive) "🎙️ ГОЛОС: ВКЛ" else "🎙️ ГОЛОС", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = NeonCyan.copy(alpha = 0.35f),
+                        selectedLabelColor = NeonCyan,
                         containerColor = CyberBlack.copy(alpha = 0.45f),
                         labelColor = CyberMuted
                     )
@@ -953,6 +1050,14 @@ fun GhostCameraScreen() {
                 },
                 confirmButton = { TextButton(onClick = { showCamouflageDialog = false }) { Text("ЗАКРЫТЬ", color = CyberMuted, fontFamily = FontFamily.Monospace) } },
                 containerColor = CyberSurface
+            )
+        }
+
+        // Settings, AI Prompts & Termux Center Dialog
+        if (showSettingsDialog) {
+            GhostSettingsDialog(
+                onDismiss = { showSettingsDialog = false },
+                onStatusMessage = { msg -> lastStatusMessage = msg }
             )
         }
 

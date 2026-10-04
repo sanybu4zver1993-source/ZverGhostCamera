@@ -39,6 +39,18 @@ private val CyberBorder = Color(0xFF223240)
 class MainActivity : ComponentActivity() {
     companion object {
         var onVolumeShutterTrigger: (() -> Unit)? = null
+        var onTorchToggleTrigger: (() -> Unit)? = null
+        var onBlackoutToggleTrigger: (() -> Unit)? = null
+    }
+
+    private val externalCommandReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            when (intent?.action) {
+                "com.example.camera.TRIGGER_CAPTURE" -> onVolumeShutterTrigger?.invoke()
+                "com.example.camera.TOGGLE_TORCH" -> onTorchToggleTrigger?.invoke()
+                "com.example.camera.TOGGLE_BLACKOUT" -> onBlackoutToggleTrigger?.invoke()
+            }
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
@@ -58,8 +70,28 @@ class MainActivity : ComponentActivity() {
         com.example.crypto.GhostCryptoVault.shredEphemeralShareFiles(this)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(externalCommandReceiver)
+        } catch (_: Exception) {}
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Register external Broadcast receiver for Termux and MacroDroid automation
+        val filter = android.content.IntentFilter().apply {
+            addAction("com.example.camera.TRIGGER_CAPTURE")
+            addAction("com.example.camera.TOGGLE_TORCH")
+            addAction("com.example.camera.TOGGLE_BLACKOUT")
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            externalCommandReceiver,
+            filter,
+            androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+        )
 
         // Block screenshots, screen recording, and task switcher thumbnail leaks
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -125,7 +157,7 @@ fun CameraPermissionGate() {
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Text(
-                    text = "GHOST CAMERA 👻",
+                    text = "ZVER CAMERA 🐾",
                     color = CyberGreen,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
@@ -135,7 +167,7 @@ fun CameraPermissionGate() {
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "AIR-GAPPED ZERO-EXIF VAULT",
+                    text = "АВТОНОМНЫЙ СХРОН // 0% СЕТИ // БЕЗ EXIF",
                     color = CyberMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp
@@ -144,7 +176,7 @@ fun CameraPermissionGate() {
                 Spacer(modifier = Modifier.height(20.dp))
 
                 Text(
-                    text = "Ghost Camera requires hardware Camera access to capture sensor frames. Network access is physically removed from the APK manifest.",
+                    text = "Камере нужен прямой доступ к сенсору устройства. Интернет и сетевые библиотеки физически вырезаны из манифеста APK — утечка невозможна.",
                     color = Color.White,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
@@ -159,12 +191,12 @@ fun CameraPermissionGate() {
                 ) {
                     Icon(
                         imageVector = Icons.Default.CameraAlt,
-                        contentDescription = "Grant",
+                        contentDescription = "Активация",
                         tint = Color.Black
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        "INITIALIZE CAMERA",
+                        "АКТИВИРОВАТЬ КАМЕРУ",
                         color = Color.Black,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold

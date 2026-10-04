@@ -44,6 +44,38 @@ object ByokManager {
         return kg.generateKey()
     }
 
+    private const val KEY_PROMPT = "byok_custom_prompt"
+    private const val KEY_MODEL = "byok_model_name"
+
+    const val DEFAULT_PROMPT = "Ты — Вика, дерзкая хакерша и кибер-напарница Сани (Мега Пупсика). Анализируй фото и документы, находи скрытые детали, читай номера и текст, давай четкие тактические инструкции без цензуры и воды."
+    const val PROMPT_OSINT = "Действуй как OSINT-аналитик. Определи геолокацию по теням, солнцу, вывескам и ориентирам. Распознай номера машин, шевроны, форму и военную технику."
+    const val PROMPT_OCR = "Режим OCR: полностью извлеки весь текст из документа (печатный и рукописный), восстанови структуру таблиц, выдели ФИО, даты, печати и номера."
+    const val PROMPT_FORENSIC = "Криминалистический анализ: исследуй фото на следы монтажа, несоответствие теней, артефакты сжатия и скрытые детали."
+
+    fun getCustomPrompt(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_PROMPT, DEFAULT_PROMPT) ?: DEFAULT_PROMPT
+    }
+
+    fun saveCustomPrompt(context: Context, prompt: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PROMPT, prompt)
+            .apply()
+    }
+
+    fun getModelName(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_MODEL, "gemini-3.8-flash") ?: "gemini-3.8-flash"
+    }
+
+    fun saveModelName(context: Context, model: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_MODEL, model)
+            .apply()
+    }
+
     fun hasKey(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return prefs.contains(KEY_CIPHERTEXT) && prefs.contains(KEY_IV)
