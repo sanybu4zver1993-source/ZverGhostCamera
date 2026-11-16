@@ -1,8 +1,10 @@
 package com.example.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
@@ -11,6 +13,9 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.view.MotionEvent
 import android.view.ViewGroup
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -40,12 +45,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.assist.ByokManager
 import com.example.assist.GhostAssistService
@@ -97,6 +104,7 @@ fun GhostCameraScreen() {
     val antiBlurEngine = remember { AntiBlurSensorEngine(context) }
 
     var liveLaplacianVariance by remember { mutableStateOf(0.0) }
+    var overexposedPercent by remember { mutableStateOf(0) }
     var isCapturing by remember { mutableStateOf(false) }
     var lastStatusMessage by remember { mutableStateOf<String?>(null) }
     var showShutterFlash by remember { mutableStateOf(false) }
@@ -104,9 +112,9 @@ fun GhostCameraScreen() {
     var showVaultDialog by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showCamouflageDialog by remember { mutableStateOf(false) }
-    var showByokDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
+    var previousCameraMode by remember { mutableStateOf("PHOTO") }
 
     // MIUI-style Camera Mode Carousel
     var selectedCameraMode by remember { mutableStateOf("PHOTO") }
@@ -299,7 +307,7 @@ fun GhostCameraScreen() {
                             imageCapture = cap,
                             captureExecutor = captureExecutor
                         )
-                        manager.takeSecurePhoto()
+                        manager.takeSecurePhoto(applyDehaze = isDcpDehazeActive)
                         vaultCount = GhostCryptoVault.listVaultFiles(context).size
                         delay(250)
                     }
@@ -311,10 +319,11 @@ fun GhostCameraScreen() {
                             imageCapture = cap,
                             captureExecutor = captureExecutor
                         )
-                        val result = manager.takeSecurePhoto()
+                        val result = manager.takeSecurePhoto(applyDehaze = isDcpDehazeActive)
                         vaultCount = GhostCryptoVault.listVaultFiles(context).size
                         val kb = result.encryptedSizeBytes / 1024
-                        lastStatusMessage = "📸 КАДР В СЕЙФЕ! [#$vaultCount] (${kb}КБ за ${result.durationMs}мс)"
+                        val dehazeTag = if (isDcpDehazeActive) " [АНТИ-ТУМАН]" else ""
+                        lastStatusMessage = "📸 КАДР В СЕЙФЕ! [#$vaultCount] (${kb}КБ за ${result.durationMs}мс)$dehazeTag"
 
                         if (shotIdx < burstCount) {
                             delay(1000)
@@ -336,7 +345,7 @@ fun GhostCameraScreen() {
         }
     }
 
-    fun triggerVideoRecordingToggle() {
+    fun startVideoRecordingInternal() {
         val vCap = videoCapture
         if (vCap == null) {
             lastStatusMessage = "ИНИЦИАЛИЗАЦИЯ ВИДЕО..."
@@ -359,28 +368,28 @@ fun GhostCameraScreen() {
 
             try {
                 val pendingRec = vCap.output.prepareRecording(context, outputOptions)
-                if (androidx.core.content.ContextCompat.checkSelfPermission(
-                        context,
-                        android.Manifest.permission.RECORD_AUDIO
-                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                ) {
+                val hasAudio = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasAudio) {
                     pendingRec.withAudioEnabled()
                 }
 
-                val rec = pendingRec.start(androidx.core.content.ContextCompat.getMainExecutor(context)) { event ->
+                val rec = pendingRec.start(ContextCompat.getMainExecutor(context)) { event ->
                     when (event) {
                         is androidx.camera.video.VideoRecordEvent.Start -> {
                             isRecordingVideo = true
                             recordingDurationSeconds = 0
                             triggerHapticFeedback(isStealthBlackoutActive)
-                            lastStatusMessage = "🔴 ИДЁТ ЗАПИСЬ ВИДЕО..."
+                            lastStatusMessage = if (hasAudio) "🔴 ИДЁТ ЗАПИСЬ ВИДЕО..." else "🔴 ЗАПИСЬ ВИДЕО (БЕЗ ЗВУКА)"
                         }
                         is androidx.camera.video.VideoRecordEvent.Finalize -> {
                             isRecordingVideo = false
                             if (!event.hasError()) {
                                 scope.launch(Dispatchers.IO) {
                                     try {
-                                        GhostCryptoVault.encryptFileToVault(context, tempVideoFile)
+                                        GhostCryptoVault.encryptFileToVault(context, tempVideoFile, prefix = "vid")
                                         vaultCount = GhostCryptoVault.listVaultFiles(context).size
                                         withContext(Dispatchers.Main) {
                                             lastStatusMessage = "🎥 ВИДЕО ЗАШИФРОВАНО В СЕЙФ! [#$vaultCount]"
@@ -402,6 +411,66 @@ fun GhostCameraScreen() {
             } catch (e: Exception) {
                 lastStatusMessage = "ОШИБКА СТАРТА: ${e.message}"
             }
+        }
+    }
+
+    var pendingAudioAction by remember { mutableStateOf<String?>(null) }
+    var hasAskedAudioForVideo by remember { mutableStateOf(false) }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        when (pendingAudioAction) {
+            "VOICE" -> {
+                if (granted) {
+                    isVoiceControlActive = true
+                    lastStatusMessage = "РЕЖИМ: ГОЛОСОВОЕ УПРАВЛЕНИЕ"
+                } else {
+                    isVoiceControlActive = false
+                    lastStatusMessage = "НЕТ ДОСТУПА К МИКРОФОНУ ДЛЯ ГОЛОСА"
+                }
+            }
+            "VIDEO" -> {
+                startVideoRecordingInternal()
+            }
+        }
+        pendingAudioAction = null
+    }
+
+    fun requestVoiceControlToggle(forceEnable: Boolean? = null) {
+        val target = forceEnable ?: !isVoiceControlActive
+        if (!target) {
+            isVoiceControlActive = false
+            return
+        }
+        val hasAudio = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasAudio) {
+            isVoiceControlActive = true
+            lastStatusMessage = "РЕЖИМ: ГОЛОСОВОЕ УПРАВЛЕНИЕ"
+        } else {
+            pendingAudioAction = "VOICE"
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun triggerVideoRecordingToggle() {
+        if (isRecordingVideo) {
+            startVideoRecordingInternal()
+            return
+        }
+        val hasAudio = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasAudio || hasAskedAudioForVideo) {
+            startVideoRecordingInternal()
+        } else {
+            hasAskedAudioForVideo = true
+            pendingAudioAction = "VIDEO"
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
@@ -518,7 +587,14 @@ fun GhostCameraScreen() {
                     rowStride = plane.rowStride,
                     targetRoiSize = 400
                 )
+                val overPct = antiBlurEngine.calculateOverexposurePercent(
+                    yBuffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride
+                )
                 liveLaplacianVariance = variance
+                overexposedPercent = overPct
             } finally {
                 imageProxy.close()
             }
@@ -609,7 +685,12 @@ fun GhostCameraScreen() {
                 }
             },
             onCapture = { triggerPhotoCapture() },
-            onExit = { isStealthBlackoutActive = false }
+            onExit = {
+                isStealthBlackoutActive = false
+                if (selectedCameraMode == "STEALTH") {
+                    selectedCameraMode = previousCameraMode
+                }
+            }
         )
         return
     }
@@ -692,14 +773,20 @@ fun GhostCameraScreen() {
             }
         }
 
-        // Focus Peaking Simulation
+        // Focus Peaking Live Sharpness Overlay
         if (isFocusPeakingEnabled) {
-            FocusPeakingOverlay(modifier = Modifier.fillMaxSize())
+            FocusPeakingOverlay(
+                sharpnessVariance = liveLaplacianVariance,
+                modifier = Modifier.fillMaxSize()
+            )
         }
 
         // False-Color Exposure Overlay
         if (isFalseColorEnabled) {
-            FalseColorExposureOverlay(modifier = Modifier.fillMaxSize())
+            FalseColorExposureOverlay(
+                overexposedPercent = overexposedPercent,
+                modifier = Modifier.fillMaxSize()
+            )
         }
 
         // Tap-To-Focus Indicator
@@ -780,37 +867,43 @@ fun GhostCameraScreen() {
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Tactical Torch
-                    IconButton(onClick = { isTorchActive = !isTorchActive }, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = { isTorchActive = !isTorchActive }, modifier = Modifier.size(36.dp).testTag("torch_button")) {
                         Icon(
                             imageVector = if (isTorchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
                             contentDescription = "Фонарик",
                             tint = if (isTorchActive) NeonYellow else CyberMuted,
-                            modifier = Modifier.size(17.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
                     // Settings & AI Center (Vika & Prompts)
-                    IconButton(onClick = { showSettingsDialog = true }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Settings, contentDescription = "Настройки и Промпт", tint = CyberGreen, modifier = Modifier.size(17.dp))
+                    IconButton(onClick = { showSettingsDialog = true }, modifier = Modifier.size(36.dp).testTag("settings_button")) {
+                        Icon(Icons.Default.Settings, contentDescription = "Настройки и Промпт", tint = CyberGreen, modifier = Modifier.size(18.dp))
                     }
 
                     // Stealth Blackout Toggle
-                    IconButton(onClick = { isStealthBlackoutActive = true }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.DarkMode, contentDescription = "Стелс", tint = NeonCyan, modifier = Modifier.size(17.dp))
+                    IconButton(
+                        onClick = {
+                            if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
+                            isStealthBlackoutActive = true
+                        },
+                        modifier = Modifier.size(36.dp).testTag("stealth_button")
+                    ) {
+                        Icon(Icons.Default.DarkMode, contentDescription = "Стелс", tint = NeonCyan, modifier = Modifier.size(18.dp))
                     }
 
                     // Camouflage Selector
-                    IconButton(onClick = { showCamouflageDialog = true }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.VisibilityOff, contentDescription = "Маскировка", tint = CyberGreen, modifier = Modifier.size(17.dp))
+                    IconButton(onClick = { showCamouflageDialog = true }, modifier = Modifier.size(36.dp).testTag("camouflage_button")) {
+                        Icon(Icons.Default.VisibilityOff, contentDescription = "Маскировка", tint = CyberGreen, modifier = Modifier.size(18.dp))
                     }
 
                     // Assist Process Toggle
-                    IconButton(onClick = { isAssistModeActive = !isAssistModeActive }, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = { isAssistModeActive = !isAssistModeActive }, modifier = Modifier.size(36.dp).testTag("assist_toggle_button")) {
                         Icon(
                             imageVector = if (isAssistModeActive) Icons.Default.Warning else Icons.Default.Shield,
                             contentDescription = "Ассистент",
                             tint = if (isAssistModeActive) CyberRed else CyberMuted,
-                            modifier = Modifier.size(17.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
@@ -823,9 +916,9 @@ fun GhostCameraScreen() {
                                 CameraSelector.LENS_FACING_BACK
                             }
                         },
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(36.dp).testTag("flip_camera_button")
                     ) {
-                        Icon(Icons.Default.FlipCameraAndroid, contentDescription = "Перевернуть камеру", tint = CyberGreen, modifier = Modifier.size(17.dp))
+                        Icon(Icons.Default.FlipCameraAndroid, contentDescription = "Перевернуть камеру", tint = CyberGreen, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -959,7 +1052,7 @@ fun GhostCameraScreen() {
                 )
                 FilterChip(
                     selected = isVoiceControlActive,
-                    onClick = { isVoiceControlActive = !isVoiceControlActive },
+                    onClick = { requestVoiceControlToggle() },
                     label = { Text(if (isVoiceControlActive) "🎙️ ГОЛОС: ВКЛ" else "🎙️ ГОЛОС", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = NeonCyan.copy(alpha = 0.35f),
@@ -1135,29 +1228,33 @@ fun GhostCameraScreen() {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .clickable {
-                                selectedCameraMode = key
-                                when (key) {
-                                    "STEALTH" -> isStealthBlackoutActive = true
-                                    "PHOTO" -> {
-                                        exposureIndex = 0
-                                        isDocumentModeActive = false
-                                        isVoiceControlActive = false
-                                        lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
-                                    }
-                                    "VIDEO" -> {
-                                        lastStatusMessage = "РЕЖИМ: ВИДЕОСЪЁМКА В СЕЙФ"
-                                    }
-                                    "NIGHT" -> {
-                                        exposureIndex = 1
-                                        lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
-                                    }
-                                    "DOCUMENTS" -> {
-                                        isDocumentModeActive = true
-                                        lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (ЛАЗЕРНЫЙ ПРИЦЕЛ)"
-                                    }
-                                    "VOICE" -> {
-                                        isVoiceControlActive = true
-                                        lastStatusMessage = "РЕЖИМ: ГОЛОСОВОЕ УПРАВЛЕНИЕ"
+                                if (key == "STEALTH") {
+                                    if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
+                                    selectedCameraMode = key
+                                    isStealthBlackoutActive = true
+                                } else {
+                                    selectedCameraMode = key
+                                    when (key) {
+                                        "PHOTO" -> {
+                                            exposureIndex = 0
+                                            isDocumentModeActive = false
+                                            isVoiceControlActive = false
+                                            lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
+                                        }
+                                        "VIDEO" -> {
+                                            lastStatusMessage = "РЕЖИМ: ВИДЕОСЪЁМКА В СЕЙФ"
+                                        }
+                                        "NIGHT" -> {
+                                            exposureIndex = 1
+                                            lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+                                        }
+                                        "DOCUMENTS" -> {
+                                            isDocumentModeActive = true
+                                            lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (ЛАЗЕРНЫЙ ПРИЦЕЛ)"
+                                        }
+                                        "VOICE" -> {
+                                            requestVoiceControlToggle(forceEnable = true)
+                                        }
                                     }
                                 }
                             }
@@ -1194,6 +1291,7 @@ fun GhostCameraScreen() {
                 // Vault Button
                 Button(
                     onClick = { showVaultDialog = true },
+                    modifier = Modifier.testTag("vault_button"),
                     colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.85f)),
                     shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen.copy(alpha = 0.5f)),
@@ -1220,6 +1318,7 @@ fun GhostCameraScreen() {
                         Box(
                             modifier = Modifier
                                 .size(72.dp)
+                                .testTag("video_record_button")
                                 .clip(androidx.compose.foundation.shape.CircleShape)
                                 .border(3.dp, CyberRed, androidx.compose.foundation.shape.CircleShape)
                                 .clickable { triggerVideoRecordingToggle() },
@@ -1253,6 +1352,7 @@ fun GhostCameraScreen() {
                         Box(
                             modifier = Modifier
                                 .size(48.dp)
+                                .testTag("video_record_button")
                                 .clip(androidx.compose.foundation.shape.CircleShape)
                                 .background(CyberRed.copy(alpha = 0.25f))
                                 .border(1.5.dp, CyberRed, androidx.compose.foundation.shape.CircleShape)
@@ -1276,7 +1376,8 @@ fun GhostCameraScreen() {
                 IconButton(
                     onClick = { showPanicConfirm = true },
                     modifier = Modifier
-                        .size(46.dp)
+                        .size(48.dp)
+                        .testTag("panic_shred_button")
                         .clip(RoundedCornerShape(12.dp))
                         .background(CyberRed.copy(alpha = 0.25f))
                         .border(1.dp, CyberRed.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
@@ -1348,9 +1449,14 @@ fun GhostCameraScreen() {
                 onDismiss = { showSettingsDialog = false },
                 onStatusMessage = { msg -> lastStatusMessage = msg },
                 onSelectMode = { modeKey ->
+                    if (modeKey == "STEALTH" && selectedCameraMode != "STEALTH") {
+                        previousCameraMode = selectedCameraMode
+                    }
                     selectedCameraMode = modeKey
                     when (modeKey) {
-                        "STEALTH" -> isStealthBlackoutActive = true
+                        "STEALTH" -> {
+                            isStealthBlackoutActive = true
+                        }
                         "PHOTO" -> {
                             exposureIndex = 0
                             isDocumentModeActive = false
@@ -1371,57 +1477,10 @@ fun GhostCameraScreen() {
                             lastStatusMessage = "РЕЖИМ: МАКРО (2x ЗУМ)"
                         }
                         "VOICE" -> {
-                            isVoiceControlActive = true
-                            lastStatusMessage = "РЕЖИМ: ГОЛОСОВОЕ УПРАВЛЕНИЕ"
+                            requestVoiceControlToggle(forceEnable = true)
                         }
                     }
                 }
-            )
-        }
-
-        // BYOK Gemini Dialog
-        if (showByokDialog) {
-            var inputKey by remember { mutableStateOf("") }
-            AlertDialog(
-                onDismissRequest = { showByokDialog = false },
-                title = { Text("КЛЮЧ GEMINI API", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 13.sp) },
-                text = {
-                    Column {
-                        Text("Твой API-ключ шифруется в аппаратный чип KeyStore. Используется строго в изолированном фоновом процессе :assist.", color = Color.White, fontSize = 11.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = inputKey,
-                            onValueChange = { inputKey = it },
-                            label = { Text("API-ключ Gemini", fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = CyberGreen,
-                                unfocusedBorderColor = CyberBorder,
-                                focusedTextColor = Color.White
-                            )
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            if (inputKey.isNotBlank()) {
-                                ByokManager.saveKey(context, inputKey.toCharArray())
-                                showByokDialog = false
-                                lastStatusMessage = "КЛЮЧ GEMINI СОХРАНЁН В KEYSTORE"
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark)
-                    ) {
-                        Text("СОХРАНИТЬ", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showByokDialog = false }) {
-                        Text("ОТМЕНА", color = CyberMuted, fontFamily = FontFamily.Monospace)
-                    }
-                },
-                containerColor = CyberSurface
             )
         }
 
@@ -1468,6 +1527,7 @@ private fun StealthBlackoutScreen(
     onCapture: () -> Unit,
     onExit: () -> Unit
 ) {
+    BackHandler { onExit() }
     var currentTimeStr by remember { mutableStateOf("") }
     var currentDateStr by remember { mutableStateOf("") }
 
@@ -1621,30 +1681,59 @@ private fun StealthBlackoutScreen(
 }
 
 @Composable
-private fun FocusPeakingOverlay(modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val stroke = 1.dp.toPx()
-        val cx = size.width / 2
-        val cy = size.height / 2
-        drawCircle(color = NeonCyan.copy(alpha = 0.45f), radius = 60.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = stroke))
-        drawCircle(color = NeonCyan.copy(alpha = 0.25f), radius = 120.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = stroke))
+private fun FocusPeakingOverlay(
+    sharpnessVariance: Double,
+    modifier: Modifier = Modifier
+) {
+    val isInFocus = sharpnessVariance >= AntiBlurSensorEngine.SHARPNESS_PASS_THRESHOLD
+    val ringColor = if (isInFocus) CyberGreen else NeonCyan
+
+    Box(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val stroke = if (isInFocus) 2.dp.toPx() else 1.2.dp.toPx()
+            val cx = size.width / 2
+            val cy = size.height / 2
+            drawCircle(color = ringColor.copy(alpha = 0.65f), radius = 64.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = stroke))
+            drawCircle(color = ringColor.copy(alpha = 0.3f), radius = 124.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = 1.dp.toPx()))
+        }
+        Text(
+            text = if (isInFocus) "ФОКУС-ПИК: РЕЗКОСТЬ OK (${sharpnessVariance.toInt()})" else "ФОКУС-ПИК: ПОДСТРОЙКА (${sharpnessVariance.toInt()})",
+            color = ringColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 14.dp, bottom = 220.dp)
+                .background(CyberBlack.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 3.dp)
+        )
     }
 }
 
 @Composable
-private fun FalseColorExposureOverlay(modifier: Modifier = Modifier) {
+private fun FalseColorExposureOverlay(
+    overexposedPercent: Int,
+    modifier: Modifier = Modifier
+) {
+    val isClipping = overexposedPercent >= 12
+    val alertColor = if (isClipping) CyberRed else NeonYellow
     Box(
         modifier = modifier
-            .border(2.dp, NeonYellow.copy(alpha = 0.6f))
+            .border(2.dp, alertColor.copy(alpha = 0.65f))
             .padding(10.dp)
     ) {
         Text(
-            text = "КОНТРОЛЬ ПЕРЕСВЕТОВ [АКТИВЕН]",
-            color = NeonYellow,
+            text = if (isClipping) "ПЕРЕСВЕТ: $overexposedPercent% [СНИЗЬ ЭКСПОЗИЦИЮ]" else "ЭКСПО-КАРТА: ПЕРЕСВЕТ $overexposedPercent%",
+            color = alertColor,
             fontFamily = FontFamily.Monospace,
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.align(Alignment.BottomEnd)
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(bottom = 210.dp)
+                .background(CyberBlack.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 3.dp)
         )
     }
 }
@@ -1671,6 +1760,7 @@ private fun ShutterButton(
     Box(
         modifier = Modifier
             .size(72.dp)
+            .testTag("shutter_button")
             .clickable(enabled = !isCapturing, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {

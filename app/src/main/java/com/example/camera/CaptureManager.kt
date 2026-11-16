@@ -42,27 +42,47 @@ class CaptureManager(
 
     private data class RawShot(val bytes: ByteArray, val rotationDegrees: Int)
 
-    suspend fun takeSecurePhoto(): CaptureResult = captureMutex.withLock {
+    suspend fun takeSecurePhoto(applyDehaze: Boolean = false): CaptureResult = captureMutex.withLock {
         val startTime = System.currentTimeMillis()
         val rawShot = captureRawJpeg()
+        var cleanMirroredBytes: ByteArray? = null
         try {
             withContext(Dispatchers.IO) {
-                val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(appContext)
+                val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(appContext, prefix = "shot")
                 var strippedCount = 0
 
                 try {
-                    cos.use { stream ->
-                        strippedCount = streamStrippedJpeg(rawShot.bytes, stream)
-                        stream.flush()
+                    if (rawShot.rotationDegrees % 360 != 0 || applyDehaze) {
+                        val processed = ExifStripper.processAndPurgeExif(
+                            rawJpeg = rawShot.bytes,
+                            rotationDegrees = rawShot.rotationDegrees,
+                            applyDehaze = applyDehaze
+                        )
+                        cleanMirroredBytes = processed.cleanJpegBytes
+                        cos.use { stream ->
+                            stream.write(cleanMirroredBytes)
+                            stream.flush()
+                        }
+                        strippedCount = 1
+                    } else {
+                        val baos = java.io.ByteArrayOutputStream(rawShot.bytes.size)
+                        strippedCount = streamStrippedJpeg(rawShot.bytes, baos)
+                        cleanMirroredBytes = baos.toByteArray()
+                        cos.use { stream ->
+                            stream.write(cleanMirroredBytes)
+                            stream.flush()
+                        }
                     }
 
-                    // Also mirror into Monolithic VeraCrypt Container
+                    // Also mirror strictly stripped JPEG bytes into Monolithic VeraCrypt Container
                     try {
                         val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN)
                             com.example.crypto.MonoVaultEngine.VolumeType.MASTER
                         else
                             com.example.crypto.MonoVaultEngine.VolumeType.DECOY
-                        com.example.crypto.MonoVaultEngine.appendRecord(appContext, volume, rawShot.bytes)
+                        cleanMirroredBytes?.let { clean ->
+                            com.example.crypto.MonoVaultEngine.appendRecord(appContext, volume, clean)
+                        }
                     } catch (_: Exception) {}
 
                     CaptureResult(
@@ -78,6 +98,7 @@ class CaptureManager(
             }
         } finally {
             Arrays.fill(rawShot.bytes, 0.toByte())
+            cleanMirroredBytes?.let { Arrays.fill(it, 0.toByte()) }
         }
     }
 

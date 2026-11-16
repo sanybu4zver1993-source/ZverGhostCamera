@@ -270,9 +270,9 @@ object GhostCryptoVault {
      * Opens a streaming CipherOutputStream directly to an encrypted .gcf file
      * inside the current active vault directory (vault_main or vault_decoy).
      */
-    fun openEncryptedOutputStream(context: Context): Pair<File, CipherOutputStream> {
+    fun openEncryptedOutputStream(context: Context, prefix: String = "shot"): Pair<File, CipherOutputStream> {
         val vaultDir = activeProfile.getDirectory(context)
-        val targetFile = File(vaultDir, "shot_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.gcf")
+        val targetFile = File(vaultDir, "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.gcf")
 
         val iv = ByteArray(GCM_IV_LEN)
         secureRandom.nextBytes(iv)
@@ -296,12 +296,14 @@ object GhostCryptoVault {
         return Pair(targetFile, cos)
     }
 
+    fun isVideoFile(file: File): Boolean = file.name.startsWith("vid_")
+
     /**
      * Streams and encrypts any raw file (e.g. video MP4 from cache) into the vault,
      * then immediately shreds the source file with random bytes.
      */
-    fun encryptFileToVault(context: Context, sourceFile: File): File {
-        val (targetFile, cipherOut) = openEncryptedOutputStream(context)
+    fun encryptFileToVault(context: Context, sourceFile: File, prefix: String = "vid"): File {
+        val (targetFile, cipherOut) = openEncryptedOutputStream(context, prefix)
         try {
             FileInputStream(sourceFile).use { input ->
                 input.copyTo(cipherOut)
@@ -448,23 +450,60 @@ object GhostCryptoVault {
     }
 
     /**
+     * Streams decryption directly into an ephemeral file in internal cacheDir
+     * (prevents OOM for large encrypted videos while preserving AES-GCM authentication).
+     */
+    fun decryptToEphemeralFile(context: Context, sourceFile: File): File {
+        if (!sourceFile.exists() || sourceFile.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)) {
+            throw IOException("Invalid or corrupted GCF file")
+        }
+
+        val shareDir = File(context.cacheDir, "ephemeral_shared")
+        if (!shareDir.exists()) shareDir.mkdirs()
+        val ext = if (isVideoFile(sourceFile)) "mp4" else "jpg"
+        val tmpFile = File(shareDir, "ephemeral_${UUID.randomUUID().toString().take(8)}.$ext")
+
+        FileInputStream(sourceFile).use { fis ->
+            val header = ByteArray(MAGIC_HEADER.size)
+            if (fis.read(header) != MAGIC_HEADER.size || !header.contentEquals(MAGIC_HEADER)) {
+                throw IOException("Invalid GCF magic header")
+            }
+
+            val iv = ByteArray(GCM_IV_LEN)
+            if (fis.read(iv) != GCM_IV_LEN) {
+                throw IOException("Missing GCF IV")
+            }
+
+            val cipher = Cipher.getInstance(AES_GCM)
+            cipher.init(Cipher.DECRYPT_MODE, getActiveVaultKey(context), GCMParameterSpec(GCM_TAG_LEN, iv))
+            Arrays.fill(iv, 0.toByte())
+
+            try {
+                CipherInputStream(fis, cipher).use { cis ->
+                    FileOutputStream(tmpFile).use { fos ->
+                        val buffer = ByteArray(16 * 1024)
+                        var read: Int
+                        while (cis.read(buffer).also { read = it } != -1) {
+                            fos.write(buffer, 0, read)
+                        }
+                        Arrays.fill(buffer, 0.toByte())
+                        fos.fd.sync()
+                    }
+                }
+            } catch (e: Exception) {
+                shredFile(tmpFile)
+                throw e
+            }
+        }
+        return tmpFile
+    }
+
+    /**
      * Decrypts a file strictly to internal cacheDir for temporary sharing via FileProvider.
      * External storage is never used.
      */
     fun createEphemeralShareFile(context: Context, sourceFile: File): File {
-        val shareDir = File(context.cacheDir, "ephemeral_shared")
-        if (!shareDir.exists()) shareDir.mkdirs()
-        val tmpFile = File(shareDir, "share_${UUID.randomUUID().toString().take(8)}.jpg")
-        val decryptedBytes = decryptToRam(context, sourceFile)
-        try {
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(decryptedBytes)
-                fos.fd.sync()
-            }
-            return tmpFile
-        } finally {
-            Arrays.fill(decryptedBytes, 0.toByte())
-        }
+        return decryptToEphemeralFile(context, sourceFile)
     }
 
     /**

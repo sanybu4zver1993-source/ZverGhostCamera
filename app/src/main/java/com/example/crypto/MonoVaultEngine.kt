@@ -117,6 +117,17 @@ object MonoVaultEngine {
     }
 
     /**
+     * Header AAD binds physical offset, zone ordinal, and sequence index (known prior to header decryption).
+     */
+    private fun buildHeaderAAD(fileOffset: Long, zoneId: Int, sequence: Int): ByteArray {
+        val buf = ByteBuffer.allocate(16)
+        buf.putLong(fileOffset)
+        buf.putInt(zoneId)
+        buf.putInt(sequence)
+        return buf.array()
+    }
+
+    /**
      * Initializes the 1GB Monolithic container asynchronously in 256KB chunks on Dispatchers.IO.
      * Prevents ANR freezes on eMMC 5.1 storage while establishing uniform TrueCrypt/VeraCrypt entropy.
      */
@@ -250,11 +261,11 @@ object MonoVaultEngine {
                     val readH = raf.read(testEncHeader)
                     if (readH < HEADER_CIPHERTEXT_LEN) break
 
-                    val testAad = buildBlockAAD(scanPtr, 0L, volume.ordinal, sequence, 0)
+                    val headerAad = buildHeaderAAD(scanPtr, volume.ordinal, sequence)
                     try {
                         val testCipher = Cipher.getInstance(AES_GCM)
                         testCipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, testIv))
-                        testCipher.updateAAD(testAad.copyOfRange(0, 12))
+                        testCipher.updateAAD(headerAad)
                         val decrypted = testCipher.doFinal(testEncHeader)
                         val hBuf = ByteBuffer.wrap(decrypted)
                         hBuf.position(16 + 8) // skip id + timestamp
@@ -298,7 +309,7 @@ object MonoVaultEngine {
 
             val headerCipher = Cipher.getInstance(AES_GCM)
             headerCipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, headerIv))
-            headerCipher.updateAAD(aad.copyOfRange(0, 12))
+            headerCipher.updateAAD(buildHeaderAAD(writePtr, volume.ordinal, sequence))
             val encryptedHeader = headerCipher.doFinal(headerBytes)
 
             raf.seek(writePtr)
@@ -351,7 +362,7 @@ object MonoVaultEngine {
                 val decHeader = try {
                     val c = Cipher.getInstance(AES_GCM)
                     c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, headerIv))
-                    c.updateAAD(buildBlockAAD(blockOffset, 0L, volume.ordinal, sequence, 0).copyOfRange(0, 12))
+                    c.updateAAD(buildHeaderAAD(blockOffset, volume.ordinal, sequence))
                     c.doFinal(encHeader)
                 } catch (_: Exception) {
                     break
@@ -423,7 +434,7 @@ object MonoVaultEngine {
                     val decHeader = try {
                         val c = Cipher.getInstance(AES_GCM)
                         c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, headerIv))
-                        c.updateAAD(buildBlockAAD(blockOffset, 0L, volume.ordinal, sequence, 0).copyOfRange(0, 12))
+                        c.updateAAD(buildHeaderAAD(blockOffset, volume.ordinal, sequence))
                         c.doFinal(encHeader)
                     } catch (_: Exception) {
                         break

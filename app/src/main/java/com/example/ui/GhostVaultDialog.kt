@@ -63,9 +63,17 @@ fun GhostVaultDialog(
     var vaultFiles by remember { mutableStateOf(emptyList<File>()) }
     var selectedFile by remember { mutableStateOf<File?>(null) }
     var decryptedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var decryptedVideoFile by remember { mutableStateOf<File?>(null) }
     var isDecrypting by remember { mutableStateOf(false) }
     var showWipeConfirm by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    fun cleanupPreviewMedia() {
+        decryptedBitmap?.recycle()
+        decryptedBitmap = null
+        decryptedVideoFile?.let { GhostCryptoVault.shredFile(it) }
+        decryptedVideoFile = null
+    }
 
     fun refreshFiles() {
         vaultFiles = GhostCryptoVault.listVaultFiles(context)
@@ -74,8 +82,7 @@ fun GhostVaultDialog(
 
     Dialog(
         onDismissRequest = {
-            decryptedBitmap?.recycle()
-            decryptedBitmap = null
+            cleanupPreviewMedia()
             GhostCryptoVault.lockSession()
             onDismiss()
         },
@@ -289,8 +296,7 @@ fun GhostVaultDialog(
                             )
                         }
                         IconButton(onClick = {
-                            decryptedBitmap?.recycle()
-                            decryptedBitmap = null
+                            cleanupPreviewMedia()
                             GhostCryptoVault.lockSession()
                             onDismiss()
                         }) {
@@ -357,8 +363,7 @@ fun GhostVaultDialog(
                                     fontSize = 11.sp,
                                     modifier = Modifier
                                         .clickable {
-                                            decryptedBitmap?.recycle()
-                                            decryptedBitmap = null
+                                            cleanupPreviewMedia()
                                             selectedFile = null
                                         }
                                         .padding(4.dp)
@@ -367,22 +372,32 @@ fun GhostVaultDialog(
                                     Button(
                                         onClick = {
                                             selectedFile?.let { f ->
-                                                try {
-                                                    val shareTmp = GhostCryptoVault.createEphemeralShareFile(context, f)
-                                                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                                                        context,
-                                                        "${context.packageName}.fileprovider",
-                                                        shareTmp
-                                                    )
-                                                    val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                                        type = "image/jpeg"
-                                                        putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                scope.launch {
+                                                    try {
+                                                        val isVideo = GhostCryptoVault.isVideoFile(f)
+                                                        val shareTmp = withContext(Dispatchers.IO) {
+                                                            GhostCryptoVault.createEphemeralShareFile(context, f)
+                                                        }
+                                                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                                                            context,
+                                                            "${context.packageName}.fileprovider",
+                                                            shareTmp
+                                                        )
+                                                        val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                            type = if (isVideo) "video/mp4" else "image/jpeg"
+                                                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                        }
+                                                        context.startActivity(
+                                                            android.content.Intent.createChooser(
+                                                                shareIntent,
+                                                                if (isVideo) "Передать видео" else "Передать фото"
+                                                            )
+                                                        )
+                                                        statusMessage = "ВРЕМЕННЫЙ ФАЙЛ: УДАЛИТСЯ ПОСЛЕ ОТПРАВКИ"
+                                                    } catch (e: Exception) {
+                                                        statusMessage = "ОШИБКА: ${e.message}"
                                                     }
-                                                    context.startActivity(android.content.Intent.createChooser(shareIntent, "Передать фото"))
-                                                    statusMessage = "ВРЕМЕННЫЙ ФАЙЛ: УДАЛИТСЯ ПОСЛЕ ОТПРАВКИ"
-                                                } catch (e: Exception) {
-                                                    statusMessage = "ОШИБКА: ${e.message}"
                                                 }
                                             }
                                         },
@@ -401,8 +416,7 @@ fun GhostVaultDialog(
                                         onClick = {
                                             selectedFile?.let { f ->
                                                 GhostCryptoVault.shredFile(f)
-                                                decryptedBitmap?.recycle()
-                                                decryptedBitmap = null
+                                                cleanupPreviewMedia()
                                                 selectedFile = null
                                                 statusMessage = "ФАЙЛ УНИЧТОЖЕН ИЗ СЕЙФА"
                                                 refreshFiles()
@@ -424,6 +438,56 @@ fun GhostVaultDialog(
                             if (isDecrypting) {
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     CircularProgressIndicator(color = CyberGreen, strokeWidth = 2.dp)
+                                }
+                            } else if (decryptedVideoFile != null) {
+                                val videoFile = decryptedVideoFile!!
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
+                                        .background(Color.Black),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    androidx.compose.ui.viewinterop.AndroidView(
+                                        factory = { ctx ->
+                                            android.widget.VideoView(ctx).apply {
+                                                val controller = android.widget.MediaController(ctx)
+                                                controller.setAnchorView(this)
+                                                setMediaController(controller)
+                                                setVideoPath(videoFile.absolutePath)
+                                                setOnPreparedListener { mp ->
+                                                    mp.isLooping = false
+                                                    start()
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(CyberSurface, RoundedCornerShape(6.dp))
+                                        .padding(6.dp)
+                                ) {
+                                    Text(
+                                        text = "СТАТУС: ВИДЕО В ВРЕМЕННОМ КЭШЕ (УДАЛИТСЯ ПРИ ВЫХОДЕ)",
+                                        color = CyberGreen,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                    Text(
+                                        text = "AES-256-GCM // БЕЗ ЗАПИСИ В ГАЛЕРЕЮ // АВТО-ШРЕДЕР",
+                                        color = CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 9.sp
+                                    )
                                 }
                             } else if (decryptedBitmap != null) {
                                 Box(
@@ -501,6 +565,7 @@ fun GhostVaultDialog(
                                     }
                                     val sizeKb = remember(file) { file.length() / 1024 }
 
+                                    val isVideo = remember(file) { GhostCryptoVault.isVideoFile(file) }
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -512,11 +577,18 @@ fun GhostVaultDialog(
                                                 isDecrypting = true
                                                 scope.launch {
                                                     try {
-                                                        val bmp = withContext(Dispatchers.IO) {
-                                                            GhostCryptoVault.decryptToBitmap(context, file)
+                                                        cleanupPreviewMedia()
+                                                        if (isVideo) {
+                                                            val vidTmp = withContext(Dispatchers.IO) {
+                                                                GhostCryptoVault.decryptToEphemeralFile(context, file)
+                                                            }
+                                                            decryptedVideoFile = vidTmp
+                                                        } else {
+                                                            val bmp = withContext(Dispatchers.IO) {
+                                                                GhostCryptoVault.decryptToBitmap(context, file)
+                                                            }
+                                                            decryptedBitmap = bmp
                                                         }
-                                                        decryptedBitmap?.recycle()
-                                                        decryptedBitmap = bmp
                                                     } catch (e: Exception) {
                                                         statusMessage = "DECRYPT ERROR: ${e.message}"
                                                     } finally {
@@ -528,11 +600,30 @@ fun GhostVaultDialog(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Column {
-                                            Text(file.name, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                                            Text("$dateStr | $sizeKb KB", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = if (isVideo) Icons.Default.Videocam else Icons.Default.Photo,
+                                                contentDescription = if (isVideo) "Видео" else "Фото",
+                                                tint = if (isVideo) CyberRed else CyberGreen,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = if (isVideo) "🎥 ВИДЕО // ${file.name}" else "📸 ФОТО // ${file.name}",
+                                                    color = Color.White,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 11.sp
+                                                )
+                                                Text("$dateStr | $sizeKb KB", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                            }
                                         }
-                                        Icon(Icons.Default.Visibility, contentDescription = "View", tint = CyberGreen, modifier = Modifier.size(16.dp))
+                                        Icon(
+                                            imageVector = if (isVideo) Icons.Default.PlayArrow else Icons.Default.Visibility,
+                                            contentDescription = if (isVideo) "Play" else "View",
+                                            tint = CyberGreen,
+                                            modifier = Modifier.size(18.dp)
+                                        )
                                     }
                                 }
                             }

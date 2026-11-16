@@ -174,6 +174,34 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
     }
 
     /**
+     * Fast subsampled luminance clipping detector (0..100%) for real-time False-Color Exposure telemetry.
+     */
+    fun calculateOverexposurePercent(
+        yBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int
+    ): Int {
+        if (width <= 8 || height <= 8) return 0
+        val limit = yBuffer.limit()
+        var clipped = 0
+        var total = 0
+        val step = 8
+        for (y in 0 until height step step) {
+            val rowOffset = y * rowStride
+            for (x in 0 until width step step) {
+                val idx = rowOffset + x
+                if (idx >= limit) continue
+                val lum = yBuffer.get(idx).toInt() and 0xFF
+                if (lum >= 245) clipped++
+                total++
+            }
+        }
+        if (total == 0) return 0
+        return (clipped * 100) / total
+    }
+
+    /**
      * Handheld Multi-Frame Super-Resolution (MFSR 2x):
      * Merges a series of 6-8 frames taken with natural micro-tremor.
      * Uses subpixel Wronski alignment to synthesize a crisp 2x image without pixelation.

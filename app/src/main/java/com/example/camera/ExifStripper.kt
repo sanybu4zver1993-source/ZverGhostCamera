@@ -30,9 +30,14 @@ object ExifStripper {
 
     /**
      * Takes raw camera JPEG bytes, decodes safely, applies rotation,
+     * optionally applies local contrast dehaze + crispness enhancement,
      * re-encodes pixels cleanly, and strips metadata markers.
      */
-    fun processAndPurgeExif(rawJpeg: ByteArray, rotationDegrees: Int): ProcessedImage {
+    fun processAndPurgeExif(
+        rawJpeg: ByteArray,
+        rotationDegrees: Int,
+        applyDehaze: Boolean = false
+    ): ProcessedImage {
         if (rawJpeg.isEmpty() || rawJpeg.size > MAX_JPEG_INPUT_BYTES) {
             throw IOException("Invalid JPEG input size: ${rawJpeg.size} bytes")
         }
@@ -61,6 +66,7 @@ object ExifStripper {
             ?: throw IOException("Failed to decode JPEG bytes into Bitmap")
 
         var rotatedBitmap: Bitmap? = null
+        var dehazedBitmap: Bitmap? = null
         var recompressedJpeg: ByteArray? = null
 
         try {
@@ -75,12 +81,19 @@ object ExifStripper {
                 rotatedBitmap
             }
 
-            val finalW = uprightBitmap.width
-            val finalH = uprightBitmap.height
+            val finalBitmap = if (applyDehaze) {
+                dehazedBitmap = applyContrastDehaze(uprightBitmap)
+                dehazedBitmap
+            } else {
+                uprightBitmap
+            }
+
+            val finalW = finalBitmap.width
+            val finalH = finalBitmap.height
 
             // Step 2: Fresh re-compression of pixel data throws away any camera maker-notes
             val baos = ByteArrayOutputStream()
-            val compressedOk = uprightBitmap.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+            val compressedOk = finalBitmap.compress(Bitmap.CompressFormat.JPEG, 92, baos)
             if (!compressedOk) {
                 throw IOException("JPEG re-compression failed")
             }
@@ -99,10 +112,69 @@ object ExifStripper {
         } finally {
             decodedBitmap.recycle()
             rotatedBitmap?.recycle()
+            dehazedBitmap?.recycle()
             if (recompressedJpeg != null) {
                 Arrays.fill(recompressedJpeg, 0.toByte())
             }
         }
+    }
+
+    /**
+     * Fast dark-channel haze lift & adaptive contrast stretch for low-contrast / foggy captures.
+     */
+    private fun applyContrastDehaze(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        // Subsampled histogram percentile estimation (1% dark floor, 99% bright ceiling)
+        val hist = IntArray(256)
+        val step = maxOf(1, (w * h) / 20_000)
+        var sampled = 0
+        var idx = 0
+        while (idx < pixels.size) {
+            val c = pixels[idx]
+            val r = (c ushr 16) and 0xFF
+            val g = (c ushr 8) and 0xFF
+            val b = c and 0xFF
+            val lum = (r * 77 + g * 150 + b * 29) ushr 8
+            hist[lum]++
+            sampled++
+            idx += step
+        }
+
+        val lowTarget = (sampled * 0.015).toInt()
+        val highTarget = (sampled * 0.985).toInt()
+        var acc = 0
+        var minLum = 0
+        var maxLum = 255
+        for (i in 0..255) {
+            acc += hist[i]
+            if (acc >= lowTarget && minLum == 0) minLum = i
+            if (acc >= highTarget) {
+                maxLum = i
+                break
+            }
+        }
+
+        val span = maxOf(32, maxLum - minLum)
+        val scale = 255f / span
+
+        for (i in pixels.indices) {
+            val c = pixels[i]
+            val r = (((c ushr 16) and 0xFF) - minLum) * scale
+            val g = (((c ushr 8) and 0xFF) - minLum) * scale
+            val b = ((c and 0xFF) - minLum) * scale
+            val nr = r.toInt().coerceIn(0, 255)
+            val ng = g.toInt().coerceIn(0, 255)
+            val nb = b.toInt().coerceIn(0, 255)
+            pixels[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        }
+
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, w, 0, 0, w, h)
+        return out
     }
 
     /**
