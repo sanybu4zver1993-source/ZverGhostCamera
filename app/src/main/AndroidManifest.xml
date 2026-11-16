@@ -15,12 +15,9 @@
         <package android:name="com.arlosoft.macrodroid" />
     </queries>
 
-    <uses-permission
-        android:name="android.permission.INTERNET"
-        tools:node="remove" />
-    <uses-permission
-        android:name="android.permission.ACCESS_NETWORK_STATE"
-        tools:node="remove" />
+    <!-- Required for opt-in BYOK Gemini API (models discovery & :generateContent). Core camera/vault/ML Kit never connect automatically. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-feature
         android:name="android.hardware.camera"

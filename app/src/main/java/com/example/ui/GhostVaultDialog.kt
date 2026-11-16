@@ -102,6 +102,7 @@ fun GhostVaultDialog(
 
     var showWipeConfirm by remember { mutableStateOf(false) }
     var showPrivacyEditor by remember { mutableStateOf(false) }
+    var showVikaAi by remember { mutableStateOf(false) }
     var auditDialogReport by remember { mutableStateOf<ExifStripper.AuditReport?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
@@ -493,6 +494,18 @@ fun GhostVaultDialog(
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text("МАСКА", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberCyan)
                                     }
+
+                                    Button(
+                                        onClick = { showVikaAi = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberGreen.copy(alpha = 0.18f)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_open_vika_ai")
+                                    ) {
+                                        Icon(Icons.Default.Psychology, contentDescription = "Вика AI", modifier = Modifier.size(14.dp), tint = CyberGreen)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("ВИКА AI", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
+                                    }
                                 }
 
                                 Button(
@@ -847,6 +860,15 @@ fun GhostVaultDialog(
                         statusMessage = msg
                         refreshFiles()
                     }
+                )
+            }
+
+            if (showVikaAi && decryptedBitmap != null) {
+                VikaAiSheet(
+                    initialTab = VikaSheetTab.TASKS,
+                    externalBitmap = decryptedBitmap,
+                    onStatusMessage = { msg -> statusMessage = msg },
+                    onDismiss = { showVikaAi = false }
                 )
             }
 

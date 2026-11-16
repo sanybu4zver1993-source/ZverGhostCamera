@@ -186,4 +186,31 @@ class ZverSecurityFeaturesTest {
         assertTrue(risky.warnings.any { it.contains("координат") })
         assertTrue(risky.warnings.any { it.contains("e-mail") })
     }
+
+    @Test
+    fun testByokModelSortingAndVaultAnalytics() {
+        val rawModels = listOf(
+            com.example.assist.ByokManager.DiscoveredModel("gemma-3-27b-it", "Gemma 3", "", 32000, 8192),
+            com.example.assist.ByokManager.DiscoveredModel("gemini-1.5-pro", "Gemini 1.5 Pro", "", 1000000, 8192),
+            com.example.assist.ByokManager.DiscoveredModel("gemini-2.5-flash", "Gemini 2.5 Flash", "", 1000000, 65536),
+            com.example.assist.ByokManager.DiscoveredModel("gemini-4-hydrogen", "Gemini 4 Hydrogen", "", 1000000, 65536)
+        )
+        val sorted = com.example.assist.GeminiByokClient.sortDiscoveredModels(rawModels)
+        assertEquals("gemini-4-hydrogen", sorted.first().id)
+        assertEquals("gemma-3-27b-it", sorted.last().id)
+
+        com.example.assist.ByokManager.clearSessionMemory()
+        com.example.assist.ByokManager.recordStats("gemini-4-hydrogen", 120, 80, 200, 340L, success = true)
+        val stats = com.example.assist.ByokManager.getStats()
+        assertEquals(1, stats.queriesCount)
+        assertEquals(200, stats.totalTokens)
+        assertEquals(340L, stats.lastLatencyMs)
+
+        GhostCryptoVault.addRamShot(byteArrayOf(1, 2, 3, 4, 5, 6), isVideo = false)
+        val snap = com.example.security.VaultAnalytics.captureSnapshot(context)
+        assertEquals(1, snap.ramShotsCount)
+        assertTrue(snap.readinessMax >= 7)
+        val summary = com.example.security.VaultAnalytics.buildTelemetrySummaryForAi(context)
+        assertTrue(summary.contains("gemini-4-hydrogen") || summary.contains("ОЗУ-сейф"))
+    }
 }

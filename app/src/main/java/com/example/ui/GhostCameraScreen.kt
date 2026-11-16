@@ -25,6 +25,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -40,8 +41,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -71,6 +74,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 private val CyberBlack = Color(0xFF070B0E)
 private val CyberGreen = Color(0xFF00FF66)
@@ -117,6 +121,9 @@ fun GhostCameraScreen(
     var showCamouflageDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showJellyTankScreen by remember { mutableStateOf(false) }
+    var isToolsDrawerOpen by remember { mutableStateOf(false) }
+    var showVikaSheet by remember { mutableStateOf(false) }
+    var vikaSheetInitialTab by remember { mutableStateOf(VikaSheetTab.TASKS) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
     var previousCameraMode by remember { mutableStateOf("PHOTO") }
 
@@ -233,9 +240,12 @@ fun GhostCameraScreen(
             if (ZverPrefs.isSnatchProtectionEnabled(context)) {
                 scope.launch(Dispatchers.Main) {
                     GhostCryptoVault.lockSession()
+                    ByokManager.clearSessionMemory()
                     showVaultDialog = false
                     showSettingsDialog = false
                     showJellyTankScreen = false
+                    showVikaSheet = false
+                    isToolsDrawerOpen = false
                     isStealthBlackoutActive = true
                     lastStatusMessage = "⚡ SNATCH LOCK: ДОСТУП ЗАБЛОКИРОВАН"
                     onQuickExitToCamouflage()
@@ -758,13 +768,71 @@ fun GhostCameraScreen(
         return
     }
 
+    val cameraModes = remember {
+        listOf(
+            "СТЕЛС" to "STEALTH",
+            "ВИДЕО" to "VIDEO",
+            "ФОТО" to "PHOTO",
+            "НОЧЬ" to "NIGHT",
+            "ДОК" to "DOCUMENTS",
+            "ГОЛОС" to "VOICE"
+        )
+    }
+
+    fun applyCameraModeSelection(key: String) {
+        if (key == "STEALTH") {
+            if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
+            selectedCameraMode = key
+            isToolsDrawerOpen = false
+            isStealthBlackoutActive = true
+            return
+        }
+        selectedCameraMode = key
+        when (key) {
+            "PHOTO" -> {
+                exposureIndex = 0
+                isDocumentModeActive = false
+                isVoiceControlActive = false
+                lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
+            }
+            "VIDEO" -> {
+                lastStatusMessage = "РЕЖИМ: ВИДЕО В СЕЙФ"
+            }
+            "NIGHT" -> {
+                exposureIndex = 1
+                lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+            }
+            "DOCUMENTS" -> {
+                isDocumentModeActive = true
+                lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (УРОВЕНЬ)"
+            }
+            "VOICE" -> {
+                requestVoiceControlToggle(forceEnable = true)
+            }
+        }
+    }
+
+    val activeToolsCount = listOf(
+        isFocusPeakingEnabled,
+        isFalseColorEnabled,
+        isAutoShutterEnabled,
+        isDocumentModeActive,
+        isFocusBracketingActive,
+        isDcpDehazeActive,
+        timerSeconds > 0,
+        isVoiceControlActive,
+        isAssistModeActive
+    ).count { it }
+
+    val hasByokKey = remember(showVikaSheet, showSettingsDialog) { ByokManager.hasKey(context) }
+
     // MAIN CAMERA VIEWPORT
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // CameraX Live Viewfinder
+        // CameraX Live Viewfinder (touch gestures handled by Compose overlay below for clean swipes + focus)
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
@@ -774,26 +842,85 @@ fun GhostCameraScreen(
                     )
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    setOnTouchListener { _, event ->
-                        if (event.action == MotionEvent.ACTION_UP) {
-                            val factory = meteringPointFactory
-                            val point = factory.createPoint(event.x, event.y)
-                            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
-                                .setAutoCancelDuration(4, java.util.concurrent.TimeUnit.SECONDS)
-                                .build()
-                            cameraControl?.startFocusAndMetering(action)
-                            focusTapPoint = Offset(event.x, event.y)
-                            isFocusLocked = true
-                        }
-                        true
-                    }
                     previewView = this
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Center Tactical Reticle (clean, razor sharp, non-dimming)
+        // Fullscreen Gesture Layer: Tap-to-Focus + Horizontal Mode Swipe + Vertical Drawer/Vika AI Swipe
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(previewView, isToolsDrawerOpen) {
+                    detectTapGestures(
+                        onTap = { tapOffset ->
+                            if (isToolsDrawerOpen) {
+                                isToolsDrawerOpen = false
+                                return@detectTapGestures
+                            }
+                            previewView?.let { pv ->
+                                val point = pv.meteringPointFactory.createPoint(tapOffset.x, tapOffset.y)
+                                val action = FocusMeteringAction.Builder(
+                                    point,
+                                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                                )
+                                    .setAutoCancelDuration(4, java.util.concurrent.TimeUnit.SECONDS)
+                                    .build()
+                                cameraControl?.startFocusAndMetering(action)
+                                focusTapPoint = tapOffset
+                                isFocusLocked = true
+                            }
+                        }
+                    )
+                }
+                .pointerInput(selectedCameraMode, isToolsDrawerOpen) {
+                    var totalDx = 0f
+                    var totalDy = 0f
+                    var handled = false
+                    detectDragGestures(
+                        onDragStart = {
+                            totalDx = 0f
+                            totalDy = 0f
+                            handled = false
+                        },
+                        onDrag = { _, dragAmount ->
+                            if (handled) return@detectDragGestures
+                            totalDx += dragAmount.x
+                            totalDy += dragAmount.y
+                            val threshold = 105f
+                            if (abs(totalDx) > threshold && abs(totalDx) > abs(totalDy) * 1.3f) {
+                                handled = true
+                                val curIdx = cameraModes.indexOfFirst { it.second == selectedCameraMode }.coerceAtLeast(2)
+                                val nextIdx = if (totalDx < 0f) {
+                                    (curIdx + 1).coerceAtMost(cameraModes.lastIndex)
+                                } else {
+                                    (curIdx - 1).coerceAtLeast(1) // avoid accidental swipe straight into blackout
+                                }
+                                if (nextIdx != curIdx) {
+                                    triggerHapticFeedback(isStealth = true)
+                                    applyCameraModeSelection(cameraModes[nextIdx].second)
+                                }
+                            } else if (totalDy > threshold && abs(totalDy) > abs(totalDx) * 1.3f) {
+                                handled = true
+                                triggerHapticFeedback(isStealth = true)
+                                isToolsDrawerOpen = true
+                            } else if (totalDy < -threshold && abs(totalDy) > abs(totalDx) * 1.3f) {
+                                handled = true
+                                triggerHapticFeedback(isStealth = true)
+                                if (isToolsDrawerOpen) {
+                                    isToolsDrawerOpen = false
+                                } else {
+                                    vikaSheetInitialTab = VikaSheetTab.TASKS
+                                    showVikaSheet = true
+                                }
+                            }
+                        }
+                    )
+                }
+        )
+
+        // Center Tactical Reticle
         TacticalReticle(modifier = Modifier.fillMaxSize())
 
         // Document Level Overlay (Virtual Inclinometer)
@@ -803,31 +930,14 @@ fun GhostCameraScreen(
                 Canvas(modifier = Modifier.size(160.dp)) {
                     val cx = size.width / 2
                     val cy = size.height / 2
-                    drawCircle(
-                        color = crosshairColor,
-                        radius = 56.dp.toPx(),
-                        style = Stroke(width = 2.dp.toPx())
-                    )
-                    drawCircle(
-                        color = crosshairColor.copy(alpha = 0.35f),
-                        radius = 14.dp.toPx()
-                    )
-                    drawLine(
-                        color = crosshairColor,
-                        start = Offset(cx - 64.dp.toPx(), cy),
-                        end = Offset(cx + 64.dp.toPx(), cy),
-                        strokeWidth = 2.dp.toPx()
-                    )
-                    drawLine(
-                        color = crosshairColor,
-                        start = Offset(cx, cy - 64.dp.toPx()),
-                        end = Offset(cx, cy + 64.dp.toPx()),
-                        strokeWidth = 2.dp.toPx()
-                    )
+                    drawCircle(color = crosshairColor, radius = 56.dp.toPx(), style = Stroke(width = 2.dp.toPx()))
+                    drawCircle(color = crosshairColor.copy(alpha = 0.35f), radius = 14.dp.toPx())
+                    drawLine(color = crosshairColor, start = Offset(cx - 64.dp.toPx(), cy), end = Offset(cx + 64.dp.toPx(), cy), strokeWidth = 2.dp.toPx())
+                    drawLine(color = crosshairColor, start = Offset(cx, cy - 64.dp.toPx()), end = Offset(cx, cy + 64.dp.toPx()), strokeWidth = 2.dp.toPx())
                 }
                 Text(
-                    text = if (isDocumentParallel) "ДОКУМЕНТ В ПЛОСКОСТИ: ${String.format("%.1f", documentTiltDeg)}° [ЗАФИКСИРОВАНО]" else "НАКЛОН: ${String.format("%.1f", documentTiltDeg)}° (ВЫРОВНЯЙ СТОЛ)",
-                    color = if (isDocumentParallel) CyberGreen else NeonYellow,
+                    text = if (isDocumentParallel) "ДОКУМЕНТ В ПЛОСКОСТИ: ${String.format("%.1f", documentTiltDeg)}° [ОК]" else "НАКЛОН: ${String.format("%.1f", documentTiltDeg)}°",
+                    color = crosshairColor,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 11.sp,
@@ -857,7 +967,7 @@ fun GhostCameraScreen(
         // Tap-To-Focus Indicator
         focusTapPoint?.let { pt ->
             LaunchedEffect(pt) {
-                delay(2000)
+                delay(1800)
                 focusTapPoint = null
             }
             Canvas(modifier = Modifier.fillMaxSize()) {
@@ -866,7 +976,7 @@ fun GhostCameraScreen(
             }
         }
 
-        // SHUTTER FLASH ANIMATION: Instant green flash when shutter triggers!
+        // SHUTTER FLASH ANIMATION
         if (showShutterFlash) {
             Box(
                 modifier = Modifier
@@ -881,105 +991,124 @@ fun GhostCameraScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .border(4.dp, CyberRed.copy(alpha = redBorderAlpha))
+                    .border(3.dp, CyberRed.copy(alpha = redBorderAlpha))
             )
         }
 
-        // TOP TRANSLUCENT TACTICAL HUD (Clean translucent glass design)
+        // MINIMALIST TOP PILL + COLLAPSIBLE PULL-DOWN TACTICAL DRAWER
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
+            val ramMode = ZverPrefs.isRamOnlyMode(context)
+            val presetShort = when (ZverPrefs.getCompressionPreset(context)) {
+                com.example.camera.ExifStripper.CompressionPreset.ULTRA_TINY -> "WebP"
+                com.example.camera.ExifStripper.CompressionPreset.BALANCED -> "WebP+"
+                com.example.camera.ExifStripper.CompressionPreset.DOCUMENT_BW -> "Ч/Б"
+                com.example.camera.ExifStripper.CompressionPreset.HIGH_QUALITY -> "JPEG"
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(CyberBlack.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(CyberBlack.copy(alpha = 0.58f))
                     .border(
                         1.dp,
-                        if (isAssistModeActive) CyberRed.copy(alpha = 0.8f) else CyberGreen.copy(alpha = 0.35f),
-                        RoundedCornerShape(10.dp)
+                        if (isAssistModeActive) CyberRed.copy(alpha = 0.7f) else CyberGreen.copy(alpha = 0.3f),
+                        RoundedCornerShape(16.dp)
                     )
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(start = 12.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(if (isAssistModeActive) CyberRed else CyberGreen)
+                                .background(if (isAssistModeActive) CyberRed else if (hasByokKey) NeonCyan else CyberGreen)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "ZVER CAMERA v4.2 🐾",
-                            color = if (isAssistModeActive) CyberRed else CyberGreen,
+                            text = "ZVER",
+                            color = Color.White,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (ramMode) "ОЗУ • $presetShort" else "СЕЙФ • $presetShort",
+                            color = if (ramMode) NeonYellow else CyberGreen,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(CyberSurface.copy(alpha = 0.8f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
-                    val ramMode = ZverPrefs.isRamOnlyMode(context)
-                    val presetShort = when (ZverPrefs.getCompressionPreset(context)) {
-                        com.example.camera.ExifStripper.CompressionPreset.ULTRA_TINY -> "МИНИ-WebP"
-                        com.example.camera.ExifStripper.CompressionPreset.BALANCED -> "БАЛАНС-WebP"
-                        com.example.camera.ExifStripper.CompressionPreset.DOCUMENT_BW -> "ДОК-Ч/Б"
-                        com.example.camera.ExifStripper.CompressionPreset.HIGH_QUALITY -> "МАКС-JPEG"
-                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                    val stabilityText = if (isTripodMode) "ШТАТИВ" else if (isGyroStable) "СТАБИЛЬНО" else "ТРЯСКА!"
                     Text(
-                        text = if (ramMode) "ОЗУ-КОНТУР // 0B НА ДИСК ($presetShort)" else "ХОЛОДНЫЙ РЕЖИМ // $presetShort",
-                        color = if (ramMode) NeonYellow else CyberMuted,
+                        text = "$stabilityText • РЕЗК:${liveLaplacianVariance.toInt()} • ↓ИНСТР / ↑ВИКА",
+                        color = if (isGyroStable) CyberMuted else CyberRed,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp
                     )
                 }
 
+                // Clean 3-button Top Cluster (44dp+ targets)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Tactical Torch
-                    IconButton(onClick = { isTorchActive = !isTorchActive }, modifier = Modifier.size(36.dp).testTag("torch_button")) {
+                    IconButton(
+                        onClick = { isTorchActive = !isTorchActive },
+                        modifier = Modifier.size(44.dp).testTag("torch_button")
+                    ) {
                         Icon(
                             imageVector = if (isTorchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
                             contentDescription = "Фонарик",
-                            tint = if (isTorchActive) NeonYellow else CyberMuted,
-                            modifier = Modifier.size(18.dp)
+                            tint = if (isTorchActive) NeonYellow else Color.White,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
-                    // Settings & AI Center (Vika & Prompts)
-                    IconButton(onClick = { showSettingsDialog = true }, modifier = Modifier.size(36.dp).testTag("settings_button")) {
-                        Icon(Icons.Default.Settings, contentDescription = "Настройки и Промпт", tint = CyberGreen, modifier = Modifier.size(18.dp))
+                    Box(contentAlignment = Alignment.TopEnd) {
+                        IconButton(
+                            onClick = { isToolsDrawerOpen = !isToolsDrawerOpen },
+                            modifier = Modifier.size(44.dp).testTag("tools_drawer_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isToolsDrawerOpen) Icons.Default.KeyboardArrowUp else Icons.Default.Tune,
+                                contentDescription = "Шторка инструментов",
+                                tint = if (isToolsDrawerOpen || activeToolsCount > 0) CyberGreen else Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        if (activeToolsCount > 0 && !isToolsDrawerOpen) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 6.dp, end = 6.dp)
+                                    .size(15.dp)
+                                    .clip(CircleShape)
+                                    .background(CyberGreen),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = activeToolsCount.toString(),
+                                    color = Color.Black,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
                     }
 
-                    // Stealth Blackout Toggle
-                    IconButton(
-                        onClick = {
-                            if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
-                            isStealthBlackoutActive = true
-                        },
-                        modifier = Modifier.size(36.dp).testTag("stealth_button")
-                    ) {
-                        Icon(Icons.Default.DarkMode, contentDescription = "Стелс", tint = NeonCyan, modifier = Modifier.size(18.dp))
-                    }
-
-                    // Camouflage Selector
-                    IconButton(onClick = { showCamouflageDialog = true }, modifier = Modifier.size(36.dp).testTag("camouflage_button")) {
-                        Icon(Icons.Default.VisibilityOff, contentDescription = "Маскировка", tint = CyberGreen, modifier = Modifier.size(18.dp))
-                    }
-
-                    // Assist Process Toggle
-                    IconButton(onClick = { isAssistModeActive = !isAssistModeActive }, modifier = Modifier.size(36.dp).testTag("assist_toggle_button")) {
-                        Icon(
-                            imageVector = if (isAssistModeActive) Icons.Default.Warning else Icons.Default.Shield,
-                            contentDescription = "Ассистент",
-                            tint = if (isAssistModeActive) CyberRed else CyberMuted,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Lens Flip
                     IconButton(
                         onClick = {
                             lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
@@ -988,151 +1117,178 @@ fun GhostCameraScreen(
                                 CameraSelector.LENS_FACING_BACK
                             }
                         },
-                        modifier = Modifier.size(36.dp).testTag("flip_camera_button")
+                        modifier = Modifier.size(44.dp).testTag("flip_camera_button")
                     ) {
-                        Icon(Icons.Default.FlipCameraAndroid, contentDescription = "Перевернуть камеру", tint = CyberGreen, modifier = Modifier.size(18.dp))
+                        Icon(
+                            imageVector = Icons.Default.FlipCameraAndroid,
+                            contentDescription = "Перевернуть камеру",
+                            tint = CyberGreen,
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // Gyro & Sensor Telemetry Bar (Translucent glass)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(CyberBlack.copy(alpha = 0.40f), RoundedCornerShape(8.dp))
-                    .border(1.dp, CyberBorder.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // PULL-DOWN HIDDEN TACTICAL TOOLS DRAWER (12 buttons tucked neatly out of the way!)
+            AnimatedVisibility(
+                visible = isToolsDrawerOpen,
+                enter = expandVertically(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = shrinkVertically(animationSpec = spring(stiffness = Spring.StiffnessMedium)) + fadeOut()
             ) {
-                val gyroLabel = when {
-                    isTripodMode -> "ШТАТИВ: СТАБИЛИЗАЦИЯ"
-                    isGyroStable -> "С РУК: СТАБИЛЬНО"
-                    else -> "ВНИМАНИЕ: ТРЯСКА!"
-                }
-                val gyroColor = if (isGyroStable) CyberGreen else CyberRed
-                Text(
-                    text = "$gyroLabel | РЕЗКОСТЬ: ${liveLaplacianVariance.toInt()}",
-                    color = gyroColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(CyberSurface.copy(alpha = 0.94f), CyberBlack.copy(alpha = 0.96f))
+                            )
+                        )
+                        .border(1.dp, CyberGreen.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Row 1: Optics & Overlays
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DrawerTileButton(
+                            icon = Icons.Default.CenterFocusStrong,
+                            label = "Фокус-пик",
+                            active = isFocusPeakingEnabled,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f)
+                        ) { isFocusPeakingEnabled = !isFocusPeakingEnabled }
 
-                Text(
-                    text = "МАКРО: от 10см",
-                    color = CyberMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.sp
-                )
-            }
+                        DrawerTileButton(
+                            icon = Icons.Default.Exposure,
+                            label = "Экспо-карта",
+                            active = isFalseColorEnabled,
+                            accent = NeonYellow,
+                            modifier = Modifier.weight(1f)
+                        ) { isFalseColorEnabled = !isFalseColorEnabled }
 
-            Spacer(modifier = Modifier.height(4.dp))
+                        DrawerTileButton(
+                            icon = Icons.Default.CropFree,
+                            label = "Уровень док",
+                            active = isDocumentModeActive,
+                            accent = CyberGreen,
+                            modifier = Modifier.weight(1f)
+                        ) { isDocumentModeActive = !isDocumentModeActive }
 
-            // Tools Horizontal Scroll Bar (100% Russian labels)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                FilterChip(
-                    selected = isFocusPeakingEnabled,
-                    onClick = { isFocusPeakingEnabled = !isFocusPeakingEnabled },
-                    label = { Text("ФОКУС-ПИК", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = NeonCyan.copy(alpha = 0.35f),
-                        selectedLabelColor = NeonCyan,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = isFalseColorEnabled,
-                    onClick = { isFalseColorEnabled = !isFalseColorEnabled },
-                    label = { Text("ЭКСПО-КАРТА", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = NeonYellow.copy(alpha = 0.35f),
-                        selectedLabelColor = NeonYellow,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = isAutoShutterEnabled,
-                    onClick = { isAutoShutterEnabled = !isAutoShutterEnabled },
-                    label = { Text("АВТОСПУСК", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = CyberGreen.copy(alpha = 0.35f),
-                        selectedLabelColor = CyberGreen,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = isDocumentModeActive,
-                    onClick = { isDocumentModeActive = !isDocumentModeActive },
-                    label = { Text("УРОВЕНЬ ДОК", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = CyberGreen.copy(alpha = 0.35f),
-                        selectedLabelColor = CyberGreen,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = isFocusBracketingActive,
-                    onClick = { isFocusBracketingActive = !isFocusBracketingActive },
-                    label = { Text("БРЕКЕТИНГ", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = NeonCyan.copy(alpha = 0.35f),
-                        selectedLabelColor = NeonCyan,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = isDcpDehazeActive,
-                    onClick = { isDcpDehazeActive = !isDcpDehazeActive },
-                    label = { Text("АНТИ-ТУМАН", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = CyberGreen.copy(alpha = 0.35f),
-                        selectedLabelColor = CyberGreen,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = timerSeconds > 0,
-                    onClick = {
-                        timerSeconds = when (timerSeconds) {
-                            0 -> 3
-                            3 -> 5
-                            5 -> 10
-                            else -> 0
+                        DrawerTileButton(
+                            icon = Icons.Default.AutoFixHigh,
+                            label = "Анти-туман",
+                            active = isDcpDehazeActive,
+                            accent = CyberGreen,
+                            modifier = Modifier.weight(1f)
+                        ) { isDcpDehazeActive = !isDcpDehazeActive }
+                    }
+
+                    // Row 2: Shutter & Capture
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DrawerTileButton(
+                            icon = Icons.Default.ShutterSpeed,
+                            label = "Автоспуск",
+                            active = isAutoShutterEnabled,
+                            accent = CyberGreen,
+                            modifier = Modifier.weight(1f)
+                        ) { isAutoShutterEnabled = !isAutoShutterEnabled }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.BurstMode,
+                            label = "Брекетинг",
+                            active = isFocusBracketingActive,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f)
+                        ) { isFocusBracketingActive = !isFocusBracketingActive }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.Timer,
+                            label = if (timerSeconds == 0) "Таймер" else "Тайм ${timerSeconds}с",
+                            active = timerSeconds > 0,
+                            accent = NeonYellow,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            timerSeconds = when (timerSeconds) {
+                                0 -> 3
+                                3 -> 5
+                                5 -> 10
+                                else -> 0
+                            }
                         }
-                    },
-                    label = { Text(if (timerSeconds == 0) "ТАЙМЕР" else "ТАЙМЕР: ${timerSeconds}С", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = NeonYellow.copy(alpha = 0.35f),
-                        selectedLabelColor = NeonYellow,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
-                FilterChip(
-                    selected = isVoiceControlActive,
-                    onClick = { requestVoiceControlToggle() },
-                    label = { Text(if (isVoiceControlActive) "🎙️ ГОЛОС: ВКЛ" else "🎙️ ГОЛОС", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = NeonCyan.copy(alpha = 0.35f),
-                        selectedLabelColor = NeonCyan,
-                        containerColor = CyberBlack.copy(alpha = 0.45f),
-                        labelColor = CyberMuted
-                    )
-                )
+
+                        DrawerTileButton(
+                            icon = Icons.Default.Mic,
+                            label = "Голос",
+                            active = isVoiceControlActive,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f)
+                        ) { requestVoiceControlToggle() }
+                    }
+
+                    // Row 3: Stealth, Camo, AI & Settings
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DrawerTileButton(
+                            icon = Icons.Default.DarkMode,
+                            label = "Стелс",
+                            active = false,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f).testTag("stealth_button")
+                        ) {
+                            isToolsDrawerOpen = false
+                            if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
+                            isStealthBlackoutActive = true
+                        }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.VisibilityOff,
+                            label = "Камуфляж",
+                            active = false,
+                            accent = CyberGreen,
+                            modifier = Modifier.weight(1f).testTag("camouflage_button")
+                        ) {
+                            isToolsDrawerOpen = false
+                            showCamouflageDialog = true
+                        }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.Shield,
+                            label = "Ассист :AI",
+                            active = isAssistModeActive,
+                            accent = CyberRed,
+                            modifier = Modifier.weight(1f).testTag("assist_toggle_button")
+                        ) { isAssistModeActive = !isAssistModeActive }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.Settings,
+                            label = "Настройки",
+                            active = false,
+                            accent = CyberGreen,
+                            modifier = Modifier.weight(1f).testTag("settings_button")
+                        ) {
+                            isToolsDrawerOpen = false
+                            showSettingsDialog = true
+                        }
+                    }
+
+                    // Drawer collapse handle
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { isToolsDrawerOpen = false }
+                            .padding(vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "▲ СПРЯТАТЬ ПАНЕЛЬ",
+                            color = CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp
+                        )
+                    }
+                }
             }
         }
 
@@ -1149,14 +1305,14 @@ fun GhostCameraScreen(
             }
         }
 
-        // Notification Banner: Prominent clear status badge
+        // Notification Banner
         AnimatedVisibility(
             visible = isCapturing || lastStatusMessage != null || isRecordingVideo,
             enter = fadeIn() + slideInVertically(),
             exit = fadeOut() + slideOutVertically(),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 160.dp)
+                .padding(top = 86.dp)
         ) {
             Box(
                 modifier = Modifier
@@ -1169,54 +1325,31 @@ fun GhostCameraScreen(
                     if (isRecordingVideo) {
                         val m = recordingDurationSeconds / 60
                         val s = recordingDurationSeconds % 60
-                        val timerStr = String.format(java.util.Locale.ROOT, "%02d:%02d", m, s)
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                .background(CyberRed)
-                        )
+                        val timerStr = String.format(Locale.ROOT, "%02d:%02d", m, s)
+                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(CyberRed))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "🔴 ЗАПИСЬ ВИДЕО В СЕЙФ: $timerStr",
-                            color = CyberRed,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
+                        Text("🔴 ЗАПИСЬ В СЕЙФ: $timerStr", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     } else if (isCapturing) {
                         CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "ШИФРОВАНИЕ В СЕЙФ...",
-                            color = CyberGreen,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
+                        Text("ШИФРОВАНИЕ...", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     } else {
-                        Text(
-                            text = lastStatusMessage ?: "",
-                            color = CyberGreen,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
+                        Text(lastStatusMessage ?: "", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     }
                 }
             }
         }
 
-        // BOTTOM CONTROLS HUD (Translucent glass floating above preview)
+        // BOTTOM ERGONOMIC CONTROL DECK
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Zoom & Exposure quick toggles
+            // Compact Zoom + EV Floating Strip
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1224,61 +1357,77 @@ fun GhostCameraScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Zoom toggles (1x, 2x, 4x, 6x, 10x as in stock camera!)
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(CyberBlack.copy(alpha = 0.55f))
+                        .border(1.dp, CyberBorder.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     listOf(1.0f, 2.0f, 4.0f, 6.0f, 10.0f).forEach { z ->
-                        Text(
-                            text = "${z.toInt()}x",
-                            color = if (zoomRatio == z) CyberGreen else CyberMuted,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
+                        val sel = zoomRatio == z
+                        Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (zoomRatio == z) CyberGreen.copy(alpha = 0.35f) else CyberBlack.copy(alpha = 0.45f))
-                                .border(1.dp, if (zoomRatio == z) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
+                                .height(30.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (sel) CyberGreen.copy(alpha = 0.25f) else Color.Transparent)
                                 .clickable {
                                     zoomRatio = z
                                     lastStatusMessage = "ЗУМ: ${z.toInt()}x"
                                 }
-                                .padding(horizontal = 7.dp, vertical = 4.dp)
-                        )
+                                .padding(horizontal = 9.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${z.toInt()}x",
+                                color = if (sel) CyberGreen else CyberMuted,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
 
-                // EV Steps (Exposure: Brightness control)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(-1, 0, 1).forEach { ev ->
-                        val evLabel = when (ev) {
-                            0 -> "АВТО"
-                            1 -> "+СВЕТ"
-                            else -> "-ТЕНЬ"
+                // Compact EV cycle pill (tucks 3 buttons into 1 sleek pill)
+                val evLabel = when (exposureIndex) {
+                    1 -> "EV +1"
+                    -1 -> "EV -1"
+                    else -> "EV 0"
+                }
+                Box(
+                    modifier = Modifier
+                        .height(38.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(CyberBlack.copy(alpha = 0.55f))
+                        .border(1.dp, if (exposureIndex != 0) NeonYellow else CyberBorder, RoundedCornerShape(20.dp))
+                        .clickable {
+                            exposureIndex = when (exposureIndex) {
+                                0 -> 1
+                                1 -> -1
+                                else -> 0
+                            }
+                            lastStatusMessage = when (exposureIndex) {
+                                1 -> "ЯРКОСТЬ: +1 (СВЕТ)"
+                                -1 -> "ЯРКОСТЬ: -1 (ТЕНЬ)"
+                                else -> "ЯРКОСТЬ: АВТО"
+                            }
                         }
-                        Text(
-                            text = evLabel,
-                            color = if (exposureIndex == ev) CyberGreen else CyberMuted,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (exposureIndex == ev) CyberGreen.copy(alpha = 0.35f) else CyberBlack.copy(alpha = 0.45f))
-                                .border(1.dp, if (exposureIndex == ev) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
-                                .clickable {
-                                    exposureIndex = ev
-                                    lastStatusMessage = when (ev) {
-                                        1 -> "ЯРКОСТЬ: +1 (СВЕТ В ТЕМНОТЕ)"
-                                        -1 -> "ЯРКОСТЬ: -1 (ЗАТЕМНЕНИЕ БЛИКОВ)"
-                                        else -> "ЯРКОСТЬ: АВТО"
-                                    }
-                                }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = evLabel,
+                        color = if (exposureIndex != 0) NeonYellow else CyberMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
 
-            // Xiaomi / MIUI-style Mode Carousel with yellow active dot!
+            // MIUI-style Mode Carousel (synced with Left/Right swipes)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1287,50 +1436,14 @@ fun GhostCameraScreen(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                listOf(
-                    "СТЕЛС" to "STEALTH",
-                    "ВИДЕО" to "VIDEO",
-                    "ФОТО" to "PHOTO",
-                    "НОЧЬ" to "NIGHT",
-                    "ДОКУМЕНТЫ" to "DOCUMENTS",
-                    "ГОЛОС" to "VOICE"
-                ).forEach { (title, key) ->
+                cameraModes.forEach { (title, key) ->
                     val isSelected = selectedCameraMode == key
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .clickable {
-                                if (key == "STEALTH") {
-                                    if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
-                                    selectedCameraMode = key
-                                    isStealthBlackoutActive = true
-                                } else {
-                                    selectedCameraMode = key
-                                    when (key) {
-                                        "PHOTO" -> {
-                                            exposureIndex = 0
-                                            isDocumentModeActive = false
-                                            isVoiceControlActive = false
-                                            lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
-                                        }
-                                        "VIDEO" -> {
-                                            lastStatusMessage = "РЕЖИМ: ВИДЕОСЪЁМКА В СЕЙФ"
-                                        }
-                                        "NIGHT" -> {
-                                            exposureIndex = 1
-                                            lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
-                                        }
-                                        "DOCUMENTS" -> {
-                                            isDocumentModeActive = true
-                                            lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (ЛАЗЕРНЫЙ ПРИЦЕЛ)"
-                                        }
-                                        "VOICE" -> {
-                                            requestVoiceControlToggle(forceEnable = true)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { applyCameraModeSelection(key) }
+                            .padding(horizontal = 11.dp, vertical = 5.dp)
                     ) {
                         Text(
                             text = title,
@@ -1343,118 +1456,123 @@ fun GhostCameraScreen(
                         Box(
                             modifier = Modifier
                                 .size(4.dp)
-                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .clip(CircleShape)
                                 .background(if (isSelected) NeonYellow else Color.Transparent)
                         )
                     }
                 }
             }
 
-            // Primary Action Row: Vault, Photo/Video Shutters, Panic Shred
+            // Balanced 48dp+ Primary Action Deck
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(CyberBlack.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                    .border(1.dp, CyberBorder.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(CyberBlack.copy(alpha = 0.65f))
+                    .border(1.dp, CyberBorder.copy(alpha = 0.7f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Vault Button
                 Button(
                     onClick = { showVaultDialog = true },
-                    modifier = Modifier.testTag("vault_button"),
-                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.85f)),
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen.copy(alpha = 0.5f)),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    modifier = Modifier.height(48.dp).testTag("vault_button"),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.9f)),
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen.copy(alpha = 0.55f)),
+                    contentPadding = PaddingValues(horizontal = 12.dp)
                 ) {
                     Icon(Icons.Default.Lock, contentDescription = "Сейф", tint = CyberGreen, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "СХРОН ($vaultCount)",
+                        text = "$vaultCount",
                         color = CyberGreen,
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                // Center Action: Dual Photo & Video Controls
+                // Center Shutter + Video Quick Control
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     if (selectedCameraMode == "VIDEO") {
-                        // Large Red Video Record Button
                         Box(
                             modifier = Modifier
                                 .size(72.dp)
                                 .testTag("video_record_button")
-                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                .border(3.dp, CyberRed, androidx.compose.foundation.shape.CircleShape)
+                                .clip(CircleShape)
+                                .border(3.dp, CyberRed, CircleShape)
                                 .clickable { triggerVideoRecordingToggle() },
                             contentAlignment = Alignment.Center
                         ) {
                             if (isRecordingVideo) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(CyberRed)
-                                )
+                                Box(modifier = Modifier.size(28.dp).clip(RoundedCornerShape(6.dp)).background(CyberRed))
                             } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(54.dp)
-                                        .clip(androidx.compose.foundation.shape.CircleShape)
-                                        .background(CyberRed)
-                                )
+                                Box(modifier = Modifier.size(54.dp).clip(CircleShape).background(CyberRed))
                             }
                         }
                     } else {
-                        // Standard Mode: White Photo Shutter + Dedicated Red Video button right next to it!
                         ShutterButton(
                             isCapturing = isCapturing || countdownRemaining != null,
                             isAssistMode = isAssistModeActive,
                             onClick = { triggerPhotoCapture() }
                         )
 
-                        // Dedicated Red Video Button (Quick start recording!)
                         Box(
                             modifier = Modifier
                                 .size(48.dp)
                                 .testTag("video_record_button")
-                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                .background(CyberRed.copy(alpha = 0.25f))
-                                .border(1.5.dp, CyberRed, androidx.compose.foundation.shape.CircleShape)
+                                .clip(CircleShape)
+                                .background(CyberRed.copy(alpha = 0.22f))
+                                .border(1.5.dp, CyberRed, CircleShape)
                                 .clickable {
                                     selectedCameraMode = "VIDEO"
                                     triggerVideoRecordingToggle()
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                Icons.Default.Videocam,
-                                contentDescription = "Запись видео",
-                                tint = CyberRed,
-                                modifier = Modifier.size(24.dp)
-                            )
+                            Icon(Icons.Default.Videocam, contentDescription = "Запись видео", tint = CyberRed, modifier = Modifier.size(22.dp))
                         }
                     }
                 }
 
-                // Panic Shred Button
-                IconButton(
-                    onClick = { showPanicConfirm = true },
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("panic_shred_button")
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(CyberRed.copy(alpha = 0.25f))
-                        .border(1.dp, CyberRed.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
-                ) {
-                    Icon(Icons.Default.DeleteForever, contentDescription = "Шредер", tint = CyberRed, modifier = Modifier.size(22.dp))
+                // Right Cluster: Vika AI Sheet + Panic Shred (48dp each)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            vikaSheetInitialTab = VikaSheetTab.TASKS
+                            showVikaSheet = true
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("vika_ai_button")
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (hasByokKey) NeonCyan.copy(alpha = 0.2f) else CyberSurface)
+                            .border(1.dp, if (hasByokKey) NeonCyan else CyberBorder, RoundedCornerShape(14.dp))
+                    ) {
+                        Icon(
+                            Icons.Default.Psychology,
+                            contentDescription = "Вика AI и Аналитика",
+                            tint = if (hasByokKey) NeonCyan else CyberMuted,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { showPanicConfirm = true },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("panic_shred_button")
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(CyberRed.copy(alpha = 0.22f))
+                            .border(1.dp, CyberRed.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+                    ) {
+                        Icon(Icons.Default.DeleteForever, contentDescription = "Шредер", tint = CyberRed, modifier = Modifier.size(22.dp))
+                    }
                 }
             }
         }
@@ -1530,42 +1648,39 @@ fun GhostCameraScreen(
                 onOpenBioTracker = {
                     showJellyTankScreen = true
                 },
+                onOpenVikaSheet = {
+                    vikaSheetInitialTab = VikaSheetTab.TASKS
+                    showVikaSheet = true
+                },
                 onCamouflageChanged = { mode ->
                     currentCamouflage = mode
                 },
                 onSelectMode = { modeKey ->
-                    if (modeKey == "STEALTH" && selectedCameraMode != "STEALTH") {
-                        previousCameraMode = selectedCameraMode
-                    }
-                    selectedCameraMode = modeKey
-                    when (modeKey) {
-                        "STEALTH" -> {
-                            isStealthBlackoutActive = true
-                        }
-                        "PHOTO" -> {
-                            exposureIndex = 0
-                            isDocumentModeActive = false
-                            isVoiceControlActive = false
-                            lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
-                        }
-                        "VIDEO" -> lastStatusMessage = "РЕЖИМ: ВИДЕОСЪЁМКА В СЕЙФ"
-                        "NIGHT" -> {
-                            exposureIndex = 1
-                            lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
-                        }
-                        "DOCUMENTS" -> {
-                            isDocumentModeActive = true
-                            lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (ЛАЗЕРНЫЙ ПРИЦЕЛ)"
-                        }
-                        "MACRO" -> {
-                            zoomRatio = 2.0f
-                            lastStatusMessage = "РЕЖИМ: МАКРО (2x ЗУМ)"
-                        }
-                        "VOICE" -> {
-                            requestVoiceControlToggle(forceEnable = true)
-                        }
+                    if (modeKey == "MACRO") {
+                        zoomRatio = 2.0f
+                        lastStatusMessage = "РЕЖИМ: МАКРО (2x ЗУМ)"
+                    } else {
+                        applyCameraModeSelection(modeKey)
                     }
                 }
+            )
+        }
+
+        if (showVikaSheet) {
+            VikaAiSheet(
+                initialTab = vikaSheetInitialTab,
+                externalBitmap = null,
+                onCaptureLiveFrame = {
+                    val cap = imageCapture ?: return@VikaAiSheet null
+                    val manager = CaptureManager(
+                        context = context,
+                        imageCapture = cap,
+                        captureExecutor = captureExecutor
+                    )
+                    manager.captureCleanFrameForAi()
+                },
+                onStatusMessage = { msg -> lastStatusMessage = msg },
+                onDismiss = { showVikaSheet = false }
             )
         }
 
@@ -1592,6 +1707,7 @@ fun GhostCameraScreen(
                         onClick = {
                             GhostCryptoVault.cryptoShred(context)
                             com.example.crypto.MonoVaultEngine.cryptoShredMonolith(context)
+                            ByokManager.clearSessionMemory()
                             vaultCount = 0
                             showPanicConfirm = false
                             lastStatusMessage = "СХРОН И КЛЮЧИ ПОЛНОСТЬЮ УНИЧТОЖЕНЫ"
@@ -1605,5 +1721,43 @@ fun GhostCameraScreen(
                 containerColor = CyberSurface
             )
         }
+    }
+}
+
+@Composable
+private fun DrawerTileButton(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .height(54.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (active) accent.copy(alpha = 0.22f) else CyberBlack.copy(alpha = 0.55f))
+            .border(1.dp, if (active) accent else CyberBorder, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (active) accent else Color.White,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = label,
+            color = if (active) accent else CyberMuted,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 8.sp,
+            maxLines = 1
+        )
     }
 }

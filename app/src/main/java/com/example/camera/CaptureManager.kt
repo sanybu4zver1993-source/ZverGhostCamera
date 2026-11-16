@@ -251,5 +251,28 @@ class CaptureManager(
         )
     }
 
+    /**
+     * Captures a compact, EXIF-stripped WebP frame strictly in RAM for user-triggered BYOK AI analysis.
+     * Never touches disk or MediaStore, and zeroes out the raw JPEG camera buffer immediately.
+     */
+    suspend fun captureCleanFrameForAi(): Pair<ByteArray, String> = captureMutex.withLock {
+        val rawShot = captureRawJpeg()
+        try {
+            withContext(Dispatchers.Default) {
+                val processed = ExifStripper.processAndPurgeExif(
+                    rawJpeg = rawShot.bytes,
+                    rotationDegrees = rawShot.rotationDegrees,
+                    applyDehaze = false,
+                    preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                    antiPrnu = false
+                )
+                val mime = if (processed.isWebP) "image/webp" else "image/jpeg"
+                Pair(processed.cleanJpegBytes, mime)
+            }
+        } finally {
+            Arrays.fill(rawShot.bytes, 0.toByte())
+        }
+    }
+
     private fun u(b: Byte): Int = b.toInt() and 0xFF
 }

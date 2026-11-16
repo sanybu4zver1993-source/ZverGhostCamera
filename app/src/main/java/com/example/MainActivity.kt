@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.assist.ByokManager
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
 import com.example.security.ZverPrefs
@@ -109,6 +110,7 @@ class MainActivity : ComponentActivity() {
         }
         if (ZverPrefs.isAutoLockOnBackground(this)) {
             GhostCryptoVault.lockSession()
+            ByokManager.clearSessionMemory()
         }
     }
 
@@ -132,6 +134,7 @@ class MainActivity : ComponentActivity() {
                 "stealth" -> onBlackoutToggleTrigger?.invoke()
                 "lock" -> {
                     GhostCryptoVault.lockSession()
+                    ByokManager.clearSessionMemory()
                     onLockGateTrigger?.invoke()
                 }
             }
@@ -145,6 +148,7 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {}
         if (isFinishing) {
             GhostCryptoVault.clearRamShots()
+            ByokManager.clearSessionMemory()
         }
     }
 
@@ -329,7 +333,7 @@ fun CameraPermissionGate(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "АВТОНОМНЫЙ СХРОН // 0% СЕТИ // БЕЗ EXIF",
+                    text = "ОФФЛАЙН-СХРОН // OPT-IN BYOK // БЕЗ EXIF",
                     color = CyberMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp
@@ -338,7 +342,7 @@ fun CameraPermissionGate(
                 Spacer(modifier = Modifier.height(20.dp))
 
                 Text(
-                    text = "Камере нужен прямой доступ к сенсору устройства. Интернет и сетевые библиотеки физически вырезаны из манифеста APK — утечка невозможна.",
+                    text = "Камере нужен прямой доступ к сенсору устройства. Снимки и сейф шифруются локально без фоновой телеметрии. Сеть (INTERNET) используется ТОЛЬКО по твоему запросу при подключении твоего BYOK API-ключа.",
                     color = Color.White,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center

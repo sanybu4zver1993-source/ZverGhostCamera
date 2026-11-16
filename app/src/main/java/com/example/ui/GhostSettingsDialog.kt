@@ -27,10 +27,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.assist.ByokManager
+import com.example.assist.GeminiByokClient
 import com.example.camera.ExifStripper
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
 import com.example.security.ZverPrefs
+import kotlinx.coroutines.launch
+import java.util.Arrays
 
 private val CyberBlack = Color(0xFF070B0E)
 private val CyberGreen = Color(0xFF00FF66)
@@ -56,10 +59,12 @@ fun GhostSettingsDialog(
     onSelectMode: (String) -> Unit = {},
     onOpenPinSetup: () -> Unit = {},
     onOpenBioTracker: () -> Unit = {},
+    onOpenVikaSheet: () -> Unit = {},
     onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {}
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableStateOf(SettingsTab.SECURITY_CODECS) }
 
     // AI States
@@ -67,6 +72,9 @@ fun GhostSettingsDialog(
     var hasKeyConfigured by remember { mutableStateOf(ByokManager.hasKey(context)) }
     var currentPrompt by remember { mutableStateOf(ByokManager.getCustomPrompt(context)) }
     var selectedModel by remember { mutableStateOf(ByokManager.getModelName(context)) }
+    var discoveredModels by remember { mutableStateOf(ByokManager.getDiscoveredModels(context)) }
+    var isFetchingModels by remember { mutableStateOf(false) }
+    var modelFetchStatus by remember { mutableStateOf<String?>(null) }
 
     // Security & Codec States
     var preset by remember { mutableStateOf(ZverPrefs.getCompressionPreset(context)) }
@@ -345,10 +353,61 @@ fun GhostSettingsDialog(
                         }
 
                         SettingsTab.AI_VIKA -> {
+                            fun fetchModelsNow(explicitChars: CharArray? = null) {
+                                if (isFetchingModels) return
+                                isFetchingModels = true
+                                modelFetchStatus = "Запрос моделей к Gemini API..."
+                                scope.launch {
+                                    val keyChars = explicitChars ?: ByokManager.decryptKey(context)
+                                    if (keyChars == null || keyChars.isEmpty()) {
+                                        isFetchingModels = false
+                                        modelFetchStatus = "Ключ не найден"
+                                        return@launch
+                                    }
+                                    val res = try {
+                                        GeminiByokClient.fetchAvailableModels(keyChars)
+                                    } finally {
+                                        Arrays.fill(keyChars, '0')
+                                    }
+                                    isFetchingModels = false
+                                    res.onSuccess { list ->
+                                        discoveredModels = list
+                                        ByokManager.saveDiscoveredModels(context, list)
+                                        if (list.isNotEmpty() && list.none { it.id == selectedModel }) {
+                                            val preferred = list.firstOrNull { it.id.contains("hydrogen", ignoreCase = true) }
+                                                ?: list.firstOrNull { it.id.contains("flash", ignoreCase = true) }
+                                                ?: list.first()
+                                            selectedModel = preferred.id
+                                            ByokManager.saveModelName(context, preferred.id)
+                                        }
+                                        modelFetchStatus = "Загружено моделей ключа: ${list.size}"
+                                        onStatusMessage("МОДЕЛИ ЗАГРУЖЕНЫ: ${list.size}")
+                                    }.onFailure { err ->
+                                        modelFetchStatus = "Ошибка: ${err.message}"
+                                    }
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    onDismiss()
+                                    onOpenVikaSheet()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan.copy(alpha = 0.2f)),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth().height(48.dp)
+                            ) {
+                                Icon(Icons.Default.Psychology, contentDescription = "Вика AI", tint = NeonCyan, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("ОТКРЫТЬ ПАНЕЛЬ ВИКИ И АНАЛИТИКУ", color = NeonCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
                             // Section 1: API Key
                             Text("1. КЛЮЧ API GEMINI (BYOK)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "Ключ шифруется в ${if (strongBoxCapable) "StrongBox" else "Hardware TEE"} KeyStore устройства. Используется только в изолированном :assist процессе.",
+                                "Ключ шифруется в ${if (strongBoxCapable) "StrongBox" else "Hardware TEE"} KeyStore. После сохранения подтянет реальные модели твоего ключа.",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
                                 modifier = Modifier.padding(vertical = 4.dp)
@@ -357,13 +416,14 @@ fun GhostSettingsDialog(
                             OutlinedTextField(
                                 value = apiKeyInput,
                                 onValueChange = { apiKeyInput = it },
-                                label = { Text(if (hasKeyConfigured) "Ключ уже сохранён в KeyStore (введи новый для смены)" else "Вставь API-ключ Gemini (AI Studio)", fontSize = 11.sp) },
+                                label = { Text(if (hasKeyConfigured) "Ключ сохранён в KeyStore (введи новый для замены)" else "Вставь API-ключ Gemini (AIza...)", fontSize = 11.sp) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = CyberGreen,
                                     unfocusedBorderColor = CyberBorder,
-                                    focusedTextColor = Color.White
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
                                 )
                             )
 
@@ -372,79 +432,104 @@ fun GhostSettingsDialog(
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(
                                     onClick = {
-                                        if (apiKeyInput.isNotBlank()) {
-                                            ByokManager.saveKey(context, apiKeyInput.toCharArray())
+                                        val clean = apiKeyInput.trim()
+                                        if (clean.isNotEmpty()) {
+                                            val chars = clean.toCharArray()
+                                            ByokManager.saveKey(context, chars.clone())
                                             hasKeyConfigured = true
                                             apiKeyInput = ""
-                                            onStatusMessage("КЛЮЧ GEMINI СОХРАНЁН В KEYSTORE")
+                                            onStatusMessage("КЛЮЧ СОХРАНЁН — ЗАГРУЗКА МОДЕЛЕЙ")
+                                            fetchModelsNow(chars)
                                         }
                                     },
+                                    enabled = !isFetchingModels && apiKeyInput.isNotBlank(),
                                     colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
-                                    shape = RoundedCornerShape(6.dp)
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.height(44.dp)
                                 ) {
-                                    Text("СОХРАНИТЬ КЛЮЧ", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                    Text("СОХРАНИТЬ + МОДЕЛИ", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                                 }
 
                                 if (hasKeyConfigured) {
                                     Button(
+                                        onClick = { fetchModelsNow(null) },
+                                        enabled = !isFetchingModels,
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberSurface),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier.height(44.dp)
+                                    ) {
+                                        Text(if (isFetchingModels) "..." else "↻ МОДЕЛИ", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                    }
+                                    Button(
                                         onClick = {
                                             ByokManager.deleteKey(context)
                                             hasKeyConfigured = false
+                                            discoveredModels = emptyList()
+                                            modelFetchStatus = "Ключ удалён"
                                             onStatusMessage("КЛЮЧ УДАЛЁН ИЗ KEYSTORE")
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberRed.copy(alpha = 0.8f)),
-                                        shape = RoundedCornerShape(6.dp)
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier.height(44.dp)
                                     ) {
-                                        Text("УДАЛИТЬ КЛЮЧ", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                        Text("СНЕСТИ", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                                     }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            modelFetchStatus?.let {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(it, color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                            }
 
-                            // Section 2: Model Selection
-                            Text("2. ВЫБОР МОДЕЛИ НЕЙРОСЕТИ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState())
-                                    .padding(vertical = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                listOf("gemini-3.8-flash", "gemini-3.7-flash", "gemini-2.5-flash", "gemini-1.5-pro").forEach { model ->
-                                    val isCur = selectedModel == model
-                                    Text(
-                                        text = model,
-                                        color = if (isCur) CyberGreen else CyberMuted,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(if (isCur) CyberGreen.copy(alpha = 0.2f) else CyberSurface)
-                                            .border(1.dp, if (isCur) CyberGreen else CyberBorder, RoundedCornerShape(4.dp))
-                                            .clickable {
-                                                selectedModel = model
-                                                ByokManager.saveModelName(context, model)
-                                                onStatusMessage("МОДЕЛЬ: $model")
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Section 2: Model Selection (Dynamic from key!)
+                            Text("2. МОДЕЛИ КЛЮЧА (${discoveredModels.size}) — ТЕКУЩАЯ: $selectedModel", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            if (discoveredModels.isEmpty()) {
+                                Text("Нажми «СОХРАНИТЬ + МОДЕЛИ» или «↻ МОДЕЛИ» чтобы увидеть все модели твоего ключа.", color = CyberMuted, fontSize = 10.sp, modifier = Modifier.padding(vertical = 4.dp))
+                            } else {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    discoveredModels.forEach { m ->
+                                        val isCur = selectedModel == m.id
+                                        Text(
+                                            text = m.id,
+                                            color = if (isCur) CyberGreen else CyberMuted,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(if (isCur) CyberGreen.copy(alpha = 0.2f) else CyberSurface)
+                                                .border(1.dp, if (isCur) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
+                                                .clickable {
+                                                    selectedModel = m.id
+                                                    ByokManager.saveModelName(context, m.id)
+                                                    onStatusMessage("МОДЕЛЬ: ${m.id}")
+                                                }
+                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
+                                    }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
                             // Section 3: Prompt & Personality Presets
-                            Text("3. СИСТЕМНЫЙ ПРОМПТ (ХАРАКТЕР И ИНСТРУКЦИЯ)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("3. СИСТЕМНЫЙ ПРОМПТ ВИКИ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "Нажми на готовый пресет или напиши свои правила для напарницы:",
+                                "Дефолтный промпт настроен без воды, без выдумок и с юмором/матюками:",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
                                 modifier = Modifier.padding(bottom = 6.dp)
                             )
 
-                            // Preset buttons
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -452,10 +537,11 @@ fun GhostSettingsDialog(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 listOf(
-                                    "Вика-напарница" to ByokManager.DEFAULT_PROMPT,
+                                    "Вика База" to ByokManager.DEFAULT_PROMPT,
                                     "OSINT-разведка" to ByokManager.PROMPT_OSINT,
-                                    "Чтение документов" to ByokManager.PROMPT_OCR,
-                                    "Анализ улик" to ByokManager.PROMPT_FORENSIC
+                                    "OCR Документов" to ByokManager.PROMPT_OCR,
+                                    "Форензик" to ByokManager.PROMPT_FORENSIC,
+                                    "Аналитик" to ByokManager.PROMPT_ANALYTICS
                                 ).forEach { (title, text) ->
                                     Text(
                                         text = title,
@@ -470,9 +556,9 @@ fun GhostSettingsDialog(
                                             .clickable {
                                                 currentPrompt = text
                                                 ByokManager.saveCustomPrompt(context, text)
-                                                onStatusMessage("ПРОМПТ УСТАНОВЛЕН: $title")
+                                                onStatusMessage("ПРОМПТ: $title")
                                             }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
                                     )
                                 }
                             }
@@ -492,7 +578,8 @@ fun GhostSettingsDialog(
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = CyberGreen,
                                     unfocusedBorderColor = CyberBorder,
-                                    focusedTextColor = Color.White
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
                                 )
                             )
                         }
