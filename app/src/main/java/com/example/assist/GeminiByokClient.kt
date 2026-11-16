@@ -1,5 +1,8 @@
 package com.example.assist
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -298,6 +301,32 @@ object GeminiByokClient {
         } catch (_: Exception) {
             "HTTP ошибка $httpCode"
         }
+    }
+
+    fun isNetworkOnline(context: Context): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return true
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    fun isQuotaOrNetworkFailure(message: String?): Boolean {
+        val m = message.orEmpty().lowercase()
+        return m.contains("429") ||
+            m.contains("лимит") ||
+            m.contains("quota") ||
+            m.contains("нет сети") ||
+            m.contains("dns") ||
+            m.contains("таймаут") ||
+            m.contains("timeout") ||
+            m.contains("unable to resolve") ||
+            m.contains("failed to connect") ||
+            m.contains("socket")
     }
 
     private fun mapNetworkError(e: Exception): String {

@@ -256,38 +256,40 @@ class CaptureManager(
         val fullMimeType: String,
         val faceCropBytes: ByteArray? = null,
         val faceCropMimeType: String = "image/webp",
-        val detectedFacesCount: Int = 0
+        val detectedFacesCount: Int = 0,
+        val cropKindLabel: String? = null,
+        val symbiosisReport: com.example.privacy.LocalSymbiosisCvEngine.SymbiosisReport? = null,
+        val backgroundIsolated: Boolean = false
     )
 
     /**
-     * Two-stage Vision Pipeline (Edge CV -> Gemini BYOK):
-     * 1) Decodes raw camera shot strictly in RAM & runs bundled ML Kit Face Detection on-device.
-     * 2) Encodes EXIF-stripped full frame + optional 40%-padded CLAHE face crop (if faces > 0).
-     * 3) Immediately zero-wipes raw camera buffer. Zero disk writes.
+     * Multi-mode Vision Capture Pipeline (strictly RAM-only, zero disk writes):
+     * - Full-Frame Pure Mode (runSymbiosis = false && isolateBackground = false): clean full photo only.
+     * - Symbiosis Mode (runSymbiosis = true): runs 6-NN LocalSymbiosisCvEngine + picks Face/Object/Pose ROI + 40% CLAHE crop.
+     * - Background Isolation Mode (isolateBackground = true): runs Selfie Segmentation to blur/dim surroundings.
      */
     suspend fun captureTwoStageFrameForAi(
         applyClahe: Boolean = false,
-        detectFaceCrop: Boolean = true
+        detectFaceCrop: Boolean = true,
+        isolateBackground: Boolean = false
     ): TwoStageAiFrame = captureMutex.withLock {
         val rawShot = captureRawJpeg()
         var decoded: android.graphics.Bitmap? = null
         var upright: android.graphics.Bitmap? = null
+        var isolatedBmp: android.graphics.Bitmap? = null
         try {
             val res = withContext(Dispatchers.Default) {
-                val processedFull = ExifStripper.processAndPurgeExif(
-                    rawJpeg = rawShot.bytes,
-                    rotationDegrees = rawShot.rotationDegrees,
-                    applyDehaze = applyClahe,
-                    preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                    antiPrnu = false
-                )
-                val fullMime = if (processedFull.isWebP) "image/webp" else "image/jpeg"
-
                 var cropBytes: ByteArray? = null
                 var cropMime = "image/webp"
                 var facesCount = 0
+                var cropKind: String? = null
+                var symReport: com.example.privacy.LocalSymbiosisCvEngine.SymbiosisReport? = null
+                var isolatedApplied = false
 
-                if (detectFaceCrop) {
+                var fullBytesOut: ByteArray
+                var fullMimeOut: String
+
+                if (detectFaceCrop || isolateBackground) {
                     val opts = android.graphics.BitmapFactory.Options().apply {
                         inSampleSize = 2
                         inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
@@ -301,38 +303,122 @@ class CaptureManager(
                             val m = android.graphics.Matrix().apply { postRotate(rawShot.rotationDegrees.toFloat()) }
                             android.graphics.Bitmap.createBitmap(srcBmp, 0, 0, srcBmp.width, srcBmp.height, m, true)
                         }
-                        val faces = com.example.privacy.OfflinePrivacyEngine.detectFacesOffline(upright!!)
-                        facesCount = faces.size
-                        val primaryFace = faces.maxByOrNull { it.rect.width() * it.rect.height() }
-                        if (primaryFace != null) {
-                            val cropRes = ExifStripper.extractRegionCropClean(
-                                sourceBitmap = upright!!,
-                                normalizedRect = primaryFace.rect,
-                                paddingRatio = 0.40f,
-                                applyAntiGlare = true,
-                                maxCropDim = 640
+
+                        var baseForFull = upright!!
+                        if (isolateBackground) {
+                            val iso = com.example.privacy.LocalSymbiosisCvEngine.isolateForegroundPersonClean(
+                                bitmap = upright!!,
+                                blurBackground = true
                             )
-                            if (cropRes != null) {
-                                cropBytes = cropRes.cleanBytes
-                                cropMime = if (cropRes.isWebP) "image/webp" else "image/jpeg"
+                            if (iso.hasForegroundSubject) {
+                                isolatedBmp = iso.bitmap
+                                baseForFull = iso.bitmap
+                                isolatedApplied = true
+                            } else {
+                                if (!iso.bitmap.isRecycled) iso.bitmap.recycle()
                             }
                         }
+
+                        val procFull = ExifStripper.processBitmapClean(
+                            sourceBitmap = if (applyClahe) ExifStripper.applyContrastDehaze(baseForFull) else baseForFull,
+                            recycleSource = false,
+                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                            antiPrnu = false
+                        )
+                        fullBytesOut = procFull.cleanBytes
+                        fullMimeOut = if (procFull.isWebP) "image/webp" else "image/jpeg"
+
+                        if (detectFaceCrop) {
+                            val report = com.example.privacy.LocalSymbiosisCvEngine.analyzeSymbiosis(
+                                bitmap = upright!!,
+                                includeForegroundCoverage = false
+                            )
+                            symReport = report
+                            facesCount = report.faces.size
+                            val roi = report.bestRoiRegion()
+                            if (roi != null) {
+                                cropKind = report.bestRoiKindLabel()
+                                val cropRes = ExifStripper.extractRegionCropClean(
+                                    sourceBitmap = upright!!,
+                                    normalizedRect = roi,
+                                    paddingRatio = 0.40f,
+                                    applyAntiGlare = true,
+                                    maxCropDim = 640
+                                )
+                                if (cropRes != null) {
+                                    cropBytes = cropRes.cleanBytes
+                                    cropMime = if (cropRes.isWebP) "image/webp" else "image/jpeg"
+                                }
+                            }
+                        }
+                    } else {
+                        val processedFull = ExifStripper.processAndPurgeExif(
+                            rawJpeg = rawShot.bytes,
+                            rotationDegrees = rawShot.rotationDegrees,
+                            applyDehaze = applyClahe,
+                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                            antiPrnu = false
+                        )
+                        fullBytesOut = processedFull.cleanJpegBytes
+                        fullMimeOut = if (processedFull.isWebP) "image/webp" else "image/jpeg"
                     }
+                } else {
+                    // Pure Full-Frame mode (no local CV cropping or isolation)
+                    val processedFull = ExifStripper.processAndPurgeExif(
+                        rawJpeg = rawShot.bytes,
+                        rotationDegrees = rawShot.rotationDegrees,
+                        applyDehaze = applyClahe,
+                        preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                        antiPrnu = false
+                    )
+                    fullBytesOut = processedFull.cleanJpegBytes
+                    fullMimeOut = if (processedFull.isWebP) "image/webp" else "image/jpeg"
                 }
 
                 TwoStageAiFrame(
-                    fullBytes = processedFull.cleanJpegBytes,
-                    fullMimeType = fullMime,
+                    fullBytes = fullBytesOut,
+                    fullMimeType = fullMimeOut,
                     faceCropBytes = cropBytes,
                     faceCropMimeType = cropMime,
-                    detectedFacesCount = facesCount
+                    detectedFacesCount = facesCount,
+                    cropKindLabel = cropKind,
+                    symbiosisReport = symReport,
+                    backgroundIsolated = isolatedApplied
                 )
             }
             res
         } finally {
             Arrays.fill(rawShot.bytes, 0.toByte())
+            isolatedBmp?.let { if (!it.isRecycled) it.recycle() }
             upright?.let { if (it !== decoded && !it.isRecycled) it.recycle() }
             decoded?.let { if (!it.isRecycled) it.recycle() }
+        }
+    }
+
+    /**
+     * Captures an upright RAM-only Bitmap for purely offline 6-NN CV analysis (0 bytes to disk/network).
+     */
+    suspend fun captureBitmapInRamForOfflineCv(): android.graphics.Bitmap? = captureMutex.withLock {
+        val rawShot = captureRawJpeg()
+        try {
+            withContext(Dispatchers.Default) {
+                val opts = android.graphics.BitmapFactory.Options().apply {
+                    inSampleSize = 2
+                    inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                }
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(rawShot.bytes, 0, rawShot.bytes.size, opts)
+                    ?: return@withContext null
+                if (rawShot.rotationDegrees % 360 == 0) {
+                    bmp
+                } else {
+                    val m = android.graphics.Matrix().apply { postRotate(rawShot.rotationDegrees.toFloat()) }
+                    val rot = android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                    bmp.recycle()
+                    rot
+                }
+            }
+        } finally {
+            Arrays.fill(rawShot.bytes, 0.toByte())
         }
     }
 
@@ -341,7 +427,7 @@ class CaptureManager(
      * Never touches disk or MediaStore, and zeroes out the raw JPEG camera buffer immediately.
      */
     suspend fun captureCleanFrameForAi(): Pair<ByteArray, String> {
-        val frame = captureTwoStageFrameForAi(applyClahe = false, detectFaceCrop = false)
+        val frame = captureTwoStageFrameForAi(applyClahe = false, detectFaceCrop = false, isolateBackground = false)
         return Pair(frame.fullBytes, frame.fullMimeType)
     }
 

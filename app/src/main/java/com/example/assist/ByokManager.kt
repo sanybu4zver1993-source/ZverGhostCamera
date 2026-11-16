@@ -95,7 +95,8 @@ object ByokManager {
         val hadImage: Boolean,
         val latencyMs: Long,
         val totalTokens: Int,
-        val isError: Boolean = false
+        val isError: Boolean = false,
+        val engineBadge: String = "GEMINI"
     )
 
     private val ramLock = Any()

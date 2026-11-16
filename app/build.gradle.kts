@@ -64,6 +64,14 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  androidResources {
+    noCompress += listOf("tflite")
+  }
+  packaging {
+    jniLibs {
+      useLegacyPackaging = false
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -126,6 +134,10 @@ dependencies {
   implementation(libs.rootbeer.lib)
   implementation(libs.mlkit.face.detection)
   implementation(libs.mlkit.text.recognition)
+  implementation(libs.mlkit.objects.detection)
+  implementation(libs.mlkit.image.labeling)
+  implementation(libs.mlkit.segmentation.selfie)
+  implementation(libs.mlkit.pose.detection)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

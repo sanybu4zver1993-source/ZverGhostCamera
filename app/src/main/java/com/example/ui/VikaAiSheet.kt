@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.Intent
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -38,11 +39,13 @@ import com.example.assist.ByokManager
 import com.example.assist.GeminiByokClient
 import com.example.camera.CaptureManager
 import com.example.camera.ExifStripper
-import com.example.privacy.OfflinePrivacyEngine
+import com.example.camera.VideoKeyframeExtractor
+import com.example.privacy.LocalSymbiosisCvEngine
 import com.example.security.VaultAnalytics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Arrays
 import java.util.Date
@@ -64,12 +67,21 @@ enum class VikaSheetTab(val labelRu: String) {
     KEYS_MODELS("🔑 Ключ и Модели")
 }
 
+private enum class AiFrameMode {
+    FULL_ONLY,      // Вся фотка целиком -> чистая Вика/Gemini
+    SYMBIOSIS_CROP, // Вся фотка + ROI-кроп (лицо/объект) + досье 6-NN -> Gemini
+    BG_ISOLATE,     // Selfie Segmentation вырезает/блюрит фон -> Gemini
+    TEXT_ONLY       // Только текст / статистика
+}
+
 @Composable
 fun VikaAiSheet(
     initialTab: VikaSheetTab = VikaSheetTab.TASKS,
     externalBitmap: Bitmap? = null,
+    externalVideoFile: File? = null,
     onCaptureLiveFrame: (suspend () -> Pair<ByteArray, String>?)? = null,
-    onCaptureTwoStageFrame: (suspend (Boolean) -> CaptureManager.TwoStageAiFrame?)? = null,
+    onCaptureTwoStageFrame: (suspend (detectCrop: Boolean, isolateBg: Boolean) -> CaptureManager.TwoStageAiFrame?)? = null,
+    onCaptureOfflineBitmap: (suspend () -> Bitmap?)? = null,
     onStatusMessage: (String) -> Unit = {},
     onDismiss: () -> Unit
 ) {
@@ -91,15 +103,17 @@ fun VikaAiSheet(
     var isFetchingModels by remember { mutableStateOf(false) }
     var modelStatusText by remember { mutableStateOf<String?>(null) }
 
-    var attachFrame by remember {
-        mutableStateOf(externalBitmap != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null)
+    val hasMediaSource = externalBitmap != null || externalVideoFile != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null
+    var frameMode by remember {
+        mutableStateOf(if (hasMediaSource) AiFrameMode.SYMBIOSIS_CROP else AiFrameMode.TEXT_ONLY)
     }
-    var enableFaceCropCascade by remember { mutableStateOf(true) }
+    var videoEnableCrop by remember { mutableStateOf(true) }
     var taskInput by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
     var chatFeed by remember { mutableStateOf(ByokManager.getChatHistory()) }
     var aiStats by remember { mutableStateOf(ByokManager.getStats()) }
     var localSnap by remember { mutableStateOf(VaultAnalytics.captureSnapshot(context)) }
+    val isOnlineNow = remember(activeTab, isGenerating) { GeminiByokClient.isNetworkOnline(context) }
 
     fun refreshTelemetry() {
         aiStats = ByokManager.getStats()
@@ -147,134 +161,325 @@ fun VikaAiSheet(
         }
     }
 
+    suspend fun runOfflineSymbiosisFallback(
+        userTask: String,
+        fallbackReason: String?,
+        precomputedReport: LocalSymbiosisCvEngine.SymbiosisReport? = null
+    ) {
+        val t0 = System.currentTimeMillis()
+        var capturedOfflineBmp: Bitmap? = null
+        try {
+            val report: LocalSymbiosisCvEngine.SymbiosisReport? = when {
+                precomputedReport != null -> precomputedReport
+                externalBitmap != null -> LocalSymbiosisCvEngine.analyzeSymbiosis(
+                    bitmap = externalBitmap,
+                    includeForegroundCoverage = true
+                )
+                externalVideoFile != null -> {
+                    val pkg = VideoKeyframeExtractor.extractForAi(
+                        videoFile = externalVideoFile,
+                        extractBestRoiCrop = false,
+                        applyAntiGlareIfDark = true
+                    )
+                    pkg.keyframes.forEach { Arrays.fill(it.bytes, 0.toByte()) }
+                    pkg.focusCropBytes?.let { Arrays.fill(it, 0.toByte()) }
+                    pkg.leadReport
+                }
+                onCaptureOfflineBitmap != null -> {
+                    capturedOfflineBmp = onCaptureOfflineBitmap.invoke()
+                    capturedOfflineBmp?.let {
+                        LocalSymbiosisCvEngine.analyzeSymbiosis(bitmap = it, includeForegroundCoverage = true)
+                    }
+                }
+                else -> null
+            }
+
+            val textOut = if (report != null) {
+                LocalSymbiosisCvEngine.buildOfflineVikaReport(report, userTask, fallbackReason)
+            } else {
+                "⚡ РЕЖИМ МАЛЫШЕЙ ОФЛАЙН: кадра нет под рукой, а текстовый запрос без сети в облако не уйдёт.\n\n${VaultAnalytics.buildTelemetrySummaryForAi(context)}"
+            }
+
+            ByokManager.addChatEntry(
+                ByokManager.AiChatEntry(
+                    modelId = "6-NN ОФЛАЙН",
+                    userTask = userTask.ifBlank { "Анализ малышами" },
+                    replyText = textOut,
+                    hadImage = report != null,
+                    latencyMs = System.currentTimeMillis() - t0,
+                    totalTokens = 0,
+                    isError = false,
+                    engineBadge = "⚡ МАЛЫШИ 6-NN ОФЛАЙН"
+                )
+            )
+            refreshTelemetry()
+        } catch (e: Exception) {
+            ByokManager.addChatEntry(
+                ByokManager.AiChatEntry(
+                    modelId = "6-NN ОФЛАЙН",
+                    userTask = userTask,
+                    replyText = "Ошибка локальных малышей: ${e.message}",
+                    hadImage = false,
+                    latencyMs = System.currentTimeMillis() - t0,
+                    totalTokens = 0,
+                    isError = true,
+                    engineBadge = "⚡ ОШИБКА"
+                )
+            )
+            refreshTelemetry()
+        } finally {
+            capturedOfflineBmp?.let { if (!it.isRecycled) it.recycle() }
+        }
+    }
+
     fun executeTask(
         userTask: String,
         includeImage: Boolean,
         includeAnalytics: Boolean = false,
+        forceLocalOnly: Boolean = false,
         systemOverride: String? = null
     ) {
         if (isGenerating) return
-        val keyChars = ByokManager.decryptKey(context)
-        if (keyChars == null || keyChars.isEmpty()) {
-            activeTab = VikaSheetTab.KEYS_MODELS
-            modelStatusText = "Сначала вставь Gemini API-ключ"
-            return
-        }
-
         isGenerating = true
         scope.launch {
+            var isolatedTempBmp: Bitmap? = null
+            val allBuffers = mutableListOf<ByteArray>()
+            var cachedLocalReport: LocalSymbiosisCvEngine.SymbiosisReport? = null
+
             try {
-                var imageBytes: ByteArray? = null
-                var mimeType = "image/webp"
-                val extraCrops = mutableListOf<Pair<ByteArray, String>>()
-                var detectedFaces = 0
+                if (forceLocalOnly) {
+                    runOfflineSymbiosisFallback(userTask, fallbackReason = null)
+                    return@launch
+                }
 
-                if (includeImage) {
-                    if (externalBitmap != null) {
-                        val processed = withContext(Dispatchers.Default) {
-                            ExifStripper.processBitmapClean(
-                                sourceBitmap = externalBitmap,
-                                recycleSource = false,
-                                preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                                antiPrnu = false
+                val keyChars = ByokManager.decryptKey(context)
+                val online = GeminiByokClient.isNetworkOnline(context)
+                if (keyChars == null || keyChars.isEmpty() || !online) {
+                    keyChars?.let { Arrays.fill(it, '0') }
+                    val why = if (!online) "нет сети" else "ключ не задан"
+                    runOfflineSymbiosisFallback(userTask, fallbackReason = why)
+                    return@launch
+                }
+
+                try {
+                    var imageBytes: ByteArray? = null
+                    var mimeType = "image/webp"
+                    val extraCrops = mutableListOf<Pair<ByteArray, String>>()
+                    var dossierNote = ""
+                    var engineBadge = if (includeImage) "GEMINI ЧИСТЫЙ" else "GEMINI ТЕКСТ"
+                    var labelSuffix = ""
+
+                    if (includeImage) {
+                        if (externalVideoFile != null) {
+                            // Video pipeline from Encrypted Vault (capped at 2 min / 5 keyframes)
+                            val vidPkg = VideoKeyframeExtractor.extractForAi(
+                                videoFile = externalVideoFile,
+                                extractBestRoiCrop = videoEnableCrop,
+                                applyAntiGlareIfDark = true
                             )
-                        }
-                        imageBytes = processed.cleanBytes
-                        mimeType = if (processed.isWebP) "image/webp" else "image/jpeg"
-
-                        if (enableFaceCropCascade) {
-                            val faces = withContext(Dispatchers.Default) {
-                                OfflinePrivacyEngine.detectFacesOffline(externalBitmap)
-                            }
-                            detectedFaces = faces.size
-                            val primaryFace = faces.maxByOrNull { it.rect.width() * it.rect.height() }
-                            if (primaryFace != null) {
-                                val cropRes = withContext(Dispatchers.Default) {
-                                    ExifStripper.extractRegionCropClean(
-                                        sourceBitmap = externalBitmap,
-                                        normalizedRect = primaryFace.rect,
-                                        paddingRatio = 0.40f,
-                                        applyAntiGlare = true,
-                                        maxCropDim = 640
-                                    )
-                                }
-                                if (cropRes != null) {
-                                    extraCrops.add(
-                                        cropRes.cleanBytes to if (cropRes.isWebP) "image/webp" else "image/jpeg"
-                                    )
+                            vidPkg.keyframes.forEachIndexed { idx, kf ->
+                                allBuffers.add(kf.bytes)
+                                if (idx == 0) {
+                                    imageBytes = kf.bytes
+                                    mimeType = kf.mimeType
+                                } else {
+                                    extraCrops.add(kf.bytes to kf.mimeType)
                                 }
                             }
-                        }
-                    } else if (onCaptureTwoStageFrame != null) {
-                        val twoStage = onCaptureTwoStageFrame.invoke(enableFaceCropCascade)
-                        if (twoStage != null) {
-                            imageBytes = twoStage.fullBytes
-                            mimeType = twoStage.fullMimeType
-                            detectedFaces = twoStage.detectedFacesCount
-                            twoStage.faceCropBytes?.let { cropB ->
-                                extraCrops.add(cropB to twoStage.faceCropMimeType)
+                            vidPkg.focusCropBytes?.let { cb ->
+                                allBuffers.add(cb)
+                                extraCrops.add(cb to vidPkg.focusCropMimeType)
                             }
-                        }
-                    } else if (onCaptureLiveFrame != null) {
-                        val captured = onCaptureLiveFrame.invoke()
-                        if (captured != null) {
-                            imageBytes = captured.first
-                            mimeType = captured.second
+                            cachedLocalReport = vidPkg.leadReport
+                            val cvDossier = vidPkg.leadReport?.let {
+                                LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)
+                            }.orEmpty()
+                            val trimNote = if (vidPkg.wasLongVideoTrimmed) {
+                                " (длинный ролик ${vidPkg.durationSec}с -> взято ${vidPkg.keyframes.size} ключевых кадров до лимита)"
+                            } else {
+                                " (${vidPkg.durationSec}с, ${vidPkg.keyframes.size} ключевых кадров)"
+                            }
+                            dossierNote = "\n[ВИДЕО-АНАЛИЗ$trimNote]\n$cvDossier"
+                            engineBadge = "GEMINI + 🎬 ВИДЕО (${vidPkg.keyframes.size}к)"
+                            labelSuffix = " (видео ${vidPkg.durationSec}с)"
+                        } else if (externalBitmap != null) {
+                            when (frameMode) {
+                                AiFrameMode.FULL_ONLY -> {
+                                    val proc = withContext(Dispatchers.Default) {
+                                        ExifStripper.processBitmapClean(
+                                            sourceBitmap = externalBitmap,
+                                            recycleSource = false,
+                                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                                            antiPrnu = false
+                                        )
+                                    }
+                                    imageBytes = proc.cleanBytes.also { allBuffers.add(it) }
+                                    mimeType = if (proc.isWebP) "image/webp" else "image/jpeg"
+                                    engineBadge = "GEMINI ЧИСТЫЙ"
+                                }
+                                AiFrameMode.BG_ISOLATE -> {
+                                    val iso = LocalSymbiosisCvEngine.isolateForegroundPersonClean(externalBitmap, blurBackground = true)
+                                    isolatedTempBmp = iso.bitmap
+                                    val proc = withContext(Dispatchers.Default) {
+                                        ExifStripper.processBitmapClean(
+                                            sourceBitmap = iso.bitmap,
+                                            recycleSource = false,
+                                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                                            antiPrnu = false
+                                        )
+                                    }
+                                    imageBytes = proc.cleanBytes.also { allBuffers.add(it) }
+                                    mimeType = if (proc.isWebP) "image/webp" else "image/jpeg"
+                                    val report = LocalSymbiosisCvEngine.analyzeSymbiosis(externalBitmap, false)
+                                    cachedLocalReport = report
+                                    dossierNote = "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(report)}" +
+                                        if (iso.hasForegroundSubject) "\n[Фон размыт локально (SelfieSeg)]" else "\n[Человек не выделен, оставлен полный кадр]"
+                                    engineBadge = "GEMINI + ✂️ БЕЗ ФОНА"
+                                    labelSuffix = " (без фона)"
+                                }
+                                AiFrameMode.SYMBIOSIS_CROP -> {
+                                    val proc = withContext(Dispatchers.Default) {
+                                        ExifStripper.processBitmapClean(
+                                            sourceBitmap = externalBitmap,
+                                            recycleSource = false,
+                                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                                            antiPrnu = false
+                                        )
+                                    }
+                                    imageBytes = proc.cleanBytes.also { allBuffers.add(it) }
+                                    mimeType = if (proc.isWebP) "image/webp" else "image/jpeg"
+                                    val report = LocalSymbiosisCvEngine.analyzeSymbiosis(externalBitmap, false)
+                                    cachedLocalReport = report
+                                    dossierNote = "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(report)}"
+                                    val roi = report.bestRoiRegion()
+                                    if (roi != null) {
+                                        val cropRes = withContext(Dispatchers.Default) {
+                                            ExifStripper.extractRegionCropClean(
+                                                sourceBitmap = externalBitmap,
+                                                normalizedRect = roi,
+                                                paddingRatio = 0.40f,
+                                                applyAntiGlare = true,
+                                                maxCropDim = 640
+                                            )
+                                        }
+                                        if (cropRes != null) {
+                                            cropRes.cleanBytes.also {
+                                                allBuffers.add(it)
+                                                extraCrops.add(it to if (cropRes.isWebP) "image/webp" else "image/jpeg")
+                                            }
+                                            labelSuffix = " (+кроп: ${report.bestRoiKindLabel()})"
+                                        }
+                                    }
+                                    engineBadge = "GEMINI + 6-NN СИМБИОЗ"
+                                }
+                                AiFrameMode.TEXT_ONLY -> Unit
+                            }
+                        } else if (onCaptureTwoStageFrame != null && frameMode != AiFrameMode.TEXT_ONLY) {
+                            val needCrop = frameMode == AiFrameMode.SYMBIOSIS_CROP
+                            val needIso = frameMode == AiFrameMode.BG_ISOLATE
+                            val twoStage = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                            if (twoStage != null) {
+                                imageBytes = twoStage.fullBytes.also { allBuffers.add(it) }
+                                mimeType = twoStage.fullMimeType
+                                twoStage.faceCropBytes?.let { cb ->
+                                    allBuffers.add(cb)
+                                    extraCrops.add(cb to twoStage.faceCropMimeType)
+                                }
+                                cachedLocalReport = twoStage.symbiosisReport
+                                when (frameMode) {
+                                    AiFrameMode.FULL_ONLY -> engineBadge = "GEMINI ЧИСТЫЙ"
+                                    AiFrameMode.BG_ISOLATE -> {
+                                        engineBadge = "GEMINI + ✂️ БЕЗ ФОНА"
+                                        labelSuffix = if (twoStage.backgroundIsolated) " (фон скрыт)" else ""
+                                        dossierNote = twoStage.symbiosisReport?.let {
+                                            "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}"
+                                        }.orEmpty()
+                                    }
+                                    AiFrameMode.SYMBIOSIS_CROP -> {
+                                        engineBadge = "GEMINI + 6-NN СИМБИОЗ"
+                                        dossierNote = twoStage.symbiosisReport?.let {
+                                            "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}"
+                                        }.orEmpty()
+                                        if (twoStage.cropKindLabel != null && extraCrops.isNotEmpty()) {
+                                            labelSuffix = " (+кроп: ${twoStage.cropKindLabel})"
+                                        }
+                                    }
+                                    AiFrameMode.TEXT_ONLY -> Unit
+                                }
+                            }
+                        } else if (onCaptureLiveFrame != null && frameMode != AiFrameMode.TEXT_ONLY) {
+                            val captured = onCaptureLiveFrame.invoke()
+                            if (captured != null) {
+                                imageBytes = captured.first.also { allBuffers.add(it) }
+                                mimeType = captured.second
+                            }
                         }
                     }
-                }
 
-                val taskSuffix = if (extraCrops.isNotEmpty()) {
-                    "\n[2-Stage CV: приложен общий кадр + 40% CLAHE-кроп лица ($detectedFaces лиц)]"
-                } else ""
-                val fullTask = if (includeAnalytics) {
-                    "$userTask$taskSuffix\n\n${VaultAnalytics.buildTelemetrySummaryForAi(context)}"
-                } else {
-                    "$userTask$taskSuffix"
-                }
+                    val fullTask = buildString {
+                        append(userTask)
+                        if (dossierNote.isNotEmpty()) append(dossierNote)
+                        if (includeAnalytics) {
+                            append("\n\n")
+                            append(VaultAnalytics.buildTelemetrySummaryForAi(context))
+                        }
+                    }
 
-                val res = GeminiByokClient.generateContent(
-                    apiKeyChars = keyChars,
-                    modelId = selectedModel,
-                    systemPrompt = systemOverride ?: customPrompt,
-                    userPrompt = fullTask,
-                    imageBytes = imageBytes,
-                    imageMimeType = mimeType,
-                    extraImages = extraCrops
-                )
-
-                imageBytes?.let { Arrays.fill(it, 0.toByte()) }
-                extraCrops.forEach { Arrays.fill(it.first, 0.toByte()) }
-
-                val labelSuffix = if (extraCrops.isNotEmpty()) " (+кроп лица)" else ""
-                res.onSuccess { ok ->
-                    ByokManager.addChatEntry(
-                        ByokManager.AiChatEntry(
-                            modelId = ok.modelId,
-                            userTask = "$userTask$labelSuffix",
-                            replyText = ok.text,
-                            hadImage = imageBytes != null,
-                            latencyMs = ok.latencyMs,
-                            totalTokens = ok.totalTokens,
-                            isError = false
-                        )
+                    val res = GeminiByokClient.generateContent(
+                        apiKeyChars = keyChars,
+                        modelId = selectedModel,
+                        systemPrompt = systemOverride ?: customPrompt,
+                        userPrompt = fullTask,
+                        imageBytes = imageBytes,
+                        imageMimeType = mimeType,
+                        extraImages = extraCrops
                     )
-                }.onFailure { err ->
-                    ByokManager.addChatEntry(
-                        ByokManager.AiChatEntry(
-                            modelId = selectedModel,
-                            userTask = "$userTask$labelSuffix",
-                            replyText = "Облом: ${err.message}",
-                            hadImage = imageBytes != null,
-                            latencyMs = 0L,
-                            totalTokens = 0,
-                            isError = true
+
+                    res.onSuccess { ok ->
+                        ByokManager.addChatEntry(
+                            ByokManager.AiChatEntry(
+                                modelId = ok.modelId,
+                                userTask = "$userTask$labelSuffix",
+                                replyText = ok.text,
+                                hadImage = imageBytes != null,
+                                latencyMs = ok.latencyMs,
+                                totalTokens = ok.totalTokens,
+                                isError = false,
+                                engineBadge = engineBadge
+                            )
                         )
-                    )
+                    }.onFailure { err ->
+                        val msg = err.message.orEmpty()
+                        if (GeminiByokClient.isQuotaOrNetworkFailure(msg) && includeImage) {
+                            // Automatic failover to 6-NN local models!
+                            runOfflineSymbiosisFallback(
+                                userTask = userTask,
+                                fallbackReason = "Gemini недоступен: ${msg.take(45)}",
+                                precomputedReport = cachedLocalReport
+                            )
+                            return@launch
+                        } else {
+                            ByokManager.addChatEntry(
+                                ByokManager.AiChatEntry(
+                                    modelId = selectedModel,
+                                    userTask = "$userTask$labelSuffix",
+                                    replyText = "Облом: $msg",
+                                    hadImage = imageBytes != null,
+                                    latencyMs = 0L,
+                                    totalTokens = 0,
+                                    isError = true,
+                                    engineBadge = "ОШИБКА"
+                                )
+                            )
+                        }
+                    }
+                    refreshTelemetry()
+                } finally {
+                    Arrays.fill(keyChars, '0')
                 }
-                refreshTelemetry()
             } finally {
-                Arrays.fill(keyChars, '0')
+                allBuffers.forEach { Arrays.fill(it, 0.toByte()) }
+                isolatedTempBmp?.let { if (!it.isRecycled) it.recycle() }
                 isGenerating = false
             }
         }
@@ -398,88 +603,122 @@ fun VikaAiSheet(
 
                 when (activeTab) {
                     VikaSheetTab.TASKS -> {
-                        if (!hasKey) {
+                        if (!hasKey || !isOnlineNow) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .background(SheetCard, RoundedCornerShape(12.dp))
                                     .border(1.dp, CyberAmber.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-                                    .padding(12.dp)
+                                    .padding(10.dp)
                             ) {
                                 Text(
-                                    text = "ПОДКЛЮЧИ СВОЙ GEMINI API-КЛЮЧ",
+                                    text = if (!isOnlineNow) "🔴 ОФЛАЙН -> РАБОТАЮТ 6 МАЛЫШЕЙ" else "⚡ КЛЮЧ НЕ ЗАДАН (ОФЛАЙН-МАЛЫШИ АКТИВНЫ)",
                                     color = CyberAmber,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Вставь ключ в соседней вкладке — приложение само подтянет все доступные модели (включая hydrogen/flash/pro). Без твоего нажатия в сеть ничего не уходит.",
-                                    color = Color.White,
                                     fontSize = 11.sp
                                 )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Button(
-                                    onClick = { activeTab = VikaSheetTab.KEYS_MODELS },
-                                    colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                                ) {
-                                    Text("ВСТАВИТЬ КЛЮЧ И ЗАГРУЗИТЬ МОДЕЛИ", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = if (!isOnlineNow) {
+                                        "Интернета нет — жми «⚡ Малыши Офлайн» или любой чип: 6 локальных нейронок разберут кадр/видео без сети."
+                                    } else {
+                                        "Можно сразу гонять 6 локальных нейронок офлайн или вставить свой Gemini ключ во вкладке «Ключ и Модели»."
+                                    },
+                                    color = Color.White,
+                                    fontSize = 10.sp
+                                )
+                                if (!hasKey) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Button(
+                                        onClick = { activeTab = VikaSheetTab.KEYS_MODELS },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth().height(40.dp)
+                                    ) {
+                                        Text("ВСТАВИТЬ GEMINI КЛЮЧ", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    }
                                 }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                         }
 
-                        // Source selector (Frame vs Text-only + 2-Stage ML Kit Face Crop)
-                        if (externalBitmap != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null) {
+                        // Simple 1-row Frame Mode selector (Video vs 4 Photo modes)
+                        if (externalVideoFile != null) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                val frameLabel = if (externalBitmap != null) "🖼️ ИЗ СЕЙФА" else "📸 КАМЕРА"
+                                val vidSel = frameMode != AiFrameMode.TEXT_ONLY
                                 Box(
                                     modifier = Modifier
-                                        .weight(1f)
+                                        .weight(1.3f)
                                         .height(38.dp)
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(if (attachFrame) CyberGreen.copy(alpha = 0.2f) else SheetCard)
-                                        .border(1.dp, if (attachFrame) CyberGreen else SheetBorder, RoundedCornerShape(8.dp))
-                                        .clickable { attachFrame = true },
+                                        .background(if (vidSel) CyberGreen.copy(alpha = 0.2f) else SheetCard)
+                                        .border(1.dp, if (vidSel) CyberGreen else SheetBorder, RoundedCornerShape(8.dp))
+                                        .clickable { frameMode = AiFrameMode.SYMBIOSIS_CROP },
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text(frameLabel, color = if (attachFrame) CyberGreen else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    Text("🎬 ВИДЕО (≤2м / 5к)", color = if (vidSel) CyberGreen else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
                                 }
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(38.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (!attachFrame) CyberCyan.copy(alpha = 0.2f) else SheetCard)
-                                        .border(1.dp, if (!attachFrame) CyberCyan else SheetBorder, RoundedCornerShape(8.dp))
-                                        .clickable { attachFrame = false },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("💬 ТЕКСТ", color = if (!attachFrame) CyberCyan else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
-                                }
-                                if (attachFrame) {
+                                if (vidSel) {
                                     Box(
                                         modifier = Modifier
-                                            .weight(1.1f)
+                                            .weight(0.9f)
                                             .height(38.dp)
                                             .clip(RoundedCornerShape(8.dp))
-                                            .background(if (enableFaceCropCascade) CyberAmber.copy(alpha = 0.2f) else SheetCard)
-                                            .border(1.dp, if (enableFaceCropCascade) CyberAmber else SheetBorder, RoundedCornerShape(8.dp))
-                                            .clickable { enableFaceCropCascade = !enableFaceCropCascade },
+                                            .background(if (videoEnableCrop) CyberAmber.copy(alpha = 0.2f) else SheetCard)
+                                            .border(1.dp, if (videoEnableCrop) CyberAmber else SheetBorder, RoundedCornerShape(8.dp))
+                                            .clickable { videoEnableCrop = !videoEnableCrop },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(if (videoEnableCrop) "🎯 +КРОП" else "КРОП ВЫКЛ", color = if (videoEnableCrop) CyberAmber else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .weight(0.8f)
+                                        .height(38.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (!vidSel) CyberCyan.copy(alpha = 0.2f) else SheetCard)
+                                        .border(1.dp, if (!vidSel) CyberCyan else SheetBorder, RoundedCornerShape(8.dp))
+                                        .clickable { frameMode = AiFrameMode.TEXT_ONLY },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("💬 ТЕКСТ", color = if (!vidSel) CyberCyan else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        } else if (hasMediaSource) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                listOf(
+                                    Triple(AiFrameMode.FULL_ONLY, "🖼️ ВСЯ", CyberGreen),
+                                    Triple(AiFrameMode.SYMBIOSIS_CROP, "🎯 +КРОП", CyberAmber),
+                                    Triple(AiFrameMode.BG_ISOLATE, "✂️ БЕЗ ФОНА", CyberCyan),
+                                    Triple(AiFrameMode.TEXT_ONLY, "💬 ТЕКСТ", Color.White)
+                                ).forEach { (m, label, accent) ->
+                                    val sel = frameMode == m
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(38.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (sel) accent.copy(alpha = 0.22f) else SheetCard)
+                                            .border(1.dp, if (sel) accent else SheetBorder, RoundedCornerShape(8.dp))
+                                            .clickable { frameMode = m },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = if (enableFaceCropCascade) "🎯 +КРОП ЛИЦА" else "🎯 КРОП ВЫКЛ",
-                                            color = if (enableFaceCropCascade) CyberAmber else CyberMuted,
+                                            text = label,
+                                            color = if (sel) accent else CyberMuted,
                                             fontFamily = FontFamily.Monospace,
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 9.sp
+                                            fontSize = 9.sp,
+                                            maxLines = 1
                                         )
                                     }
                                 }
@@ -494,20 +733,20 @@ fun VikaAiSheet(
                                 .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            QuickTaskChip("⚡ Малыши Офлайн") {
+                                executeTask("Полный локальный разбор малышами", includeImage = true, forceLocalOnly = true)
+                            }
                             QuickTaskChip("👁️ Разбор кадра") {
-                                executeTask("Разбери что на кадре: ключевые детали, риски и чё делать дальше.", includeImage = true)
+                                executeTask("Разбери что на кадре: ключевые детали, риски и чё делать дальше.", includeImage = frameMode != AiFrameMode.TEXT_ONLY)
                             }
                             QuickTaskChip("🛡️ Дозор-триаж") {
-                                executeTask("Оцени обстановку на кадре: кто в кадре, форма/гражданка, уровень угрозы.", includeImage = true, systemOverride = ByokManager.PROMPT_SENTINEL)
+                                executeTask("Оцени обстановку на кадре: кто в кадре, форма/гражданка, уровень угрозы.", includeImage = frameMode != AiFrameMode.TEXT_ONLY, systemOverride = ByokManager.PROMPT_SENTINEL)
                             }
                             QuickTaskChip("📝 OCR текста") {
-                                executeTask("Вытащи весь текст, даты, цифры и печати без выдумок.", includeImage = true, systemOverride = ByokManager.PROMPT_OCR)
+                                executeTask("Вытащи весь текст, даты, цифры и печати без выдумок.", includeImage = frameMode != AiFrameMode.TEXT_ONLY, systemOverride = ByokManager.PROMPT_OCR)
                             }
                             QuickTaskChip("🚗 OSINT-палево") {
-                                executeTask("Проверь на палево: номера, вывески, ориентиры, лица, отражения.", includeImage = true, systemOverride = ByokManager.PROMPT_OSINT)
-                            }
-                            QuickTaskChip("📐 Свет и фокус") {
-                                executeTask("Оцени резкость, смаз, экспозицию и дай короткий совет по съёмке.", includeImage = true, systemOverride = ByokManager.PROMPT_FORENSIC)
+                                executeTask("Проверь на палево: номера, вывески, ориентиры, лица, отражения.", includeImage = frameMode != AiFrameMode.TEXT_ONLY, systemOverride = ByokManager.PROMPT_OSINT)
                             }
                             QuickTaskChip("📊 Аудит статы") {
                                 executeTask("Сделай краткий аудит нашей текущей статистики и защиты.", includeImage = false, includeAnalytics = true, systemOverride = ByokManager.PROMPT_ANALYTICS)
@@ -528,17 +767,17 @@ fun VikaAiSheet(
                                     Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(vertical = 28.dp),
+                                            .padding(vertical = 24.dp),
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
                                         Icon(Icons.Default.Psychology, contentDescription = "Вика", tint = CyberCyan.copy(alpha = 0.7f), modifier = Modifier.size(44.dp))
                                         Spacer(modifier = Modifier.height(8.dp))
                                         Text(
-                                            text = "Дай короткую задачу или нажми быстрый чип сверху.\nИстория держится только в ОЗУ и сносится при блокировке.",
+                                            text = "Выбери режим сверху:\n• «🖼️ ВСЯ» -> чистый полный разбор только в Gemini\n• «🎯 +КРОП» -> симбиоз 6-NN (кроп лица/объекта + теги) + Gemini\n• «✂️ БЕЗ ФОНА» -> прячет фон перед отправкой\n• Нет сети или сдох лимит -> авто-подхват 6 локальных малышей!",
                                             color = CyberMuted,
                                             fontFamily = FontFamily.Monospace,
-                                            fontSize = 11.sp,
-                                            lineHeight = 16.sp
+                                            fontSize = 10.sp,
+                                            lineHeight = 15.sp
                                         )
                                     }
                                 }
@@ -566,7 +805,7 @@ fun VikaAiSheet(
                             OutlinedTextField(
                                 value = taskInput,
                                 onValueChange = { taskInput = it },
-                                placeholder = { Text("Короткая задача для Вики...", color = CyberMuted, fontSize = 12.sp) },
+                                placeholder = { Text("Малая, посмотри чё тут...", color = CyberMuted, fontSize = 12.sp) },
                                 maxLines = 3,
                                 modifier = Modifier.weight(1f),
                                 colors = OutlinedTextFieldDefaults.colors(
@@ -581,7 +820,7 @@ fun VikaAiSheet(
                                     val txt = taskInput.trim()
                                     if (txt.isNotEmpty() && !isGenerating) {
                                         taskInput = ""
-                                        executeTask(txt, includeImage = attachFrame)
+                                        executeTask(txt, includeImage = frameMode != AiFrameMode.TEXT_ONLY)
                                     }
                                 },
                                 enabled = !isGenerating && taskInput.isNotBlank(),
@@ -1088,10 +1327,13 @@ private fun ChatMessageCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "${entry.modelId} • ${entry.latencyMs}мс • ${entry.totalTokens} tok",
+                text = "[${entry.engineBadge}] • ${entry.modelId} • ${entry.latencyMs}мс • ${entry.totalTokens}t",
                 color = CyberMuted,
                 fontFamily = FontFamily.Monospace,
-                fontSize = 9.sp
+                fontSize = 8.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = "КОПИРОВАТЬ",

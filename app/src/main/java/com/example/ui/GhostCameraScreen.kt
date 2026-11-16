@@ -313,25 +313,29 @@ fun GhostCameraScreen(
                         detectFaceCrop = cfg.twoStageFaceCropEnabled
                     )
                     try {
-                        if (twoStage.detectedFacesCount > 0) {
+                        val sym = twoStage.symbiosisReport
+                        if (twoStage.detectedFacesCount > 0 || (sym != null && (sym.objects.isNotEmpty() || sym.pose.detected))) {
+                            val tagsStr = sym?.sceneTags?.take(3)?.joinToString { it.label }.orEmpty()
+                            val poseStr = if (sym?.pose?.detected == true) " | ${sym.pose.postureRu}" else ""
                             SentinelEngine.logEvent(
                                 SentinelEngine.EventKind.INFO,
-                                "ML Kit: обнаружено лиц — ${twoStage.detectedFacesCount}",
+                                "6-NN Дозор: лиц=${twoStage.detectedFacesCount}$poseStr${if (tagsStr.isNotBlank()) " [$tagsStr]" else ""}",
                                 facesCount = twoStage.detectedFacesCount
                             )
                         }
-                        if (cfg.aiTriageEnabled && ByokManager.hasKey(context)) {
+                        if (cfg.aiTriageEnabled && ByokManager.hasKey(context) && GeminiByokClient.isNetworkOnline(context)) {
                             val keyChars = ByokManager.decryptKey(context)
                             if (keyChars != null && keyChars.isNotEmpty()) {
                                 try {
                                     val extras = twoStage.faceCropBytes?.let {
                                         listOf(it to twoStage.faceCropMimeType)
                                     } ?: emptyList()
+                                    val dossier = sym?.let { "\n${com.example.privacy.LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}" }.orEmpty()
                                     val aiRes = GeminiByokClient.generateContent(
                                         apiKeyChars = keyChars,
                                         modelId = ByokManager.getModelName(context),
                                         systemPrompt = ByokManager.PROMPT_SENTINEL,
-                                        userPrompt = "Событие дозора: $reason. Лиц обнаружено локально: ${twoStage.detectedFacesCount}. Оцени сцену кратко и строго по фактам.",
+                                        userPrompt = "Событие дозора: $reason. Лиц обнаружено локально: ${twoStage.detectedFacesCount}. Оцени сцену кратко и строго по фактам.$dossier",
                                         imageBytes = twoStage.fullBytes,
                                         imageMimeType = twoStage.fullMimeType,
                                         extraImages = extras
@@ -349,13 +353,14 @@ fun GhostCameraScreen(
                                                 replyText = ok.text,
                                                 hadImage = true,
                                                 latencyMs = ok.latencyMs,
-                                                totalTokens = ok.totalTokens
+                                                totalTokens = ok.totalTokens,
+                                                engineBadge = "GEMINI + 6-NN ДОЗОР"
                                             )
                                         )
                                     }.onFailure { err ->
                                         SentinelEngine.logEvent(
                                             SentinelEngine.EventKind.INFO,
-                                            "Вика AI не ответила: ${err.message}"
+                                            "Вика AI офлайн/лимит (${err.message}): сохранён разбор 6-NN"
                                         )
                                     }
                                 } finally {
@@ -1888,6 +1893,7 @@ fun GhostCameraScreen(
             VikaAiSheet(
                 initialTab = vikaSheetInitialTab,
                 externalBitmap = null,
+                externalVideoFile = null,
                 onCaptureLiveFrame = {
                     val cap = imageCapture ?: return@VikaAiSheet null
                     val manager = CaptureManager(
@@ -1897,7 +1903,7 @@ fun GhostCameraScreen(
                     )
                     manager.captureCleanFrameForAi()
                 },
-                onCaptureTwoStageFrame = { detectFaceCrop ->
+                onCaptureTwoStageFrame = { detectCrop, isolateBg ->
                     val cap = imageCapture ?: return@VikaAiSheet null
                     val manager = CaptureManager(
                         context = context,
@@ -1906,8 +1912,18 @@ fun GhostCameraScreen(
                     )
                     manager.captureTwoStageFrameForAi(
                         applyClahe = isDcpDehazeActive || sentinelIsNight,
-                        detectFaceCrop = detectFaceCrop
+                        detectFaceCrop = detectCrop,
+                        isolateBackground = isolateBg
                     )
+                },
+                onCaptureOfflineBitmap = {
+                    val cap = imageCapture ?: return@VikaAiSheet null
+                    val manager = CaptureManager(
+                        context = context,
+                        imageCapture = cap,
+                        captureExecutor = captureExecutor
+                    )
+                    manager.captureBitmapInRamForOfflineCv()
                 },
                 onStatusMessage = { msg -> lastStatusMessage = msg },
                 onDismiss = { showVikaSheet = false }

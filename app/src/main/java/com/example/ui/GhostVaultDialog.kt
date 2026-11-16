@@ -494,7 +494,9 @@ fun GhostVaultDialog(
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text("МАСКА", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberCyan)
                                     }
+                                }
 
+                                if (decryptedBitmap != null || decryptedVideoFile != null) {
                                     Button(
                                         onClick = { showVikaAi = true },
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberGreen.copy(alpha = 0.18f)),
@@ -863,10 +865,11 @@ fun GhostVaultDialog(
                 )
             }
 
-            if (showVikaAi && decryptedBitmap != null) {
+            if (showVikaAi && (decryptedBitmap != null || decryptedVideoFile != null)) {
                 VikaAiSheet(
                     initialTab = VikaSheetTab.TASKS,
                     externalBitmap = decryptedBitmap,
+                    externalVideoFile = decryptedVideoFile,
                     onStatusMessage = { msg -> statusMessage = msg },
                     onDismiss = { showVikaAi = false }
                 )

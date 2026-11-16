@@ -43,6 +43,10 @@ googleid = "1.1.1"
 rootbeer = "0.1.1"
 mlkitFaceDetection = "16.1.7"
 mlkitTextRecognition = "16.0.1"
+mlkitObjectDetection = "17.0.2"
+mlkitImageLabeling = "17.0.9"
+mlkitSegmentationSelfie = "16.0.0-beta6"
+mlkitPoseDetection = "18.0.0-beta5"
 
 
 [libraries]
@@ -101,6 +105,10 @@ androidx-credentials-play-services = { group = "androidx.credentials", name = "c
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 mlkit-face-detection = { group = "com.google.mlkit", name = "face-detection", version.ref = "mlkitFaceDetection" }
 mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognition" }
+mlkit-objects-detection = { group = "com.google.mlkit", name = "object-detection", version.ref = "mlkitObjectDetection" }
+mlkit-image-labeling = { group = "com.google.mlkit", name = "image-labeling", version.ref = "mlkitImageLabeling" }
+mlkit-segmentation-selfie = { group = "com.google.mlkit", name = "segmentation-selfie", version.ref = "mlkitSegmentationSelfie" }
+mlkit-pose-detection = { group = "com.google.mlkit", name = "pose-detection", version.ref = "mlkitPoseDetection" }
 
 
 [plugins]

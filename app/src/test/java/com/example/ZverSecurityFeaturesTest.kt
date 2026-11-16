@@ -279,4 +279,75 @@ class ZverSecurityFeaturesTest {
 
         com.example.security.SentinelEngine.clearSession()
     }
+
+    @Test
+    fun testMultiNnSymbiosisAndQuotaFallback() {
+        val sampleBmp = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+        for (y in 0 until 64) {
+            for (x in 0 until 64) {
+                val c = if ((x + y) % 4 == 0) 200 else 30
+                sampleBmp.setPixel(x, y, android.graphics.Color.rgb(c, c, c))
+            }
+        }
+        val q = com.example.privacy.LocalSymbiosisCvEngine.assessFrameQuality(sampleBmp)
+        assertTrue(q.sharpnessScore > 0)
+        sampleBmp.recycle()
+
+        val mockReport = com.example.privacy.LocalSymbiosisCvEngine.SymbiosisReport(
+            faces = listOf(
+                com.example.privacy.LocalSymbiosisCvEngine.FaceSummary(
+                    rect = RectF(0.2f, 0.2f, 0.5f, 0.5f),
+                    yawDeg = 6f,
+                    rollDeg = -2f
+                )
+            ),
+            objects = listOf(
+                com.example.privacy.LocalSymbiosisCvEngine.DetectedObjectSummary(
+                    rect = RectF(0.1f, 0.1f, 0.7f, 0.8f),
+                    label = "одежда/аксессуар",
+                    confidence = 0.88f
+                )
+            ),
+            sceneTags = listOf(
+                com.example.privacy.LocalSymbiosisCvEngine.SceneTag("Cat", 0.91f),
+                com.example.privacy.LocalSymbiosisCvEngine.SceneTag("Foliage", 0.76f)
+            ),
+            pose = com.example.privacy.LocalSymbiosisCvEngine.PoseSummary(
+                detected = true,
+                visibleLandmarks = 18,
+                postureRu = "фигура человека (18/33 точек)",
+                torsoRect = RectF(0.15f, 0.15f, 0.65f, 0.9f)
+            ),
+            extractedText = "AA 1234 BB",
+            osintReport = com.example.privacy.OfflinePrivacyEngine.OsintRiskReport(
+                warnings = listOf("Лица в кадре: 1"),
+                riskScore = 40
+            ),
+            quality = q,
+            foregroundCoveragePct = 34.5f,
+            inferenceMs = 42L
+        )
+
+        assertEquals("лицо", mockReport.bestRoiKindLabel())
+        val dossier = com.example.privacy.LocalSymbiosisCvEngine.buildCompactGeminiDossier(mockReport)
+        assertTrue(dossier.contains("6-NN"))
+        assertTrue(dossier.contains("Cat(91%)"))
+        assertTrue(dossier.contains("AA 1234 BB"))
+
+        val offlineReply = com.example.privacy.LocalSymbiosisCvEngine.buildOfflineVikaReport(
+            report = mockReport,
+            userTask = "посмотри чё там",
+            fallbackReason = "Лимит 429"
+        )
+        assertTrue(offlineReply.contains("МАЛЫШЕЙ ОФЛАЙН"))
+        assertTrue(offlineReply.contains("Cat 91%"))
+        assertTrue(offlineReply.contains("AA 1234 BB"))
+
+        assertTrue(com.example.assist.GeminiByokClient.isQuotaOrNetworkFailure("Лимит запросов исчерпан (429)"))
+        assertTrue(com.example.assist.GeminiByokClient.isQuotaOrNetworkFailure("Нет сети или DNS не отвечает"))
+        assertFalse(com.example.assist.GeminiByokClient.isQuotaOrNetworkFailure("Неверный синтаксис промпта"))
+
+        assertEquals(120, com.example.camera.VideoKeyframeExtractor.RECOMMENDED_MAX_SECONDS)
+        assertEquals(5, com.example.camera.VideoKeyframeExtractor.MAX_KEYFRAMES)
+    }
 }
