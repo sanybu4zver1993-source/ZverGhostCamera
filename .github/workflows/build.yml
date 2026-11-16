@@ -58,9 +58,14 @@ jobs:
           if-no-files-found: error
 
       - name: Attach APK to GitHub Release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: nightly
+          name: "Zver Camera (Nightly Build)"
+          draft: false
+          prerelease: true
           files: app/build/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
