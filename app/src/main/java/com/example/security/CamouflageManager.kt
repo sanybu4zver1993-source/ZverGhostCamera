@@ -14,8 +14,7 @@ object CamouflageManager {
     enum class CamouflageMode(val aliasSuffix: String, val displayName: String) {
         ZVER("MainActivityDefault", "Zver Camera"),
         CALCULATOR("MainActivityCalculator", "Calculator"),
-        SYSTEM_TOOLS("MainActivitySystem", "System Tools"),
-        JELLY_TRACKER("MainActivityJelly", "BioTracker");
+        SYSTEM_TOOLS("MainActivitySystem", "System Tools");
 
         fun getComponentName(context: Context): ComponentName {
             return ComponentName(context.packageName, "${context.packageName}.$aliasSuffix")

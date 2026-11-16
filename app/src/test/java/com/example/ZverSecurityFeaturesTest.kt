@@ -356,28 +356,47 @@ class ZverSecurityFeaturesTest {
         // 1. Screenshots and screen video recording MUST be unlocked by default
         assertFalse(ZverPrefs.isScreenRecBlockEnabled(context))
 
-        // 2. Pulse BPM persistence for BioTracker ("Жилистый Танк")
-        ZverPrefs.saveLastPulseBpm(context, 74, 1_700_000_000_000L)
+        // 2. Pulse BPM + HRV persistence for CyberVisor ("Био-Визор")
+        ZverPrefs.saveLastPulseBpm(context, 74, 1_700_000_000_000L, hrvMs = 52)
         assertEquals(74, ZverPrefs.getLastPulseBpm(context))
+        assertEquals(52, ZverPrefs.getLastHrvMs(context))
         assertEquals(1_700_000_000_000L, ZverPrefs.getLastPulseTimestampMs(context))
         ZverPrefs.clearLastPulseBpm(context)
         assertEquals(0, ZverPrefs.getLastPulseBpm(context))
+        assertEquals(0, ZverPrefs.getLastHrvMs(context))
 
-        // 3. Synthetic 72 BPM (1.2 Hz) photoplethysmographic skin oscillation at 30 FPS (180 frames = 6s)
+        // 3. Synthetic ~72 BPM (1.2 Hz) photoplethysmographic skin oscillation with slight respiratory IBI variability at 30 FPS (180 frames = 6s)
         val tracker = com.example.visor.PosRppgTracker()
-        var lastResult: Pair<Int?, Float> = null to 0f
+        var lastResult = Triple<Int?, Int?, Float>(null, null, 0f)
         for (i in 0 until 180) {
             val tSec = i / 30.0
             val tsNs = (tSec * 1_000_000_000.0).toLong()
-            val pulse = kotlin.math.sin(2.0 * kotlin.math.PI * 1.2 * tSec) // 72 BPM
+            val phaseMod = 0.08 * kotlin.math.sin(2.0 * kotlin.math.PI * 0.25 * tSec)
+            val pulse = kotlin.math.sin(2.0 * kotlin.math.PI * 1.2 * tSec + phaseMod) // ~72 BPM with RSA HRV
             val meanR = 175.0 + 0.35 * pulse
             val meanG = 132.0 + 1.45 * pulse
             val meanB = 115.0 + 0.45 * pulse
             lastResult = tracker.pushSample(tsNs, meanR, meanG, meanB)
         }
         val detectedBpm = lastResult.first
-        assertNotNull("Expected valid BPM estimate for clean 72 BPM pulse wave", detectedBpm)
-        assertTrue("Expected ~72 BPM, got $detectedBpm", detectedBpm!! in 70..74)
-        assertTrue("Expected solid SNR quality, got ${lastResult.second}", lastResult.second >= 0.45f)
+        val detectedHrv = lastResult.second
+        val quality = lastResult.third
+        assertNotNull("Expected valid BPM estimate for clean ~72 BPM pulse wave", detectedBpm)
+        assertTrue("Expected ~72 BPM, got $detectedBpm", detectedBpm!! in 68..76)
+        assertNotNull("Expected non-null HRV RMSSD for modulated pulse train", detectedHrv)
+        assertTrue("Expected physiological HRV range, got $detectedHrv", detectedHrv!! in 5..220)
+        assertTrue("Expected solid SNR quality, got $quality", quality >= 0.45f)
+
+        // 4. Eulerian Temporal Band-Pass Amplifier: tiny +4 green delta must be strongly magnified (> +30)
+        val euler = com.example.visor.EulerianTemporalAmplifier(gain = 20f)
+        val basePixel = (0xFF shl 24) or (100 shl 16) or (100 shl 8) or 100
+        val pulsePixel = (0xFF shl 24) or (100 shl 16) or (104 shl 8) or 100
+        val srcInit = IntArray(4) { basePixel }
+        val dst = IntArray(4)
+        euler.amplifyInto(srcInit, dst, 2, 2)
+        val srcPulse = IntArray(4) { pulsePixel }
+        euler.amplifyInto(srcPulse, dst, 2, 2)
+        val amplifiedGreen = (dst[0] ushr 8) and 0xFF
+        assertTrue("Expected amplified green > 130 from +4 change, got $amplifiedGreen", amplifiedGreen > 130)
     }
 }

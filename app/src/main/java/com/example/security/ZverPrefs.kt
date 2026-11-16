@@ -2,13 +2,10 @@ package com.example.security
 
 import android.content.Context
 import com.example.camera.ExifStripper
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * ZverPrefs:
- * Lightweight local tactical configuration + security automation policies + BioTracker daily state.
+ * Lightweight local tactical configuration + security automation policies + CyberVisor pulse metrics.
  */
 object ZverPrefs {
     private const val PREFS_NAME = "zver_tactical_prefs"
@@ -29,10 +26,9 @@ object ZverPrefs {
     private const val KEY_MAX_FAILED_PIN_WIPE = "max_failed_pin_wipe"
     private const val KEY_LOCKOUT_UNTIL_MS = "pin_lockout_until_ms"
 
-    private const val KEY_JELLY_DATE = "jelly_last_date"
-    private const val KEY_JELLY_DONE_PREFIX = "jelly_done_"
-    private const val KEY_LAST_PULSE_BPM = "jelly_last_pulse_bpm"
-    private const val KEY_LAST_PULSE_TS = "jelly_last_pulse_ts"
+    private const val KEY_LAST_PULSE_BPM = "visor_last_pulse_bpm"
+    private const val KEY_LAST_PULSE_TS = "visor_last_pulse_ts"
+    private const val KEY_LAST_HRV_MS = "visor_last_hrv_ms"
 
     fun getCompressionPreset(context: Context): ExifStripper.CompressionPreset {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -183,33 +179,16 @@ object ZverPrefs {
             .edit().putInt(KEY_MAX_FAILED_PIN_WIPE, maxAttempts.coerceAtLeast(0)).apply()
     }
 
-    private fun todayKey(): String =
-        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-
-    fun getJellyChecklist(context: Context, itemIds: List<String>): Set<String> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val today = todayKey()
-        if (prefs.getString(KEY_JELLY_DATE, null) != today) {
-            val editor = prefs.edit().putString(KEY_JELLY_DATE, today)
-            for (id in itemIds) editor.remove(KEY_JELLY_DONE_PREFIX + id)
-            editor.apply()
-            return emptySet()
-        }
-        return itemIds.filter { prefs.getBoolean(KEY_JELLY_DONE_PREFIX + it, false) }.toSet()
-    }
-
-    fun setJellyItemDone(context: Context, itemId: String, done: Boolean) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit()
-            .putString(KEY_JELLY_DATE, todayKey())
-            .putBoolean(KEY_JELLY_DONE_PREFIX + itemId, done)
-            .apply()
-    }
-
-    fun saveLastPulseBpm(context: Context, bpm: Int, timestampMs: Long = System.currentTimeMillis()) {
+    fun saveLastPulseBpm(
+        context: Context,
+        bpm: Int,
+        timestampMs: Long = System.currentTimeMillis(),
+        hrvMs: Int = 0
+    ) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_LAST_PULSE_BPM, bpm.coerceIn(30, 220))
+            .putInt(KEY_LAST_HRV_MS, hrvMs.coerceIn(0, 300))
             .putLong(KEY_LAST_PULSE_TS, timestampMs)
             .apply()
     }
@@ -217,6 +196,10 @@ object ZverPrefs {
     fun getLastPulseBpm(context: Context): Int =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getInt(KEY_LAST_PULSE_BPM, 0)
+
+    fun getLastHrvMs(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_LAST_HRV_MS, 0)
 
     fun getLastPulseTimestampMs(context: Context): Long =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -226,6 +209,7 @@ object ZverPrefs {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_LAST_PULSE_BPM, 0)
+            .putInt(KEY_LAST_HRV_MS, 0)
             .putLong(KEY_LAST_PULSE_TS, 0L)
             .apply()
     }

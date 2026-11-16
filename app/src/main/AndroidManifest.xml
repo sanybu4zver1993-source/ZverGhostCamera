@@ -93,21 +93,6 @@
             </intent-filter>
         </activity-alias>
 
-        <!-- Activity Alias 4: BioTracker Camouflage -->
-        <activity-alias
-            android:name=".MainActivityJelly"
-            android:enabled="false"
-            android:exported="true"
-            android:icon="@drawable/ic_jelly_launcher"
-            android:roundIcon="@drawable/ic_jelly_launcher"
-            android:label="@string/app_name_jelly"
-            android:targetActivity=".MainActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-
         <!-- Secure Ephemeral FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"

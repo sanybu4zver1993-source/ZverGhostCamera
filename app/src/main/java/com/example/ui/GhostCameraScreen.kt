@@ -130,7 +130,6 @@ fun GhostCameraScreen(
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showCamouflageDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var showJellyTankScreen by remember { mutableStateOf(false) }
     var isToolsDrawerOpen by remember { mutableStateOf(false) }
     var showVikaSheet by remember { mutableStateOf(false) }
     var vikaSheetInitialTab by remember { mutableStateOf(VikaSheetTab.TASKS) }
@@ -280,7 +279,6 @@ fun GhostCameraScreen(
                     sentinelEvents = emptyList()
                     showVaultDialog = false
                     showSettingsDialog = false
-                    showJellyTankScreen = false
                     showVikaSheet = false
                     isToolsDrawerOpen = false
                     isStealthBlackoutActive = true
@@ -958,8 +956,7 @@ fun GhostCameraScreen(
                 stealthCoverMode = when (stealthCoverMode) {
                     StealthCoverMode.BLACKOUT -> StealthCoverMode.LOCKSCREEN_CLOCK
                     StealthCoverMode.LOCKSCREEN_CLOCK -> StealthCoverMode.BROWSER_MOCK
-                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.JELLY_TANK
-                    StealthCoverMode.JELLY_TANK -> StealthCoverMode.BLACKOUT
+                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.BLACKOUT
                 }
             },
             onCapture = { triggerPhotoCapture() },
@@ -1078,6 +1075,37 @@ fun GhostCameraScreen(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
+            if (visorMode == VisorMode.WIREFRAME_POSE) {
+                val wf = activeVisorFrame.second.poseWireframe
+                if (wf != null && (wf.bones.isNotEmpty() || wf.joints.isNotEmpty())) {
+                    val bmpW = activeVisorFrame.first.width.toFloat().coerceAtLeast(1f)
+                    val bmpH = activeVisorFrame.first.height.toFloat().coerceAtLeast(1f)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val scale = kotlin.math.max(size.width / bmpW, size.height / bmpH)
+                        val drawW = bmpW * scale
+                        val drawH = bmpH * scale
+                        val offX = (size.width - drawW) * 0.5f
+                        val offY = (size.height - drawH) * 0.5f
+                        val boneStroke = 2.5.dp.toPx()
+                        val jointRadius = 4.5.dp.toPx()
+                        for ((a, b) in wf.bones) {
+                            drawLine(
+                                color = NeonCyan,
+                                start = Offset(offX + a.x * drawW, offY + a.y * drawH),
+                                end = Offset(offX + b.x * drawW, offY + b.y * drawH),
+                                strokeWidth = boneStroke
+                            )
+                        }
+                        for (j in wf.joints) {
+                            drawCircle(
+                                color = CyberGreen,
+                                radius = jointRadius,
+                                center = Offset(offX + j.x * drawW, offY + j.y * drawH)
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Fullscreen Gesture Layer: Tap-to-Focus + Horizontal Mode Swipe + Vertical Drawer/Vika AI Swipe
@@ -1641,10 +1669,14 @@ fun GhostCameraScreen(
                         }
                         lastStatusMessage = "ВИЗОР: ${m.title}"
                     },
-                    onSavePulseToCns = { bpm ->
-                        ZverPrefs.saveLastPulseBpm(context, bpm)
+                    onSavePulseMetrics = { bpm, hrv ->
+                        ZverPrefs.saveLastPulseBpm(context, bpm, hrvMs = hrv ?: 0)
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        val clipText = if (hrv != null) "ЧСС: $bpm BPM | HRV (RMSSD): $hrv мс" else "ЧСС: $bpm BPM"
+                        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Zver BioVisor", clipText))
                         triggerHapticFeedback(isStealth = true)
-                        lastStatusMessage = "❤️ ПУЛЬС $bpm BPM ЗАПИСАН В ЖИЛИСТЫЙ ТАНК"
+                        val hrvMsg = hrv?.let { " / HRV ${it}мс" } ?: ""
+                        lastStatusMessage = "❤️ ЗАМЕР: $bpm BPM$hrvMsg (СКОПИРОВАНО)"
                     },
                     onSaveVisorSnapshot = {
                         val snapBmp = cyberVisorEngine.snapshotLatestBitmapCopy()
@@ -1945,7 +1977,6 @@ fun GhostCameraScreen(
                                 CamouflageManager.CamouflageMode.ZVER -> "Zver Camera (По умолчанию)"
                                 CamouflageManager.CamouflageMode.CALCULATOR -> "Калькулятор"
                                 CamouflageManager.CamouflageMode.SYSTEM_TOOLS -> "Системные утилиты"
-                                CamouflageManager.CamouflageMode.JELLY_TRACKER -> "BioTracker (Жилистый танк)"
                             }
                             Row(
                                 modifier = Modifier
@@ -1981,9 +2012,6 @@ fun GhostCameraScreen(
                 onOpenPinSetup = {
                     forcePinSetupFlow = true
                     showVaultDialog = true
-                },
-                onOpenBioTracker = {
-                    showJellyTankScreen = true
                 },
                 onOpenVikaSheet = {
                     vikaSheetInitialTab = VikaSheetTab.TASKS
@@ -2042,18 +2070,6 @@ fun GhostCameraScreen(
                 onStatusMessage = { msg -> lastStatusMessage = msg },
                 onDismiss = { showVikaSheet = false }
             )
-        }
-
-        if (showJellyTankScreen) {
-            androidx.compose.ui.window.Dialog(
-                onDismissRequest = { showJellyTankScreen = false },
-                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
-            ) {
-                JellyTankScreen(
-                    isCamouflageGate = false,
-                    onClose = { showJellyTankScreen = false }
-                )
-            }
         }
 
         // Emergency Crypto-Shred Confirmation
@@ -2255,7 +2271,7 @@ private fun CyberVisorControlCard(
     telemetry: VisorTelemetry,
     hasVisorFrame: Boolean,
     onSelectVisorMode: (VisorMode) -> Unit,
-    onSavePulseToCns: (Int) -> Unit,
+    onSavePulseMetrics: (Int, Int?) -> Unit,
     onSaveVisorSnapshot: () -> Unit
 ) {
     Column(
@@ -2328,9 +2344,10 @@ private fun CyberVisorControlCard(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         val bpmText = telemetry.estimatedBpm?.let { "$it BPM" } ?: "Калибровка..."
+                        val hrvText = telemetry.estimatedHrvMs?.let { " • HRV ${it}мс" } ?: ""
                         val qualPct = (telemetry.signalQuality * 100f).toInt()
                         Text(
-                            text = "❤️ ЧСС: $bpmText • Сигнал $qualPct%",
+                            text = "❤️ ЧСС: $bpmText$hrvText • Сигнал $qualPct%",
                             color = if (telemetry.estimatedBpm != null) CyberGreen else NeonYellow,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -2346,7 +2363,7 @@ private fun CyberVisorControlCard(
                     }
                     telemetry.estimatedBpm?.let { bpm ->
                         Text(
-                            text = "💾 В ТАНК",
+                            text = "📋 ФИКС ЧСС",
                             color = Color.Black,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -2354,12 +2371,31 @@ private fun CyberVisorControlCard(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(CyberGreen)
-                                .clickable { onSavePulseToCns(bpm) }
+                                .clickable { onSavePulseMetrics(bpm, telemetry.estimatedHrvMs) }
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                                 .testTag("visor_save_bpm_button")
                         )
                     }
                 }
+                Text(
+                    text = activeMode.hintRu,
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
+            VisorMode.WIREFRAME_POSE -> {
+                val count = telemetry.poseWireframe?.visibleCount ?: 0
+                Text(
+                    text = if (count >= 3) {
+                        "🦴 Скелет: $count/33 точек в реальном времени"
+                    } else {
+                        "🦴 Скелет: поиск опорных точек ($count/33)..."
+                    },
+                    color = if (count >= 3) CyberGreen else NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp
+                )
                 Text(
                     text = activeMode.hintRu,
                     color = CyberMuted,

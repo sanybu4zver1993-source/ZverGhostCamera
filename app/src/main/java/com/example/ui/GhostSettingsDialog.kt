@@ -58,7 +58,6 @@ fun GhostSettingsDialog(
     onStatusMessage: (String) -> Unit,
     onSelectMode: (String) -> Unit = {},
     onOpenPinSetup: () -> Unit = {},
-    onOpenBioTracker: () -> Unit = {},
     onOpenVikaSheet: () -> Unit = {},
     onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {}
 ) {
@@ -300,7 +299,6 @@ fun GhostSettingsDialog(
                                         CamouflageManager.CamouflageMode.ZVER -> "Zver Camera"
                                         CamouflageManager.CamouflageMode.CALCULATOR -> "Калькулятор"
                                         CamouflageManager.CamouflageMode.SYSTEM_TOOLS -> "Системные"
-                                        CamouflageManager.CamouflageMode.JELLY_TRACKER -> "BioTracker"
                                     }
                                     Text(
                                         text = label,
@@ -324,29 +322,16 @@ fun GhostSettingsDialog(
                             }
 
                             Spacer(modifier = Modifier.height(10.dp))
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(
-                                    onClick = {
-                                        onDismiss()
-                                        onOpenPinSetup()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text("НАСТРОИТЬ 3 PIN (DURESS)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                }
-                                Button(
-                                    onClick = {
-                                        onDismiss()
-                                        onOpenBioTracker()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan.copy(alpha = 0.25f)),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text("⚡ BIOTRACKER", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                }
+                            Button(
+                                onClick = {
+                                    onDismiss()
+                                    onOpenPinSetup()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("НАСТРОИТЬ 3 PIN (DURESS)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
 
                             Spacer(modifier = Modifier.height(6.dp))
@@ -620,8 +605,8 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🔬 БИО-ВИЗОР (КИБЕР-СКАНЕР 6-в-1)",
-                                desc = "Реальная биофизика на лету: бесконтактный пульс по коже (POS rPPG -> запись в ЦНС), Веновизор (гемоглобин ln R/G), Дерма-УФ (меланин 450 нм), палитра Ironbow, Ночь-гамма и Поиск ИК-диодов (850-940 нм).",
+                                title = "🔬 БИО-ВИЗОР v2.0 (10-в-1)",
+                                desc = "Реальная оптика и ML Kit без тормозов: Пульс + HRV (RMSSD, фиксация и копия в буфер), Эйлер x20 (микродвижения), Веновизор (гемоглобин ln R/G), Дерма-УФ (меланин 450 нм), Термо-LUT Ironbow, Анти-Туман live (Dehaze), Скелет 33 точки, Хлорофилл/Еда (ExG), Ночь-гамма и Поиск ИК-маяков (850-940 нм).",
                                 modeKey = "VISOR",
                                 onSelectMode = { key ->
                                     onSelectMode(key)

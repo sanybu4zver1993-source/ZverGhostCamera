@@ -49,8 +49,7 @@ private val HudYellow = Color(0xFFFFEA00)
 enum class StealthCoverMode(val titleRu: String) {
     BLACKOUT("Чёрный экран"),
     LOCKSCREEN_CLOCK("Часы (Блокировка)"),
-    BROWSER_MOCK("Поиск (Браузер)"),
-    JELLY_TANK("BioTracker")
+    BROWSER_MOCK("Поиск (Браузер)")
 }
 
 @Composable
@@ -74,28 +73,6 @@ fun StealthBlackoutScreen(
             currentDateStr = dateFormat.format(now).replaceFirstChar { it.uppercase() }
             delay(1000)
         }
-    }
-
-    if (mode == StealthCoverMode.JELLY_TANK && !isProximityLocked) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            JellyTankScreen(
-                isCamouflageGate = false,
-                onClose = onExit
-            )
-            // Subtle bottom-right mode switcher chip
-            Text(
-                text = "Сменить вид",
-                color = Color.Gray.copy(alpha = 0.45f),
-                fontSize = 9.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(12.dp)
-                    .clickable { onCycleMode() }
-            )
-        }
-        return
     }
 
     Box(
@@ -203,7 +180,6 @@ fun StealthBlackoutScreen(
                     )
                 }
             }
-            StealthCoverMode.JELLY_TANK -> {}
         }
 
         // Top stealth controls (Switch disguise & Exit)

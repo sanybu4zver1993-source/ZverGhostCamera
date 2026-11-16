@@ -39,7 +39,6 @@ import com.example.security.SentinelEngine
 import com.example.security.ZverPrefs
 import com.example.ui.DecoyCalculatorScreen
 import com.example.ui.GhostCameraScreen
-import com.example.ui.JellyTankScreen
 import com.example.ui.theme.MyApplicationTheme
 import java.util.function.Consumer
 
@@ -197,19 +196,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             val activeCamo = remember { CamouflageManager.getCurrentCamouflage(this) }
             var isGateUnlocked by remember {
-                mutableStateOf(
-                    activeCamo != CamouflageManager.CamouflageMode.CALCULATOR &&
-                        activeCamo != CamouflageManager.CamouflageMode.JELLY_TRACKER
-                )
+                mutableStateOf(activeCamo != CamouflageManager.CamouflageMode.CALCULATOR)
             }
             val recordingBlocked by remember { isScreenBeingRecorded }
 
             DisposableEffect(Unit) {
                 onLockGateTrigger = {
                     val currentMode = CamouflageManager.getCurrentCamouflage(this@MainActivity)
-                    if (currentMode == CamouflageManager.CamouflageMode.CALCULATOR ||
-                        currentMode == CamouflageManager.CamouflageMode.JELLY_TRACKER
-                    ) {
+                    if (currentMode == CamouflageManager.CamouflageMode.CALCULATOR) {
                         isGateUnlocked = false
                     } else {
                         onBlackoutToggleTrigger?.invoke()
@@ -231,12 +225,6 @@ class MainActivity : ComponentActivity() {
                                         onUnlocked = { isGateUnlocked = true }
                                     )
                                 }
-                                CamouflageManager.CamouflageMode.JELLY_TRACKER -> {
-                                    JellyTankScreen(
-                                        isCamouflageGate = true,
-                                        onUnlockToCamera = { isGateUnlocked = true }
-                                    )
-                                }
                                 else -> {
                                     CameraPermissionGate(
                                         onQuickExitToCamouflage = {
@@ -249,9 +237,7 @@ class MainActivity : ComponentActivity() {
                             CameraPermissionGate(
                                 onQuickExitToCamouflage = {
                                     val mode = CamouflageManager.getCurrentCamouflage(this@MainActivity)
-                                    if (mode == CamouflageManager.CamouflageMode.CALCULATOR ||
-                                        mode == CamouflageManager.CamouflageMode.JELLY_TRACKER
-                                    ) {
+                                    if (mode == CamouflageManager.CamouflageMode.CALCULATOR) {
                                         isGateUnlocked = false
                                     }
                                 }
