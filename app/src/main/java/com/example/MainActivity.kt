@@ -55,13 +55,16 @@ class MainActivity : ComponentActivity() {
         var onBlackoutToggleTrigger: (() -> Unit)? = null
         var onLockGateTrigger: (() -> Unit)? = null
         var onScreenCapturePolicyChanged: (() -> Unit)? = null
+        var onVaultSecureOverrideChanged: ((Boolean) -> Unit)? = null
     }
 
     private val isScreenBeingRecorded = mutableStateOf(false)
     private var screenRecCallback: Consumer<Int>? = null
 
+    private var forceVaultSecureOverride: Boolean = false
+
     private fun applyScreenCapturePolicy() {
-        val blockEnabled = ZverPrefs.isScreenRecBlockEnabled(this)
+        val blockEnabled = forceVaultSecureOverride || ZverPrefs.isScreenRecBlockEnabled(this)
         if (blockEnabled) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         } else {
@@ -99,13 +102,13 @@ class MainActivity : ComponentActivity() {
                 val cb = Consumer<Int> { state ->
                     isScreenBeingRecorded.value =
                         (state == WindowManager.SCREEN_RECORDING_STATE_VISIBLE) &&
-                            ZverPrefs.isScreenRecBlockEnabled(this)
+                            (forceVaultSecureOverride || ZverPrefs.isScreenRecBlockEnabled(this))
                 }
                 screenRecCallback = cb
                 val initialState = windowManager.addScreenRecordingCallback(mainExecutor, cb)
                 isScreenBeingRecorded.value =
                     (initialState == WindowManager.SCREEN_RECORDING_STATE_VISIBLE) &&
-                        ZverPrefs.isScreenRecBlockEnabled(this)
+                        (forceVaultSecureOverride || ZverPrefs.isScreenRecBlockEnabled(this))
             } catch (_: Exception) {}
         }
     }
@@ -123,6 +126,7 @@ class MainActivity : ComponentActivity() {
             GhostCryptoVault.lockSession()
             ByokManager.clearSessionMemory()
             SentinelEngine.clearSession()
+            com.example.security.SecureClipboard.clearIfOwned(this)
         }
     }
 
@@ -130,6 +134,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         applyScreenCapturePolicy()
         GhostCryptoVault.shredEphemeralShareFiles(this)
+        GhostCryptoVault.shredOrphanedVideoTemps(this, minAgeMs = 15_000L)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -149,6 +154,7 @@ class MainActivity : ComponentActivity() {
                     GhostCryptoVault.lockSession()
                     ByokManager.clearSessionMemory()
                     SentinelEngine.clearSession()
+                    com.example.security.SecureClipboard.clearIfOwned(this)
                     onLockGateTrigger?.invoke()
                 }
             }
@@ -164,11 +170,19 @@ class MainActivity : ComponentActivity() {
             GhostCryptoVault.clearRamShots()
             ByokManager.clearSessionMemory()
             SentinelEngine.clearSession()
+            com.example.security.SecureClipboard.clearIfOwned(this)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Prevent Android Recents task snapshots in /data/system_ce/0/snapshots/ without blocking user screenshots
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                setRecentsScreenshotEnabled(false)
+            } catch (_: Exception) {}
+        }
 
         // Enforce Dead-Man Switch before presenting any UI
         GhostCryptoVault.checkDeadManSwitch(this)
@@ -189,6 +203,12 @@ class MainActivity : ComponentActivity() {
         applyScreenCapturePolicy()
         onScreenCapturePolicyChanged = {
             runOnUiThread { applyScreenCapturePolicy() }
+        }
+        onVaultSecureOverrideChanged = { active ->
+            runOnUiThread {
+                forceVaultSecureOverride = active
+                applyScreenCapturePolicy()
+            }
         }
         handleCustomUri(intent)
         enableEdgeToEdge()

@@ -3,6 +3,7 @@ package com.example.ui
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.view.WindowManager
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.FileProvider
 import com.example.camera.ExifStripper
 import com.example.crypto.GhostCryptoVault
@@ -152,6 +155,15 @@ fun GhostVaultDialog(
         },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
+        val dialogView = LocalView.current
+        DisposableEffect(Unit) {
+            val dialogWindow = (dialogView.parent as? DialogWindowProvider)?.window
+            dialogWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            com.example.MainActivity.onVaultSecureOverrideChanged?.invoke(true)
+            onDispose {
+                com.example.MainActivity.onVaultSecureOverrideChanged?.invoke(false)
+            }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -880,7 +892,7 @@ fun GhostVaultDialog(
                     onDismissRequest = { auditDialogReport = null },
                     title = {
                         Text(
-                            text = if (rep.isClean) "✅ КРИМИНАЛИСТИЧЕСКИЙ АУДИТ: 0 EXIF" else "⚠ АУДИТ: НАЙДЕНЫ ТЕГИ",
+                            text = if (rep.isClean) "✅ АУДИТ: 0 МЕТАДАННЫХ" else "⚠ АУДИТ: НАЙДЕНЫ ТЕГИ",
                             color = if (rep.isClean) CyberGreen else CyberRed,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,

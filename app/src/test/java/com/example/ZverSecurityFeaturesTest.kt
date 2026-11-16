@@ -399,4 +399,185 @@ class ZverSecurityFeaturesTest {
         val amplifiedGreen = (dst[0] ushr 8) and 0xFF
         assertTrue("Expected amplified green > 130 from +4 change, got $amplifiedGreen", amplifiedGreen > 130)
     }
+
+    @Test
+    fun testYcbcrSkinAnalyzerAndSymbiosisIntegration() {
+        // Warm human skin matches; neutral gray and green foliage are rejected
+        assertTrue(com.example.visor.YcbcrSkinAnalyzer.isHumanSkinRgb(195, 145, 118))
+        assertFalse(com.example.visor.YcbcrSkinAnalyzer.isHumanSkinRgb(140, 140, 140))
+        assertFalse(com.example.visor.YcbcrSkinAnalyzer.isHumanSkinRgb(50, 175, 60))
+        assertFalse(com.example.visor.YcbcrSkinAnalyzer.isHumanSkinYCbCr(10, 105, 150)) // deep black clipping guard
+        // 256x256 LUT matches exact predicate and adaptive scene offset works
+        assertEquals(
+            com.example.visor.YcbcrSkinAnalyzer.isHumanSkinYCbCr(120, 105, 150),
+            com.example.visor.YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(120, 105, 150)
+        )
+        assertTrue(com.example.visor.YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(120, 109, 154, cbShift = 4, crShift = 4))
+
+        val bmp = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+        for (y in 0 until 64) {
+            for (x in 0 until 64) {
+                val color = if (x in 20..43 && y in 16..47) {
+                    android.graphics.Color.rgb(196, 142, 115)
+                } else {
+                    android.graphics.Color.rgb(45, 52, 58)
+                }
+                bmp.setPixel(x, y, color)
+            }
+        }
+        val skin = com.example.visor.YcbcrSkinAnalyzer.analyzeBitmap(bmp)
+        assertTrue("Expected coherent skin blob", skin.isCoherentSkinPresent)
+        assertTrue("Expected compactness >= 0.7, got ${skin.compactness}", skin.compactness >= 0.7f)
+        bmp.recycle()
+
+        val skinOnlyReport = com.example.privacy.LocalSymbiosisCvEngine.SymbiosisReport(
+            faces = emptyList(),
+            objects = emptyList(),
+            sceneTags = emptyList(),
+            pose = com.example.privacy.LocalSymbiosisCvEngine.PoseSummary(false, 0, "нет", null),
+            extractedText = "",
+            osintReport = OfflinePrivacyEngine.OsintRiskReport(emptyList(), 0),
+            quality = com.example.privacy.LocalSymbiosisCvEngine.FrameQuality(120, false, 20, false),
+            foregroundCoveragePct = null,
+            inferenceMs = 12L,
+            skinMetrics = skin
+        )
+        assertEquals("кожа(YCbCr)", skinOnlyReport.bestRoiKindLabel())
+        assertNotNull(skinOnlyReport.bestRoiRegion())
+        val dossier = com.example.privacy.LocalSymbiosisCvEngine.buildCompactGeminiDossier(skinOnlyReport)
+        assertTrue(dossier.contains("Кожа(YCbCr)"))
+        assertTrue(dossier.contains("скрыто"))
+    }
+
+    @Test
+    fun testPosRppgAeJumpResilienceAndGreenFallback() {
+        // 1. +40% AE jump at frame 90 must NOT destroy 72 BPM (1.2 Hz) lock
+        val aeTracker = com.example.visor.PosRppgTracker()
+        var resAe = Triple<Int?, Int?, Float>(null, null, 0f)
+        for (i in 0 until 180) {
+            val tSec = i / 30.0
+            val tsNs = (tSec * 1_000_000_000.0).toLong()
+            val gainMul = if (i >= 90) 1.40 else 1.0
+            val pulse = kotlin.math.sin(2.0 * kotlin.math.PI * 1.2 * tSec)
+            val r = (140.0 + 0.30 * pulse) * gainMul
+            val g = (108.0 + 1.25 * pulse) * gainMul
+            val b = (92.0 + 0.35 * pulse) * gainMul
+            resAe = aeTracker.pushSample(tsNs, r, g, b, greenFallback = false)
+        }
+        assertNotNull("Expected valid BPM across +40% AE step jump", resAe.first)
+        assertTrue("Expected ~72 BPM after AE rebase, got ${resAe.first}", resAe.first!! in 66..78)
+
+        // 2. Finger-on-lens / Red-clipped green fallback (~78 BPM = 1.3 Hz)
+        val fingerTracker = com.example.visor.PosRppgTracker()
+        var resFinger = Triple<Int?, Int?, Float>(null, null, 0f)
+        for (i in 0 until 180) {
+            val tSec = i / 30.0
+            val tsNs = (tSec * 1_000_000_000.0).toLong()
+            val pulse = kotlin.math.sin(2.0 * kotlin.math.PI * 1.3 * tSec)
+            resFinger = fingerTracker.pushSample(tsNs, 250.0, 95.0 + 1.6 * pulse, 70.0, greenFallback = true)
+        }
+        assertNotNull("Expected valid BPM in green fallback mode", resFinger.first)
+        assertTrue("Expected ~78 BPM in green fallback, got ${resFinger.first}", resFinger.first!! in 72..84)
+    }
+
+    @Test
+    fun testEulerStabilizationAntiPrnuMeshAndJpegAudit() {
+        // 1. Euler 1D stabilization on 32x32 frame
+        val euler = com.example.visor.EulerianTemporalAmplifier(gain = 18f)
+        val n = 32 * 32
+        val f1 = IntArray(n) { i ->
+            val v = if ((i % 32) in 10..20) 150 else 70
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }
+        val f2 = IntArray(n) { i ->
+            val x = i % 32
+            val v = if (x in 11..21) 154 else 70
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }
+        val out = IntArray(n)
+        euler.amplifyInto(f1, out, 32, 32)
+        euler.amplifyInto(f2, out, 32, 32)
+        assertTrue(euler.lastStability in 0.1f..1f)
+
+        // 2. ExifStripper Anti-PRNU elastic mesh + honest JPEG audit
+        val bmp = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+        bmp.eraseColor(android.graphics.Color.rgb(80, 120, 160))
+        val cleanRes = ExifStripper.processBitmapClean(
+            sourceBitmap = bmp,
+            recycleSource = true,
+            preset = ExifStripper.CompressionPreset.BALANCED,
+            antiPrnu = true
+        )
+        assertTrue(cleanRes.cleanBytes.isNotEmpty())
+        assertEquals(0, cleanRes.audit.metadataBytes)
+
+        val minimalJpeg = byteArrayOf(
+            0xFF.toByte(), 0xD8.toByte(),
+            0xFF.toByte(), 0xDB.toByte(), 0x00, 0x04, 0x00, 0x00,
+            0xFF.toByte(), 0xDA.toByte(), 0x00, 0x02, 0x11, 0x22,
+            0xFF.toByte(), 0xD9.toByte()
+        )
+        val stripped = ExifStripper.stripJpegSegments(minimalJpeg)
+        val audit = ExifStripper.auditBytes(stripped)
+        assertEquals("JPEG", audit.format)
+        assertEquals(0, audit.metadataBytes)
+        assertTrue(audit.notes.any { it.contains("DQT") })
+    }
+
+    @Test
+    fun testOsintLuhnCardSecretsJitteredMosaicAndSecureClipboard() {
+        // Luhn valid card (4111111111111111) + secret leak
+        val leakReport = OfflinePrivacyEngine.assessOsintRisks(
+            OfflinePrivacyEngine.DetectionResult(
+                faces = emptyList(),
+                textBlocks = emptyList(),
+                extractedText = "Card 4111 1111 1111 1111 password=MySecret99"
+            )
+        )
+        assertTrue(leakReport.warnings.any { it.contains("Luhn") })
+        assertTrue(leakReport.warnings.any { it.contains("пароль") })
+
+        // Luhn invalid card (4111111111111112) must NOT flag Luhn card warning
+        val nonCardReport = OfflinePrivacyEngine.assessOsintRisks(
+            OfflinePrivacyEngine.DetectionResult(
+                faces = emptyList(),
+                textBlocks = emptyList(),
+                extractedText = "Serial 4111 1111 1111 1112"
+            )
+        )
+        assertFalse(nonCardReport.warnings.any { it.contains("Luhn") })
+
+        // Jittered PIXELATE redaction mutates pixels cleanly
+        val src = android.graphics.Bitmap.createBitmap(48, 48, android.graphics.Bitmap.Config.ARGB_8888)
+        for (y in 0 until 48) {
+            for (x in 0 until 48) {
+                src.setPixel(x, y, android.graphics.Color.rgb((x * 5) % 255, (y * 5) % 255, 100))
+            }
+        }
+        val redacted = OfflinePrivacyEngine.applyRedactions(
+            source = src,
+            regions = listOf(
+                OfflinePrivacyEngine.NormalizedRegion(
+                    "r1",
+                    RectF(0.1f, 0.1f, 0.9f, 0.9f),
+                    OfflinePrivacyEngine.RegionKind.FACE
+                )
+            ),
+            style = OfflinePrivacyEngine.RedactionStyle.PIXELATE,
+            invertMode = false
+        )
+        assertEquals(48, redacted.width)
+        src.recycle()
+        redacted.recycle()
+
+        // SecureClipboard sensitive flag & owned clear
+        com.example.security.SecureClipboard.copySensitive(context, "Zver Test", "74 BPM", ttlMs = 0L)
+        assertTrue(com.example.security.SecureClipboard.isCurrentlyOwnedByZver(context))
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        assertTrue(
+            cm.primaryClipDescription?.extras?.getBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE) == true
+        )
+        assertTrue(com.example.security.SecureClipboard.clearIfOwned(context))
+        assertFalse(com.example.security.SecureClipboard.isCurrentlyOwnedByZver(context))
+    }
 }

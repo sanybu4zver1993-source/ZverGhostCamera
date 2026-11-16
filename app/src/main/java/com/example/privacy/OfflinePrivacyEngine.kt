@@ -132,6 +132,27 @@ object OfflinePrivacyEngine {
     private val PHONE_REGEX = Regex("(?:\\+?\\d[\\d\\s\\-()]{7,}\\d)")
     private val COORD_REGEX = Regex("\\b\\d{2}\\.\\d{4,}\\b")
     private val EMAIL_REGEX = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+    private val CARD_CANDIDATE_REGEX = Regex("\\b(?:\\d[\\s-]?){15}\\d\\b")
+    private val SECRET_KEY_REGEX = Regex(
+        "(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\\b(?:seed|mnemonic|passphrase|password|пароль|пин|pin|api_?key|secret|token)\\b\\s*[:=]|\\b(?:AIza[0-9A-Za-z\\-_]{20,}|ghp_[0-9A-Za-z]{20,}|xox[baprs]-[0-9A-Za-z\\-]{10,}))",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun passesLuhn(digits: String): Boolean {
+        if (digits.length != 16 || digits.all { it == digits[0] }) return false
+        var sum = 0
+        var alt = false
+        for (i in digits.length - 1 downTo 0) {
+            var n = digits[i] - '0'
+            if (alt) {
+                n *= 2
+                if (n > 9) n -= 9
+            }
+            sum += n
+            alt = !alt
+        }
+        return sum % 10 == 0
+    }
 
     /**
      * Offline OSINT Risk Linter: scans detected faces & ML Kit OCR text for accidental leaks
@@ -148,6 +169,18 @@ object OfflinePrivacyEngine {
 
         val text = detection.extractedText
         if (text.isNotBlank()) {
+            if (SECRET_KEY_REGEX.containsMatchIn(text)) {
+                warnings.add("КРИТИЧНО: пароль, токен или приватный ключ в кадре")
+                score += 45
+            }
+            val hasValidCard = CARD_CANDIDATE_REGEX.findAll(text).any { m ->
+                val digits = m.value.filter { it.isDigit() }
+                passesLuhn(digits)
+            }
+            if (hasValidCard) {
+                warnings.add("Обнаружен номер банковской карты (проверка Luhn)")
+                score += 40
+            }
             if (PLATE_REGEX.containsMatchIn(text)) {
                 warnings.add("Возможный госномер авто в тексте")
                 score += 35
@@ -164,7 +197,11 @@ object OfflinePrivacyEngine {
                 warnings.add("Обнаружен e-mail / учётная строка")
                 score += 20
             }
-            if (warnings.none { it.contains("текст") || it.contains("номер") || it.contains("e-mail") } && detection.textBlocks.isNotEmpty()) {
+            if (warnings.none {
+                    it.contains("текст") || it.contains("номер") || it.contains("e-mail") ||
+                        it.contains("карт") || it.contains("ключ")
+                } && detection.textBlocks.isNotEmpty()
+            ) {
                 warnings.add("Читаемый текст / вывески (${detection.textBlocks.size} блоков)")
                 score += 15
             }
@@ -233,17 +270,12 @@ object OfflinePrivacyEngine {
                     canvas.drawRect(rect, paint)
                 }
                 RedactionStyle.PIXELATE -> {
-                    val rw = rect.width()
-                    val rh = rect.height()
-                    val crop = Bitmap.createBitmap(source, rect.left, rect.top, rw, rh)
-                    val downW = max(3, rw / max(10, rw / 12))
-                    val downH = max(3, rh / max(10, rh / 12))
-                    val tiny = Bitmap.createScaledBitmap(crop, downW, downH, false)
-                    val mosaic = Bitmap.createScaledBitmap(tiny, rw, rh, false)
-                    canvas.drawBitmap(mosaic, rect.left.toFloat(), rect.top.toFloat(), null)
-                    crop.recycle()
-                    tiny.recycle()
-                    mosaic.recycle()
+                    drawJitteredMosaic(
+                        canvas = canvas,
+                        source = source,
+                        rect = rect,
+                        blockSize = max(10, min(rect.width(), rect.height()) / 10)
+                    )
                 }
                 RedactionStyle.BLUR -> {
                     val rw = rect.width()
@@ -260,6 +292,43 @@ object OfflinePrivacyEngine {
             }
         }
         return out
+    }
+
+    /**
+     * Draws non-linear block mosaic with per-block jittered sampling + slight brightness noise
+     * so faces/plates resist trivial linear pixelation deconvolution.
+     */
+    private fun drawJitteredMosaic(canvas: Canvas, source: Bitmap, rect: Rect, blockSize: Int) {
+        val blockPaint = Paint().apply { style = Paint.Style.FILL }
+        val step = max(6, blockSize)
+        val w = source.width
+        val h = source.height
+        var by = rect.top
+        var rowIdx = 0
+        while (by < rect.bottom) {
+            val cellBottom = min(rect.bottom, by + step)
+            var bx = rect.left
+            var colIdx = 0
+            while (bx < rect.right) {
+                val cellRight = min(rect.right, bx + step)
+                val hash = (colIdx * 73856093) xor (rowIdx * 19349663) xor (w * 83492791)
+                val jx = ((hash and 3) - 1) * max(1, step / 3)
+                val jy = (((hash ushr 2) and 3) - 1) * max(1, step / 3)
+                val sx = ((bx + cellRight) / 2 + jx).coerceIn(0, w - 1)
+                val sy = ((by + cellBottom) / 2 + jy).coerceIn(0, h - 1)
+                val c = source.getPixel(sx, sy)
+                val delta = (((hash ushr 4) and 0x1F) - 15)
+                val r = (Color.red(c) + delta).coerceIn(0, 255)
+                val g = (Color.green(c) + delta).coerceIn(0, 255)
+                val b = (Color.blue(c) + delta).coerceIn(0, 255)
+                blockPaint.color = Color.rgb(r, g, b)
+                canvas.drawRect(bx.toFloat(), by.toFloat(), cellRight.toFloat(), cellBottom.toFloat(), blockPaint)
+                bx += step
+                colIdx++
+            }
+            by += step
+            rowIdx++
+        }
     }
 
     private fun createPixelatedCopy(src: Bitmap, blockSize: Int): Bitmap {

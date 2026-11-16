@@ -2,7 +2,9 @@ package com.example.camera
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -10,8 +12,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
 import java.util.Arrays
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * ExifStripper v5.0 ("Build, Don't Just Strip"):
@@ -289,20 +294,20 @@ object ExifStripper {
 
     /**
      * Multi-layer Anti-PRNU Cascade (Helio G85 optimized):
-     * - Step A: Random 1.5%..2.5% asymmetric edge crop + non-integer scale warp (0.962x -> original size)
-     *   using bilinear/bicubic filtering to destroy pixel-grid phase alignment needed by PRNU PCE tests.
-     * - Step B: Micro-dither CSPRNG grain injection (±2 LSB) with per-shot random seed so residual noise
-     *   floor does not correlate across frames.
+     * - Step A: Random asymmetric micro-crop (1.0%..2.4%) + anisotropic non-integer resampling.
+     * - Step B: Skia-accelerated 8x8 sinusoidal elastic mesh warp (`drawBitmapMesh`) with CSPRNG phase
+     *   (anchors border vertices so zero edge artifacts appear while breaking global FFT scale-search PRNU correlation).
+     * - Step C: CSPRNG micro-dither (±2 LSB) across RGB channels.
      */
     private fun applyAntiPrnuCascade(bitmap: Bitmap, preserveBinary: Boolean): Bitmap {
         val w = bitmap.width
         val h = bitmap.height
 
-        // Random asymmetric micro-crop (1.2% .. 2.4%)
-        val cropPctL = 0.012f + secureRandom.nextFloat() * 0.012f
-        val cropPctT = 0.012f + secureRandom.nextFloat() * 0.012f
-        val cropPctR = 0.012f + secureRandom.nextFloat() * 0.012f
-        val cropPctB = 0.012f + secureRandom.nextFloat() * 0.012f
+        // Random asymmetric micro-crop (1.0% .. 2.4%)
+        val cropPctL = 0.010f + secureRandom.nextFloat() * 0.014f
+        val cropPctT = 0.010f + secureRandom.nextFloat() * 0.014f
+        val cropPctR = 0.010f + secureRandom.nextFloat() * 0.014f
+        val cropPctB = 0.010f + secureRandom.nextFloat() * 0.014f
 
         val left = (w * cropPctL).toInt().coerceIn(0, max(0, w / 10))
         val top = (h * cropPctT).toInt().coerceIn(0, max(0, h / 10))
@@ -312,9 +317,11 @@ object ExifStripper {
         val ch = max(32, bottom - top)
 
         val cropped = Bitmap.createBitmap(bitmap, left, top, cw, ch)
-        // Non-integer resampling intermediate pass (breaks CFA & PRNU spatial correlation)
-        val midW = max(32, (cw * 0.963f).toInt())
-        val midH = max(32, (ch * 0.963f).toInt())
+        // Anisotropic non-integer intermediate pass (independently varies X/Y pitch to defeat 1D/2D scale search)
+        val scaleX = 0.946f + secureRandom.nextFloat() * 0.030f
+        val scaleY = 0.946f + secureRandom.nextFloat() * 0.030f
+        val midW = max(32, (cw * scaleX).toInt())
+        val midH = max(32, (ch * scaleY).toInt())
         val mid = Bitmap.createScaledBitmap(cropped, midW, midH, true)
         cropped.recycle()
 
@@ -324,16 +331,44 @@ object ExifStripper {
         val resampled = Bitmap.createScaledBitmap(mid, outW, outH, true)
         mid.recycle()
 
+        // Smooth 8x8 sinusoidal elastic mesh warp (Skia-accelerated)
+        val warped = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        val meshW = 8
+        val meshH = 8
+        val verts = FloatArray((meshW + 1) * (meshH + 1) * 2)
+        val phaseX = secureRandom.nextFloat() * (2f * PI.toFloat())
+        val phaseY = secureRandom.nextFloat() * (2f * PI.toFloat())
+        val maxAmp = (min(outW, outH) * 0.0026f).coerceIn(0.6f, 2.8f)
+
+        var idx = 0
+        for (iy in 0..meshH) {
+            val ny = iy.toFloat() / meshH.toFloat()
+            val y = ny * outH
+            val edgeEnvY = sin(ny * PI).toFloat()
+            for (ix in 0..meshW) {
+                val nx = ix.toFloat() / meshW.toFloat()
+                val x = nx * outW
+                val edgeEnv = sin(nx * PI).toFloat() * edgeEnvY
+                val dx = maxAmp * edgeEnv * sin((ny * 2.0 * PI) + phaseX).toFloat()
+                val dy = maxAmp * edgeEnv * cos((nx * 2.0 * PI) + phaseY).toFloat()
+                verts[idx++] = (x + dx).coerceIn(0f, outW.toFloat())
+                verts[idx++] = (y + dy).coerceIn(0f, outH.toFloat())
+            }
+        }
+        val warpCanvas = Canvas(warped)
+        val warpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+        warpCanvas.drawBitmapMesh(resampled, meshW, meshH, verts, 0, null, 0, warpPaint)
+        resampled.recycle()
+
         if (preserveBinary) {
-            return resampled
+            return warped
         }
 
         // Inject low-amplitude CSPRNG micro-dither (±2 LSB) across RGB channels
         val pixels = IntArray(outW * outH)
-        resampled.getPixels(pixels, 0, outW, 0, 0, outW, outH)
+        warped.getPixels(pixels, 0, outW, 0, 0, outW, outH)
         var state = secureRandom.nextInt() or 1
         for (i in pixels.indices) {
-            // Fast xorshift32 PRNG seeded by CSPRNG for Helio G85 speed (~4ms)
             state = state xor (state shl 13)
             state = state xor (state ushr 17)
             state = state xor (state shl 5)
@@ -345,8 +380,8 @@ object ExifStripper {
             val b = ((c and 0xFF) + delta).coerceIn(0, 255)
             pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
-        resampled.setPixels(pixels, 0, outW, 0, 0, outW, outH)
-        return resampled
+        warped.setPixels(pixels, 0, outW, 0, 0, outW, outH)
+        return warped
     }
 
     /**
@@ -663,7 +698,7 @@ object ExifStripper {
             }
             val notes = buildList {
                 add(if (metaBytes == 0) "RIFF/WEBP: EXIF/XMP/ICCP отсутствуют (0 B)" else "ВНИМАНИЕ: обнаружены чанки метаданных!")
-                add("Аппаратные DQT/MakerNotes отсутствуют (свежее перекодирование)")
+                add("Свежее перекодирование WebP (аппаратные EXIF/MakerNotes камеры отсутствуют)")
             }
             return AuditReport("WEBP", bytes.size, metaBytes, segments, metaBytes == 0, notes)
         }
@@ -700,7 +735,8 @@ object ExifStripper {
                 p += length
             }
             val notes = buildList {
-                add(if (metaBytes == 0) "JPEG: APP0..APP15 и COM полностью удалены (0 B)" else "ВНИМАНИЕ: обнаружены APP/COM сегменты!")
+                add(if (metaBytes == 0) "JPEG: APP0..APP15 и COM полностью удалены (0 B сторонних метаданных)" else "ВНИМАНИЕ: обнаружены APP/COM сегменты!")
+                add("Стандартные DQT (0xFFDB) оставлены для валидности декодера")
             }
             return AuditReport("JPEG", bytes.size, metaBytes, segments, metaBytes == 0, notes)
         }

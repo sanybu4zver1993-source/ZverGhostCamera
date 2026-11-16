@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CaptureRequest
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
@@ -16,6 +17,8 @@ import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -70,6 +73,7 @@ import com.example.camera.Mp4Sanitizer
 import com.example.crypto.GhostCryptoVault
 import com.example.security.AntiForensicsGuard
 import com.example.security.CamouflageManager
+import com.example.security.SecureClipboard
 import com.example.security.SentinelEngine
 import com.example.security.ZverPrefs
 import com.example.visor.CyberVisorEngine
@@ -157,6 +161,28 @@ fun GhostCameraScreen(
         cyberVisorEngine.currentMode = visorMode
         if (visorMode == VisorMode.NORMAL) {
             visorDisplayState = null
+        }
+    }
+
+    // Lock AE/AWB via Camera2 interop during BIO_RPPG so auto-exposure flicker does not pollute pulse signal
+    DisposableEffect(visorMode, cameraControl) {
+        val ctrl = cameraControl
+        if (visorMode == VisorMode.BIO_RPPG && ctrl != null) {
+            try {
+                val c2Ctrl = Camera2CameraControl.from(ctrl)
+                val lockOpts = CaptureRequestOptions.Builder()
+                    .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+                    .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+                    .build()
+                c2Ctrl.setCaptureRequestOptions(lockOpts)
+            } catch (_: Exception) {}
+            onDispose {
+                try {
+                    Camera2CameraControl.from(ctrl).clearCaptureRequestOptions()
+                } catch (_: Exception) {}
+            }
+        } else {
+            onDispose {}
         }
     }
 
@@ -275,6 +301,7 @@ fun GhostCameraScreen(
                     GhostCryptoVault.lockSession()
                     ByokManager.clearSessionMemory()
                     SentinelEngine.clearSession()
+                    SecureClipboard.clearIfOwned(context)
                     sentinelArmed = false
                     sentinelEvents = emptyList()
                     showVaultDialog = false
@@ -549,7 +576,8 @@ fun GhostCameraScreen(
                 lastStatusMessage = "СБОЙ ОСТАНОВКИ: ${e.message}"
             }
         } else {
-            val tempVideoFile = File(context.cacheDir, "raw_video_${System.currentTimeMillis()}.mp4")
+            val videoStageDir = GhostCryptoVault.getVideoStageDir(context)
+            val tempVideoFile = File(videoStageDir, "raw_video_${System.currentTimeMillis()}.mp4")
             val outputOptions = androidx.camera.video.FileOutputOptions.Builder(tempVideoFile).build()
 
             try {
@@ -575,7 +603,7 @@ fun GhostCameraScreen(
                             isRecordingVideo = false
                             if (!event.hasError()) {
                                 scope.launch(Dispatchers.IO) {
-                                    val cleanVideoFile = File(context.cacheDir, "clean_video_${System.currentTimeMillis()}.mp4")
+                                    val cleanVideoFile = File(videoStageDir, "clean_video_${System.currentTimeMillis()}.mp4")
                                     try {
                                         val sanitized = Mp4Sanitizer.sanitizeMp4File(tempVideoFile, cleanVideoFile)
                                         val targetInput = if (sanitized && cleanVideoFile.exists()) cleanVideoFile else tempVideoFile
@@ -1671,12 +1699,11 @@ fun GhostCameraScreen(
                     },
                     onSavePulseMetrics = { bpm, hrv ->
                         ZverPrefs.saveLastPulseBpm(context, bpm, hrvMs = hrv ?: 0)
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
-                        val clipText = if (hrv != null) "ЧСС: $bpm BPM | HRV (RMSSD): $hrv мс" else "ЧСС: $bpm BPM"
-                        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Zver BioVisor", clipText))
+                        val clipText = if (hrv != null) "ЧСС: $bpm BPM | HRV (~6-8с): $hrv мс" else "ЧСС: $bpm BPM"
+                        SecureClipboard.copySensitive(context, "Zver BioVisor", clipText)
                         triggerHapticFeedback(isStealth = true)
-                        val hrvMsg = hrv?.let { " / HRV ${it}мс" } ?: ""
-                        lastStatusMessage = "❤️ ЗАМЕР: $bpm BPM$hrvMsg (СКОПИРОВАНО)"
+                        val hrvMsg = hrv?.let { " / HRV ~${it}мс" } ?: ""
+                        lastStatusMessage = "❤️ ЗАМЕР: $bpm BPM$hrvMsg (СКОПИРОВАНО 45с)"
                     },
                     onSaveVisorSnapshot = {
                         val snapBmp = cyberVisorEngine.snapshotLatestBitmapCopy()
@@ -2085,6 +2112,7 @@ fun GhostCameraScreen(
                             com.example.crypto.MonoVaultEngine.cryptoShredMonolith(context)
                             ByokManager.clearSessionMemory()
                             SentinelEngine.clearSession()
+                            SecureClipboard.clearIfOwned(context)
                             sentinelArmed = false
                             sentinelEvents = emptyList()
                             vaultCount = 0
@@ -2344,7 +2372,7 @@ private fun CyberVisorControlCard(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         val bpmText = telemetry.estimatedBpm?.let { "$it BPM" } ?: "Калибровка..."
-                        val hrvText = telemetry.estimatedHrvMs?.let { " • HRV ${it}мс" } ?: ""
+                        val hrvText = telemetry.estimatedHrvMs?.let { " • HRV ~${it}мс (6-8с)" } ?: ""
                         val qualPct = (telemetry.signalQuality * 100f).toInt()
                         Text(
                             text = "❤️ ЧСС: $bpmText$hrvText • Сигнал $qualPct%",
@@ -2353,6 +2381,14 @@ private fun CyberVisorControlCard(
                             fontWeight = FontWeight.Bold,
                             fontSize = 10.sp
                         )
+                        if (telemetry.rppgSourceLabel.isNotBlank()) {
+                            Text(
+                                text = "🔒 AE/AWB Lock • ${telemetry.rppgSourceLabel}",
+                                color = NeonCyan,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 9.sp
+                            )
+                        }
                         Spacer(modifier = Modifier.height(3.dp))
                         LinearProgressIndicator(
                             progress = { telemetry.signalQuality.coerceIn(0f, 1f) },
@@ -2383,6 +2419,36 @@ private fun CyberVisorControlCard(
                     fontSize = 9.sp
                 )
             }
+            VisorMode.SKIN_CHROMA -> {
+                val compactPct = (telemetry.skinCompactness * 100f).toInt()
+                Text(
+                    text = "👤 Кожа YCbCr: ${telemetry.skinPercent}% • Сплочён. $compactPct% • Движ. ${telemetry.movingSkinPercent}%",
+                    color = if (telemetry.skinPercent >= 2 && compactPct >= 18) CyberGreen else NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = activeMode.hintRu,
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
+            VisorMode.EULER_AMP -> {
+                val stabPct = (telemetry.eulerStability * 100f).toInt()
+                Text(
+                    text = "〰 1D-стабилизация сдвига: $stabPct% • Демпфер краёв активен",
+                    color = if (stabPct >= 65) CyberGreen else NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = activeMode.hintRu,
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
             VisorMode.WIREFRAME_POSE -> {
                 val count = telemetry.poseWireframe?.visibleCount ?: 0
                 Text(
@@ -2403,13 +2469,20 @@ private fun CyberVisorControlCard(
                 )
             }
             VisorMode.IR_BEACON -> {
-                Text(
-                    text = if (telemetry.irPeakDetected) {
+                val statusTxt = telemetry.irStatusLabel.ifBlank {
+                    if (telemetry.irPeakDetected) {
                         "🚨 ИК-ИЗЛУЧЕНИЕ ОБНАРУЖЕНО (${telemetry.irHotPixels} пикс.)"
                     } else {
                         activeMode.hintRu
+                    }
+                }
+                Text(
+                    text = statusTxt,
+                    color = when {
+                        telemetry.irPeakDetected -> CyberRed
+                        telemetry.irHotPixels > 0 -> NeonYellow
+                        else -> CyberMuted
                     },
-                    color = if (telemetry.irPeakDetected) CyberRed else CyberMuted,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = if (telemetry.irPeakDetected) FontWeight.Bold else FontWeight.Normal,
                     fontSize = 9.sp

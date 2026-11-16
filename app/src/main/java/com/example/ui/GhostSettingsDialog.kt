@@ -17,9 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,6 +29,7 @@ import com.example.assist.GeminiByokClient
 import com.example.camera.ExifStripper
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
+import com.example.security.SecureClipboard
 import com.example.security.ZverPrefs
 import kotlinx.coroutines.launch
 import java.util.Arrays
@@ -62,7 +61,6 @@ fun GhostSettingsDialog(
     onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableStateOf(SettingsTab.SECURITY_CODECS) }
 
@@ -166,7 +164,7 @@ fun GhostSettingsDialog(
                         SettingsTab.SECURITY_CODECS -> {
                             Text("1. ФОРМАТ И СЖАТИЕ КАДРА", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "WebP и перекодирование уничтожают таблицы DQT/MakerNotes камеры. Режим «ДОКУМЕНТ Ч/Б» сжимает лист А4 в ~25-45 КБ.",
+                                "WebP и перекодирование заменяют таблицы DQT/MakerNotes камеры (0 Б сторонних метаданных). Режим «ДОКУМЕНТ Ч/Б» сжимает лист А4 в ~25-45 КБ.",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
                                 modifier = Modifier.padding(vertical = 4.dp)
@@ -203,7 +201,7 @@ fun GhostSettingsDialog(
                             Text("2. ТАКТИЧЕСКАЯ БЕЗОПАСНОСТЬ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Spacer(modifier = Modifier.height(4.dp))
 
-                            SecurityToggleRow("Anti-PRNU каскад", "Субпиксельный кроп 0.963x + CSPRNG микродизер", antiPrnu) {
+                            SecurityToggleRow("Anti-PRNU каскад", "Асимметричный срез + 8x8 Skia-деформация сетки + CSPRNG микродизер", antiPrnu) {
                                 antiPrnu = it; ZverPrefs.setAntiPrnuEnabled(context, it)
                             }
                             SecurityToggleRow("RAM-Only контур", "0 байт на диск — кадры живут только в ОЗУ", ramOnly) {
@@ -605,8 +603,8 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🔬 БИО-ВИЗОР v2.0 (10-в-1)",
-                                desc = "Реальная оптика и ML Kit без тормозов: Пульс + HRV (RMSSD, фиксация и копия в буфер), Эйлер x20 (микродвижения), Веновизор (гемоглобин ln R/G), Дерма-УФ (меланин 450 нм), Термо-LUT Ironbow, Анти-Туман live (Dehaze), Скелет 33 точки, Хлорофилл/Еда (ExG), Ночь-гамма и Поиск ИК-маяков (850-940 нм).",
+                                title = "🔬 БИО-ВИЗОР v2.1 (11-в-1)",
+                                desc = "Реальная оптика и ML Kit: Пульс + HRV (блокировка AE/AWB, устойчивость к скачкам яркости и палец на линзе), Кожа YCbCr, Эйлер x20 со стабилизацией сдвига, Веновизор (ln R/G), Дерма-УФ, Термо-LUT Ironbow, Анти-Туман live, Скелет 33 точки, Хлорофилл (ExG), Ночь-гамма и Поиск ИК-маяков.",
                                 modeKey = "VISOR",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -713,8 +711,8 @@ fun GhostSettingsDialog(
                                 label = "Прямой запуск из Termux (одной строкой):",
                                 cmd = "am start -d zver://capture",
                                 onCopy = {
-                                    clipboardManager.setText(AnnotatedString("am start -d zver://capture"))
-                                    onStatusMessage("СКОПИРОВАНО: am start -d zver://capture")
+                                    SecureClipboard.copySensitive(context, "Zver Termux CMD", "am start -d zver://capture")
+                                    onStatusMessage("СКОПИРОВАНО (АВТО-ОЧИСТКА 45с)")
                                 }
                             )
 
@@ -722,8 +720,8 @@ fun GhostSettingsDialog(
                                 label = "Широковещательный интент (MacroDroid / Termux):",
                                 cmd = "am broadcast -a com.example.camera.TRIGGER_CAPTURE",
                                 onCopy = {
-                                    clipboardManager.setText(AnnotatedString("am broadcast -a com.example.camera.TRIGGER_CAPTURE"))
-                                    onStatusMessage("СКОПИРОВАН INTENT")
+                                    SecureClipboard.copySensitive(context, "Zver Broadcast Intent", "am broadcast -a com.example.camera.TRIGGER_CAPTURE")
+                                    onStatusMessage("СКОПИРОВАН INTENT (АВТО-ОЧИСТКА 45с)")
                                 }
                             )
 
@@ -731,8 +729,8 @@ fun GhostSettingsDialog(
                                 label = "Переключение фонарика из скрипта:",
                                 cmd = "am broadcast -a com.example.camera.TOGGLE_TORCH",
                                 onCopy = {
-                                    clipboardManager.setText(AnnotatedString("am broadcast -a com.example.camera.TOGGLE_TORCH"))
-                                    onStatusMessage("СКОПИРОВАН INTENT ФОНАРИКА")
+                                    SecureClipboard.copySensitive(context, "Zver Torch Intent", "am broadcast -a com.example.camera.TOGGLE_TORCH")
+                                    onStatusMessage("СКОПИРОВАН INTENT ФОНАРИКА (45с)")
                                 }
                             )
 

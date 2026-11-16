@@ -24,10 +24,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -41,6 +39,7 @@ import com.example.camera.CaptureManager
 import com.example.camera.ExifStripper
 import com.example.camera.VideoKeyframeExtractor
 import com.example.privacy.LocalSymbiosisCvEngine
+import com.example.security.SecureClipboard
 import com.example.security.VaultAnalytics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -86,7 +85,6 @@ fun VikaAiSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
     BackHandler { onDismiss() }
@@ -786,8 +784,8 @@ fun VikaAiSheet(
                                     ChatMessageCard(
                                         entry = msg,
                                         onCopy = {
-                                            clipboard.setText(AnnotatedString(msg.replyText))
-                                            onStatusMessage("ОТВЕТ СКОПИРОВАН")
+                                            SecureClipboard.copySensitive(context, "Zver Vika AI", msg.replyText)
+                                            onStatusMessage("ОТВЕТ СКОПИРОВАН (АВТО-ОЧИСТКА 45с)")
                                         }
                                     )
                                 }

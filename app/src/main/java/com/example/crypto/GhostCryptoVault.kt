@@ -568,6 +568,8 @@ object GhostCryptoVault {
 
         shredFile(File(context.filesDir, DURESS_SALT_FILE))
         shredFile(File(context.filesDir, DURESS_KEY_FILE))
+        shredEphemeralShareFiles(context)
+        shredOrphanedVideoTemps(context)
 
         for (profile in VaultProfile.values()) {
             count += shredProfile(context, profile)
@@ -746,6 +748,35 @@ object GhostCryptoVault {
             put("ecdsa_sha256_sig_b64", signatureB64)
             put("ecdsa_pub_spki_b64", pubKeyB64)
         }.toString(2)
+    }
+
+    fun getVideoStageDir(context: Context): File {
+        val dir = File(context.noBackupFilesDir, "video_stage")
+        if (!dir.exists()) dir.mkdirs()
+        val nomedia = File(dir, ".nomedia")
+        if (!nomedia.exists()) {
+            try { nomedia.createNewFile() } catch (_: Exception) {}
+        }
+        return dir
+    }
+
+    fun shredOrphanedVideoTemps(context: Context, minAgeMs: Long = 0L): Int {
+        var count = 0
+        val now = System.currentTimeMillis()
+        val stageDir = File(context.noBackupFilesDir, "video_stage")
+        if (stageDir.exists()) {
+            stageDir.listFiles()?.forEach { f ->
+                val oldEnough = minAgeMs <= 0L || (now - f.lastModified()) >= minAgeMs
+                if (f.name != ".nomedia" && oldEnough && shredFile(f)) count++
+            }
+        }
+        context.cacheDir.listFiles { _, name ->
+            (name.startsWith("raw_video_") || name.startsWith("clean_video_")) && name.endsWith(".mp4")
+        }?.forEach { f ->
+            val oldEnough = minAgeMs <= 0L || (now - f.lastModified()) >= minAgeMs
+            if (oldEnough && shredFile(f)) count++
+        }
+        return count
     }
 
     fun shredEphemeralShareFiles(context: Context): Int {

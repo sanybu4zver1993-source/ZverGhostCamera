@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import com.example.visor.YcbcrSkinAnalyzer
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -91,12 +92,17 @@ object LocalSymbiosisCvEngine {
         val osintReport: OfflinePrivacyEngine.OsintRiskReport,
         val quality: FrameQuality,
         val foregroundCoveragePct: Float?,
-        val inferenceMs: Long
+        val inferenceMs: Long,
+        val skinMetrics: YcbcrSkinAnalyzer.SkinMetrics? = null
     ) {
         fun bestRoiRegion(): RectF? {
             faces.maxByOrNull { it.rect.width() * it.rect.height() }?.let { return it.rect }
             objects.maxByOrNull { it.rect.width() * it.rect.height() }?.let { return it.rect }
             pose.torsoRect?.let { return it }
+            skinMetrics?.takeIf { it.isCoherentSkinPresent }?.let { sm ->
+                val r = RectF(sm.normBboxLeft, sm.normBboxTop, sm.normBboxRight, sm.normBboxBottom)
+                if (r.width() > 0.04f && r.height() > 0.04f) return r
+            }
             return null
         }
 
@@ -104,6 +110,7 @@ object LocalSymbiosisCvEngine {
             faces.isNotEmpty() -> "лицо"
             objects.isNotEmpty() -> objects.first().label
             pose.torsoRect != null -> "силуэт"
+            skinMetrics?.isCoherentSkinPresent == true -> "кожа(YCbCr)"
             else -> "нет цели"
         }
     }
@@ -117,6 +124,7 @@ object LocalSymbiosisCvEngine {
     ): SymbiosisReport = withContext(Dispatchers.Default) {
         val startMs = System.currentTimeMillis()
         val quality = assessFrameQuality(bitmap)
+        val skin = YcbcrSkinAnalyzer.analyzeBitmap(bitmap)
 
         coroutineScope {
             val facesDef = async { detectFacesRich(bitmap) }
@@ -155,7 +163,8 @@ object LocalSymbiosisCvEngine {
                 osintReport = osint,
                 quality = quality,
                 foregroundCoveragePct = segPct,
-                inferenceMs = System.currentTimeMillis() - startMs
+                inferenceMs = System.currentTimeMillis() - startMs,
+                skinMetrics = skin
             )
         }
     }
@@ -173,6 +182,12 @@ object LocalSymbiosisCvEngine {
         }
         if (report.pose.detected) {
             append("Поза: ${report.pose.postureRu}. ")
+        }
+        report.skinMetrics?.takeIf { it.isCoherentSkinPresent }?.let { sm ->
+            val pct = (sm.skinFraction * 100f).toInt()
+            append("Кожа(YCbCr)=$pct% (сплочённость=${(sm.compactness * 100f).toInt()}%")
+            if (report.faces.isEmpty()) append(", лицо не в анфас/скрыто")
+            append("). ")
         }
         if (report.objects.isNotEmpty()) {
             append("Объекты: ${report.objects.take(3).joinToString { "${it.label}(${(it.confidence * 100).toInt()}%)" }}. ")
@@ -215,6 +230,11 @@ object LocalSymbiosisCvEngine {
         }
         if (report.pose.detected) {
             summaryParts.add("силуэт/поза: ${report.pose.postureRu}")
+        }
+        report.skinMetrics?.takeIf { it.isCoherentSkinPresent }?.let { sm ->
+            val pct = (sm.skinFraction * 100f).toInt()
+            val extra = if (report.faces.isEmpty()) " — открытая кожа/силуэт без лица в анфас" else ""
+            summaryParts.add("кожа YCbCr $pct%$extra")
         }
         if (report.objects.isNotEmpty()) {
             summaryParts.add(
