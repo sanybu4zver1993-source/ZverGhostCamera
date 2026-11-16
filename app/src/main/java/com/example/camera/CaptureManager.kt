@@ -5,11 +5,14 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import com.example.crypto.GhostCryptoVault
+import com.example.crypto.MonoVaultEngine
+import com.example.security.ZverPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
@@ -19,11 +22,11 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * CaptureManager v2.0 (Level: God):
- * - ZERO Bitmap decoding: Memory allocation is strictly bounded by the raw JPEG buffer from CameraX.
- * - Byte-level streaming EXIF stripping: Skips APP0-APP15 (0xFFE0..0xFFEF) and COM (0xFFFE).
- * - Direct streaming into CipherOutputStream (AES-256-GCM hardware Keystore).
- * - Immediate RAM zero-wipe of input buffers.
+ * CaptureManager v3.0:
+ * - Honors ZverPrefs CompressionPreset (Ultra-Tiny WebP, Balanced WebP, Document Adaptive B&W, High-Quality JPEG).
+ * - Honors Anti-PRNU Cascade and Ephemeral RAM-Only Contour (0 bytes on flash).
+ * - Fast zero-decode JPEG stream stripping when High-Quality + 0° + no dehaze + no PRNU warp.
+ * - Mandatory EXIF/XMP/COM purge + self-audit + immediate RAM zero-wipe of raw buffers.
  */
 class CaptureManager(
     context: Context,
@@ -34,85 +37,120 @@ class CaptureManager(
     private val captureMutex = Mutex()
 
     data class CaptureResult(
-        val encryptedFile: File,
+        val encryptedFile: File?,
         val encryptedSizeBytes: Long,
         val strippedSegmentsCount: Int,
-        val durationMs: Long
+        val durationMs: Long,
+        val isRamOnly: Boolean = false,
+        val isClean: Boolean = true,
+        val formatLabel: String = "WEBP"
     )
 
     private data class RawShot(val bytes: ByteArray, val rotationDegrees: Int)
 
-    suspend fun takeSecurePhoto(applyDehaze: Boolean = false): CaptureResult = captureMutex.withLock {
+    suspend fun takeSecurePhoto(
+        applyDehaze: Boolean = false,
+        forceDocumentBw: Boolean = false
+    ): CaptureResult = captureMutex.withLock {
         val startTime = System.currentTimeMillis()
         val rawShot = captureRawJpeg()
-        var cleanMirroredBytes: ByteArray? = null
+        val preset = if (forceDocumentBw) {
+            ExifStripper.CompressionPreset.DOCUMENT_BW
+        } else {
+            ZverPrefs.getCompressionPreset(appContext)
+        }
+        val antiPrnu = ZverPrefs.isAntiPrnuEnabled(appContext)
+        val ramOnly = ZverPrefs.isRamOnlyMode(appContext)
+
+        var cleanBytes: ByteArray? = null
         try {
             withContext(Dispatchers.IO) {
-                val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(appContext, prefix = "shot")
                 var strippedCount = 0
+                val audit: ExifStripper.AuditReport
 
-                try {
-                    if (rawShot.rotationDegrees % 360 != 0 || applyDehaze) {
-                        val processed = ExifStripper.processAndPurgeExif(
-                            rawJpeg = rawShot.bytes,
-                            rotationDegrees = rawShot.rotationDegrees,
-                            applyDehaze = applyDehaze
-                        )
-                        cleanMirroredBytes = processed.cleanJpegBytes
-                        cos.use { stream ->
-                            stream.write(cleanMirroredBytes)
-                            stream.flush()
-                        }
-                        strippedCount = 1
-                    } else {
-                        val baos = java.io.ByteArrayOutputStream(rawShot.bytes.size)
-                        strippedCount = streamStrippedJpeg(rawShot.bytes, baos)
-                        cleanMirroredBytes = baos.toByteArray()
-                        cos.use { stream ->
-                            stream.write(cleanMirroredBytes)
-                            stream.flush()
-                        }
-                    }
+                val useFastBytePath = (preset == ExifStripper.CompressionPreset.HIGH_QUALITY) &&
+                    !antiPrnu &&
+                    !applyDehaze &&
+                    (rawShot.rotationDegrees % 360 == 0)
 
-                    // Also mirror strictly stripped JPEG bytes into Monolithic VeraCrypt Container
-                    try {
-                        val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN)
-                            com.example.crypto.MonoVaultEngine.VolumeType.MASTER
-                        else
-                            com.example.crypto.MonoVaultEngine.VolumeType.DECOY
-                        cleanMirroredBytes?.let { clean ->
-                            com.example.crypto.MonoVaultEngine.appendRecord(appContext, volume, clean)
-                        }
-                    } catch (_: Exception) {}
-
-                    CaptureResult(
-                        encryptedFile = targetFile,
-                        encryptedSizeBytes = targetFile.length(),
-                        strippedSegmentsCount = strippedCount,
-                        durationMs = System.currentTimeMillis() - startTime
+                if (useFastBytePath) {
+                    val baos = ByteArrayOutputStream(rawShot.bytes.size)
+                    strippedCount = streamStrippedJpeg(rawShot.bytes, baos)
+                    cleanBytes = baos.toByteArray()
+                    audit = ExifStripper.auditBytes(cleanBytes!!)
+                } else {
+                    val processed = ExifStripper.processAndPurgeExif(
+                        rawJpeg = rawShot.bytes,
+                        rotationDegrees = rawShot.rotationDegrees,
+                        applyDehaze = applyDehaze,
+                        preset = preset,
+                        antiPrnu = antiPrnu
                     )
-                } catch (e: Exception) {
-                    GhostCryptoVault.shredFile(targetFile)
-                    throw IOException("Streaming capture failed", e)
+                    cleanBytes = processed.cleanJpegBytes
+                    audit = processed.audit ?: ExifStripper.auditBytes(cleanBytes!!)
+                    strippedCount = 1
+                }
+
+                val payload = cleanBytes!!
+
+                if (ramOnly) {
+                    val shot = GhostCryptoVault.addRamShot(payload.clone(), isVideo = false)
+                    CaptureResult(
+                        encryptedFile = null,
+                        encryptedSizeBytes = shot.bytes.size.toLong(),
+                        strippedSegmentsCount = strippedCount,
+                        durationMs = System.currentTimeMillis() - startTime,
+                        isRamOnly = true,
+                        isClean = audit.isClean,
+                        formatLabel = audit.format
+                    )
+                } else {
+                    val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(
+                        appContext,
+                        prefix = GhostCryptoVault.MEDIA_PHOTO
+                    )
+                    try {
+                        cos.use { stream ->
+                            stream.write(payload)
+                            stream.flush()
+                        }
+
+                        // Mirror stripped payload into Monolithic VeraCrypt Container
+                        try {
+                            val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                                MonoVaultEngine.VolumeType.MASTER
+                            } else {
+                                MonoVaultEngine.VolumeType.DECOY
+                            }
+                            MonoVaultEngine.appendRecord(appContext, volume, payload)
+                        } catch (_: Exception) {}
+
+                        CaptureResult(
+                            encryptedFile = targetFile,
+                            encryptedSizeBytes = targetFile.length(),
+                            strippedSegmentsCount = strippedCount,
+                            durationMs = System.currentTimeMillis() - startTime,
+                            isRamOnly = false,
+                            isClean = audit.isClean,
+                            formatLabel = audit.format
+                        )
+                    } catch (e: Exception) {
+                        GhostCryptoVault.shredFile(targetFile)
+                        throw IOException("Streaming capture failed", e)
+                    }
                 }
             }
         } finally {
             Arrays.fill(rawShot.bytes, 0.toByte())
-            cleanMirroredBytes?.let { Arrays.fill(it, 0.toByte()) }
+            cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
         }
     }
 
-    /**
-     * Reads raw JPEG byte array, inspects marker headers without full image decode.
-     * Drops APP0..APP15 and COM metadata. Streams structural tables (DQT, DHT, SOF)
-     * and scan entropy data (SOS to EOF) directly into target OutputStream.
-     */
     private fun streamStrippedJpeg(input: ByteArray, out: OutputStream): Int {
         if (input.size < 4 || u(input[0]) != 0xFF || u(input[1]) != 0xD8) {
             throw IOException("Corrupted camera buffer: Missing JPEG SOI (0xFFD8)")
         }
 
-        // Write SOI
         out.write(0xFF)
         out.write(0xD8)
 
@@ -120,13 +158,11 @@ class CaptureManager(
         var strippedSegments = 0
 
         while (p < input.size - 1) {
-            // Seek next 0xFF marker prefix
             if (u(input[p]) != 0xFF) {
                 p++
                 continue
             }
 
-            // Handle consecutive 0xFF fill bytes
             var markerPos = p
             while (markerPos < input.size && u(input[markerPos]) == 0xFF) {
                 markerPos++
@@ -136,14 +172,8 @@ class CaptureManager(
             val marker = u(input[markerPos])
             p = markerPos + 1
 
-            if (marker == 0x00 || marker == 0xFF) {
-                // Byte stuffing or padding
-                continue
-            }
+            if (marker == 0x00 || marker == 0xFF) continue
 
-            // Start of Scan (SOS 0xDA):
-            // Everything from here to EOF is the entropy-coded scan data.
-            // Stream the marker and ALL remaining bytes directly to cipher output.
             if (marker == 0xDA) {
                 out.write(0xFF)
                 out.write(0xDA)
@@ -153,11 +183,9 @@ class CaptureManager(
                 return strippedSegments
             }
 
-            // Segment length is big-endian 16-bit
             if (p + 1 >= input.size) break
             val length = (u(input[p]) shl 8) or u(input[p + 1])
             if (length < 2 || p + length > input.size) {
-                // Irregular segment length encountered; safely stream remainder and terminate
                 if (p < input.size) {
                     out.write(input, p - 2, input.size - (p - 2))
                 }
@@ -167,11 +195,9 @@ class CaptureManager(
             val isMetadata = (marker in 0xE0..0xEF) || (marker == 0xFE)
 
             if (isMetadata) {
-                // EXIF, JFIF, XMP, ICC, IPTC or COM: Skip completely!
                 strippedSegments++
                 p += length
             } else {
-                // Essential structural segment: DQT, DHT, SOF0..SOF3, DRI
                 out.write(0xFF)
                 out.write(marker)
                 out.write(input, p, length)
@@ -206,7 +232,7 @@ class CaptureManager(
 
                         if (cont.isActive) {
                             cont.resume(RawShot(bufferBytes, rotation))
-                            bufferBytes = null // Handed off cleanly
+                            bufferBytes = null
                         }
                     } catch (e: Exception) {
                         if (cont.isActive) cont.resumeWithException(e)

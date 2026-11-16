@@ -123,6 +123,56 @@ object OfflinePrivacyEngine {
         return DetectionResult(faces = faces, textBlocks = texts, extractedText = rawText)
     }
 
+    data class OsintRiskReport(
+        val warnings: List<String>,
+        val riskScore: Int
+    )
+
+    private val PLATE_REGEX = Regex("\\b[A-ZАВЕІКМНОРСТХ]{2}\\s*\\d{4}\\s*[A-ZАВЕІКМНОРСТХ]{2}\\b", RegexOption.IGNORE_CASE)
+    private val PHONE_REGEX = Regex("(?:\\+?\\d[\\d\\s\\-()]{7,}\\d)")
+    private val COORD_REGEX = Regex("\\b\\d{2}\\.\\d{4,}\\b")
+    private val EMAIL_REGEX = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+
+    /**
+     * Offline OSINT Risk Linter: scans detected faces & ML Kit OCR text for accidental leaks
+     * before sharing or saving an unredacted frame.
+     */
+    fun assessOsintRisks(detection: DetectionResult): OsintRiskReport {
+        val warnings = mutableListOf<String>()
+        var score = 0
+
+        if (detection.faces.isNotEmpty()) {
+            warnings.add("Лица в кадре: ${detection.faces.size} (рекомендуется маска/блюр)")
+            score += 40
+        }
+
+        val text = detection.extractedText
+        if (text.isNotBlank()) {
+            if (PLATE_REGEX.containsMatchIn(text)) {
+                warnings.add("Возможный госномер авто в тексте")
+                score += 35
+            }
+            if (PHONE_REGEX.containsMatchIn(text)) {
+                warnings.add("Обнаружен телефонный номер / длинный цифровой код")
+                score += 25
+            }
+            if (COORD_REGEX.containsMatchIn(text)) {
+                warnings.add("Похоже на координаты / точные числа")
+                score += 20
+            }
+            if (EMAIL_REGEX.containsMatchIn(text)) {
+                warnings.add("Обнаружен e-mail / учётная строка")
+                score += 20
+            }
+            if (warnings.none { it.contains("текст") || it.contains("номер") || it.contains("e-mail") } && detection.textBlocks.isNotEmpty()) {
+                warnings.add("Читаемый текст / вывески (${detection.textBlocks.size} блоков)")
+                score += 15
+            }
+        }
+
+        return OsintRiskReport(warnings = warnings, riskScore = score.coerceAtMost(100))
+    }
+
     /**
      * Applies selected redactions onto a fresh ARGB_8888 bitmap without mutating [source].
      * When [invertMode] is true, blurs/pixelates/blackouts the ENTIRE background while keeping

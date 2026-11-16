@@ -224,6 +224,11 @@ object MonoVaultEngine {
         }
     }
 
+    fun getSigningPublicKeyBase64(): String {
+        val keyPair = getOrCreateSigningKeyPair()
+        return android.util.Base64.encodeToString(keyPair.public.encoded, android.util.Base64.NO_WRAP)
+    }
+
     /**
      * Appends an encrypted record with Stochastic Padding (0..511B) and Block Replay Protection (AAD binding).
      */

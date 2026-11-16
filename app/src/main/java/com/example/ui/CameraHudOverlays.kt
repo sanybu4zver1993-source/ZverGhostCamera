@@ -1,5 +1,6 @@
 package com.example.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -60,6 +61,7 @@ fun StealthBlackoutScreen(
     onCapture: () -> Unit,
     onExit: () -> Unit
 ) {
+    BackHandler { onExit() }
     var currentTimeStr by remember { mutableStateOf("") }
     var currentDateStr by remember { mutableStateOf("") }
 
@@ -246,17 +248,33 @@ fun StealthBlackoutScreen(
 @Composable
 fun FocusPeakingOverlay(
     peakingPoints: List<Offset>,
+    sharpnessVariance: Double = 0.0,
     modifier: Modifier = Modifier
 ) {
-    Canvas(modifier = modifier) {
-        val dotRadius = 2.2.dp.toPx()
-        for (pt in peakingPoints) {
-            drawCircle(
-                color = HudCyan.copy(alpha = 0.78f),
-                radius = dotRadius,
-                center = Offset(pt.x * size.width, pt.y * size.height)
-            )
+    Box(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val dotRadius = 2.2.dp.toPx()
+            for (pt in peakingPoints) {
+                drawCircle(
+                    color = HudCyan.copy(alpha = 0.78f),
+                    radius = dotRadius,
+                    center = Offset(pt.x * size.width, pt.y * size.height)
+                )
+            }
         }
+        val isSharp = sharpnessVariance >= 110.0
+        Text(
+            text = if (isSharp) "ФОКУС-ПИК: РЕЗКОСТЬ OK (${sharpnessVariance.toInt()})" else "ФОКУС-ПИК: КОНТУРЫ ${peakingPoints.size} (${sharpnessVariance.toInt()})",
+            color = if (isSharp) HudGreen else HudCyan,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 14.dp, bottom = 215.dp)
+                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 3.dp)
+        )
     }
 }
 

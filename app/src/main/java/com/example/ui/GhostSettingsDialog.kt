@@ -27,6 +27,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.assist.ByokManager
+import com.example.camera.ExifStripper
+import com.example.crypto.GhostCryptoVault
+import com.example.security.CamouflageManager
+import com.example.security.ZverPrefs
 
 private val CyberBlack = Color(0xFF070B0E)
 private val CyberGreen = Color(0xFF00FF66)
@@ -39,6 +43,7 @@ private val NeonCyan = Color(0xFF00E5FF)
 private val NeonYellow = Color(0xFFFFEA00)
 
 enum class SettingsTab(val titleRu: String) {
+    SECURITY_CODECS("🛡️ Защита и Кодеки"),
     AI_VIKA("🧠 Нейросеть (Вика)"),
     MODES_GUIDE("📸 Режимы съёмки"),
     TERMUX_AUTOMATION("⚡ Termux & Скрипты")
@@ -48,17 +53,34 @@ enum class SettingsTab(val titleRu: String) {
 fun GhostSettingsDialog(
     onDismiss: () -> Unit,
     onStatusMessage: (String) -> Unit,
-    onSelectMode: (String) -> Unit = {}
+    onSelectMode: (String) -> Unit = {},
+    onOpenPinSetup: () -> Unit = {},
+    onOpenBioTracker: () -> Unit = {},
+    onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {}
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
-    var selectedTab by remember { mutableStateOf(SettingsTab.AI_VIKA) }
+    var selectedTab by remember { mutableStateOf(SettingsTab.SECURITY_CODECS) }
 
     // AI States
     var apiKeyInput by remember { mutableStateOf("") }
     var hasKeyConfigured by remember { mutableStateOf(ByokManager.hasKey(context)) }
     var currentPrompt by remember { mutableStateOf(ByokManager.getCustomPrompt(context)) }
     var selectedModel by remember { mutableStateOf(ByokManager.getModelName(context)) }
+
+    // Security & Codec States
+    var preset by remember { mutableStateOf(ZverPrefs.getCompressionPreset(context)) }
+    var antiPrnu by remember { mutableStateOf(ZverPrefs.isAntiPrnuEnabled(context)) }
+    var ramOnly by remember { mutableStateOf(ZverPrefs.isRamOnlyMode(context)) }
+    var muteVideoAudio by remember { mutableStateOf(ZverPrefs.isMuteVideoAudio(context)) }
+    var pinScramble by remember { mutableStateOf(ZverPrefs.isPinScrambleEnabled(context)) }
+    var snatchLock by remember { mutableStateOf(ZverPrefs.isSnatchProtectionEnabled(context)) }
+    var flipDisguise by remember { mutableStateOf(ZverPrefs.isFlipToDisguiseEnabled(context)) }
+    var screenRecBlock by remember { mutableStateOf(ZverPrefs.isScreenRecBlockEnabled(context)) }
+    var maxFailWipe by remember { mutableStateOf(ZverPrefs.getMaxFailedPinWipe(context)) }
+    var deadManDays by remember { mutableStateOf(ZverPrefs.getDeadManDays(context)) }
+    var currentCamo by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
+    val strongBoxCapable = remember { ByokManager.isStrongBoxSupported(context) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -134,11 +156,199 @@ fun GhostSettingsDialog(
                         .verticalScroll(rememberScrollState())
                 ) {
                     when (selectedTab) {
+                        SettingsTab.SECURITY_CODECS -> {
+                            Text("1. ФОРМАТ И СЖАТИЕ КАДРА", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(
+                                "WebP и перекодирование уничтожают таблицы DQT/MakerNotes камеры. Режим «ДОКУМЕНТ Ч/Б» сжимает лист А4 в ~25-45 КБ.",
+                                color = CyberMuted,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                ExifStripper.CompressionPreset.values().forEach { cp ->
+                                    val isSel = preset == cp
+                                    Text(
+                                        text = cp.labelRu,
+                                        color = if (isSel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isSel) CyberGreen else CyberSurface)
+                                            .border(1.dp, if (isSel) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                preset = cp
+                                                ZverPrefs.setCompressionPreset(context, cp)
+                                                onStatusMessage("КОДЕК: ${cp.labelRu}")
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("2. ТАКТИЧЕСКАЯ БЕЗОПАСНОСТЬ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            SecurityToggleRow("Anti-PRNU каскад", "Субпиксельный кроп 0.963x + CSPRNG микродизер", antiPrnu) {
+                                antiPrnu = it; ZverPrefs.setAntiPrnuEnabled(context, it)
+                            }
+                            SecurityToggleRow("RAM-Only контур", "0 байт на диск — кадры живут только в ОЗУ", ramOnly) {
+                                ramOnly = it; ZverPrefs.setRamOnlyMode(context, it)
+                            }
+                            SecurityToggleRow("Видео без микрофона (Mute)", "Запись видео без аудиодорожки и доступа к MIC", muteVideoAudio) {
+                                muteVideoAudio = it; ZverPrefs.setMuteVideoAudio(context, it)
+                            }
+                            SecurityToggleRow("PIN Scramble (Перемешивание)", "Случайный порядок цифр при входе в Сейф", pinScramble) {
+                                pinScramble = it; ZverPrefs.setPinScrambleEnabled(context, it)
+                            }
+                            SecurityToggleRow("Snatch Lock (Вырывание)", "Резкий рывок (акселерометр+гиро) блокирует экран", snatchLock) {
+                                snatchLock = it; ZverPrefs.setSnatchProtectionEnabled(context, it)
+                            }
+                            SecurityToggleRow("Переворот экраном вниз", "Кладёшь экраном вниз → мгновенный стелс", flipDisguise) {
+                                flipDisguise = it; ZverPrefs.setFlipToDisguiseEnabled(context, it)
+                            }
+                            SecurityToggleRow("Стоп-запись экрана (Android 15)", "Скрывает UI при обнаружении захвата экрана", screenRecBlock) {
+                                screenRecBlock = it; ZverPrefs.setScreenRecBlockEnabled(context, it)
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("3. АВТО-ШРЕДЕР И DEAD-MAN SWITCH", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            Text("Лимит неверных PIN до крипто-шредера:", color = CyberMuted, fontSize = 10.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+                                listOf(0 to "Задержка", 5 to "5 попыток", 10 to "10 попыток").forEach { (v, lbl) ->
+                                    val sel = maxFailWipe == v
+                                    Text(
+                                        text = lbl,
+                                        color = if (sel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) CyberRed else CyberSurface)
+                                            .border(1.dp, if (sel) CyberRed else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                maxFailWipe = v
+                                                ZverPrefs.setMaxFailedPinWipe(context, v)
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+
+                            Text("Авто-уничтожение при неактивности (Dead-Man):", color = CyberMuted, fontSize = 10.sp)
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                listOf(0 to "Выкл", 3 to "3 дня", 7 to "7 дней", 14 to "14 дней", 30 to "30 дней").forEach { (d, lbl) ->
+                                    val sel = deadManDays == d
+                                    Text(
+                                        text = lbl,
+                                        color = if (sel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) NeonYellow else CyberSurface)
+                                            .border(1.dp, if (sel) NeonYellow else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                deadManDays = d
+                                                ZverPrefs.setDeadManDays(context, d)
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("4. МАСКИРОВКА ИКОНКИ И КОНТУРЫ PIN", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                            ) {
+                                CamouflageManager.CamouflageMode.values().forEach { mode ->
+                                    val sel = currentCamo == mode
+                                    val label = when (mode) {
+                                        CamouflageManager.CamouflageMode.ZVER -> "Zver Camera"
+                                        CamouflageManager.CamouflageMode.CALCULATOR -> "Калькулятор"
+                                        CamouflageManager.CamouflageMode.SYSTEM_TOOLS -> "Системные"
+                                        CamouflageManager.CamouflageMode.JELLY_TRACKER -> "BioTracker"
+                                    }
+                                    Text(
+                                        text = label,
+                                        color = if (sel) Color.Black else Color.White,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) CyberGreen else CyberSurface)
+                                            .border(1.dp, if (sel) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                CamouflageManager.setCamouflage(context, mode)
+                                                currentCamo = mode
+                                                onCamouflageChanged(mode)
+                                                onStatusMessage("ИКОНКА: $label")
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = {
+                                        onDismiss()
+                                        onOpenPinSetup()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("НАСТРОИТЬ 3 PIN (DURESS)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Button(
+                                    onClick = {
+                                        onDismiss()
+                                        onOpenBioTracker()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan.copy(alpha = 0.25f)),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("⚡ BIOTRACKER", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+                            val duressState = if (GhostCryptoVault.hasDuressConfigured(context)) "DURESS ПИН: АКТИВЕН" else "DURESS ПИН: НЕ ЗАДАН"
+                            val teeLabel = if (strongBoxCapable) "KeyStore: StrongBox" else "KeyStore: Hardware TEE"
+                            Text("$teeLabel • $duressState", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                        }
+
                         SettingsTab.AI_VIKA -> {
                             // Section 1: API Key
                             Text("1. КЛЮЧ API GEMINI (BYOK)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "Ключ шифруется в аппаратный чип KeyStore устройства. Используется только в изолированном фоновом процессе для анализа кадров.",
+                                "Ключ шифруется в ${if (strongBoxCapable) "StrongBox" else "Hardware TEE"} KeyStore устройства. Используется только в изолированном :assist процессе.",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
                                 modifier = Modifier.padding(vertical = 4.dp)
@@ -552,4 +762,40 @@ private fun AppBadge(name: String, isInstalled: Boolean, onClick: () -> Unit) {
         Text(name, color = if (isInstalled) Color.White else CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, fontWeight = FontWeight.Bold)
     }
 }
+
+@Composable
+private fun SecurityToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp)
+            .background(CyberSurface, RoundedCornerShape(8.dp))
+            .border(1.dp, if (checked) CyberGreen.copy(alpha = 0.4f) else CyberBorder, RoundedCornerShape(8.dp))
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, color = if (checked) CyberGreen else Color.White, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            Text(subtitle, color = CyberMuted, fontSize = 9.sp, lineHeight = 12.sp)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.Black,
+                checkedTrackColor = CyberGreen,
+                uncheckedThumbColor = CyberMuted,
+                uncheckedTrackColor = CyberBorder
+            )
+        )
+    }
+}
+
 

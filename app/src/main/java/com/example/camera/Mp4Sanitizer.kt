@@ -97,7 +97,9 @@ object Mp4Sanitizer {
     fun auditMp4(bytes: ByteArray): ExifStripper.AuditReport {
         val boxes = parseBoxes(bytes, 0, bytes.size)
         val segments = mutableListOf<String>()
+        val notes = mutableListOf<String>()
         var metaBytes = 0
+        var hasZeroTimestamps = true
         for (b in boxes) {
             if (b.type in STRIPPED_TOP_BOXES) {
                 metaBytes += 8 + b.payload.size
@@ -109,12 +111,21 @@ object Mp4Sanitizer {
                     metaBytes += 8 + it.payload.size
                     segments.add("moov.${it.type} (META! ${it.payload.size}B)")
                 }
+                val mvhd = children.firstOrNull { it.type == "mvhd" }
+                if (mvhd != null && mvhd.payload.size >= 12) {
+                    val version = mvhd.payload[0].toInt() and 0xFF
+                    val tsEnd = if (version == 1 && mvhd.payload.size >= 20) 20 else 12
+                    val nonZero = (4 until tsEnd).any { mvhd.payload[it] != 0.toByte() }
+                    if (nonZero) hasZeroTimestamps = false
+                }
                 segments.add("moov (${children.size} atoms)")
             } else {
                 segments.add("${b.type} (${b.payload.size}B)")
             }
         }
-        return ExifStripper.AuditReport("MP4", bytes.size, metaBytes, segments, metaBytes == 0)
+        notes.add(if (metaBytes == 0) "MP4: udta/meta/uuid/free удалены (0 B)" else "ВНИМАНИЕ: найдены атомы метаданных!")
+        notes.add(if (hasZeroTimestamps) "Таймштампы mvhd/tkhd/mdhd обнулены" else "Таймштампы mvhd не обнулены")
+        return ExifStripper.AuditReport("MP4", bytes.size, metaBytes, segments, metaBytes == 0, notes)
     }
 
     private fun rewriteMoov(moovPayload: ByteArray, chunkDelta: Long): ByteArray {

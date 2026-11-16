@@ -7,24 +7,27 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import androidx.compose.ui.geometry.Offset
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /**
- * AntiBlurSensorEngine v4.0 (Redmi 13C MT6768 Hardened):
- * - High-rate Gyroscope sampling (prevents micro-blur / Jello effect).
- * - Accelerometer-based Document Level & Parallelism Indicator (Virtual Crosshairs).
- * - Adaptive Noise-Suppressed Laplacian Variance over 1:1 Center ROI (400x400):
- *   Filters out high-ISO CMOS shot noise from NOISE_REDUCTION_MODE_OFF.
- * - Auto-shutter gating (focus confirmed + zero hand shake + parallelism).
- * - Polyblur blind deconvolution & Handheld Multi-Frame Super-Resolution (MFSR 2x).
+ * AntiBlurSensorEngine v5.0 (Redmi 13C MT6768 Hardened):
+ * - High-rate Gyroscope sampling (anti-blur / Jello mitigation).
+ * - Accelerometer Document Level & Parallelism Indicator.
+ * - Proximity sensor pocket-lock detection (stealth blackout touch guard).
+ * - Snatch Protection (sudden high-G jerk + rapid rotation) & optional Flip-to-Disguise.
+ * - Adaptive Noise-Suppressed Laplacian Variance over 1:1 Center ROI (400x400).
+ * - Real-time Y-plane Focus Peaking contour sampling & Exposure Clipping (highlights + shadows).
  */
 class AntiBlurSensorEngine(context: Context) : SensorEventListener {
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
     private val gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     private val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val linearAccel = sensorManager?.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+    private val proximity = sensorManager?.getDefaultSensor(Sensor.TYPE_PROXIMITY)
 
     @Volatile
     var currentAngularSpeed: Float = 0f
@@ -38,7 +41,6 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
     var isTripodMode: Boolean = false
         private set
 
-    // Document Scanning Virtual Level Telemetry
     @Volatile
     var currentTiltDeg: Float = 0f
         private set
@@ -47,27 +49,39 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
     var isDocumentParallel: Boolean = false
         private set
 
+    @Volatile
+    var isProximityNear: Boolean = false
+        private set
+
+    var onSnatchDetected: (() -> Unit)? = null
+    var onFaceDownDetected: (() -> Unit)? = null
+
+    private var lastLinearAccelSpikeMs = 0L
+    private var lastSnatchTriggerMs = 0L
+    private var lastFaceDownTriggerMs = 0L
+    private var lastAccelMag = 9.81f
+
     companion object {
         const val MICRO_BLUR_THRESHOLD = 0.075f // rad/s
         const val TRIPOD_THRESHOLD = 0.018f     // rad/s
         const val SHARPNESS_PASS_THRESHOLD = 110.0
-        const val DOCUMENT_PARALLEL_THRESHOLD_DEG = 3.0f // < 3.0 degrees = perfect parallel alignment
+        const val DOCUMENT_PARALLEL_THRESHOLD_DEG = 3.0f
+        const val SNATCH_ACCEL_THRESHOLD = 28.0f // m/s^2 sudden jerk
+        const val SNATCH_GYRO_THRESHOLD = 5.0f   // rad/s rapid twist
     }
 
     fun start() {
-        gyroscope?.let { gyro ->
-            sensorManager?.registerListener(
-                this,
-                gyro,
-                SensorManager.SENSOR_DELAY_FASTEST
-            )
+        gyroscope?.let {
+            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
         }
-        accelerometer?.let { accel ->
-            sensorManager?.registerListener(
-                this,
-                accel,
-                SensorManager.SENSOR_DELAY_FASTEST
-            )
+        accelerometer?.let {
+            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
+        }
+        linearAccel?.let {
+            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+        }
+        proximity?.let {
+            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
         }
     }
 
@@ -76,6 +90,7 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
+        val nowMs = System.currentTimeMillis()
         when (event?.sensor?.type) {
             Sensor.TYPE_GYROSCOPE -> {
                 val wx = event.values[0]
@@ -85,28 +100,57 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
                 currentAngularSpeed = omega
                 isStable = omega < MICRO_BLUR_THRESHOLD
                 isTripodMode = omega < TRIPOD_THRESHOLD
+
+                if (omega >= SNATCH_GYRO_THRESHOLD && (nowMs - lastLinearAccelSpikeMs) <= 300L) {
+                    if (nowMs - lastSnatchTriggerMs > 2500L) {
+                        lastSnatchTriggerMs = nowMs
+                        onSnatchDetected?.invoke()
+                    }
+                }
+            }
+            Sensor.TYPE_LINEAR_ACCELERATION -> {
+                val ax = event.values[0]
+                val ay = event.values[1]
+                val az = event.values[2]
+                val linMag = sqrt(ax * ax + ay * ay + az * az)
+                if (linMag >= SNATCH_ACCEL_THRESHOLD) {
+                    lastLinearAccelSpikeMs = nowMs
+                }
             }
             Sensor.TYPE_ACCELEROMETER -> {
                 val ax = event.values[0]
                 val ay = event.values[1]
                 val az = event.values[2]
-                // Compute inclination from pure flat horizontal plane
                 val horizontalNorm = sqrt(ax * ax + ay * ay)
                 val tilt = Math.toDegrees(atan2(horizontalNorm.toDouble(), abs(az).toDouble())).toFloat()
                 currentTiltDeg = tilt
                 isDocumentParallel = tilt <= DOCUMENT_PARALLEL_THRESHOLD_DEG
+
+                // Fallback snatch jerk detection if TYPE_LINEAR_ACCELERATION is absent
+                val mag = sqrt(ax * ax + ay * ay + az * az)
+                if (linearAccel == null && abs(mag - lastAccelMag) >= SNATCH_ACCEL_THRESHOLD) {
+                    lastLinearAccelSpikeMs = nowMs
+                }
+                lastAccelMag = mag
+
+                // Face-down flip detection (az <= -8.8 m/s^2 and nearly flat)
+                if (az <= -8.8f && horizontalNorm < 3.2f) {
+                    if (nowMs - lastFaceDownTriggerMs > 2500L) {
+                        lastFaceDownTriggerMs = nowMs
+                        onFaceDownDetected?.invoke()
+                    }
+                }
+            }
+            Sensor.TYPE_PROXIMITY -> {
+                val dist = event.values[0]
+                val maxRange = proximity?.maximumRange ?: 5f
+                isProximityNear = dist < minOf(maxRange, 3.0f)
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    /**
-     * Calculates Noise-Suppressed Laplacian Variance over 1:1 unscaled Center ROI (400x400).
-     * When NOISE_REDUCTION_MODE_OFF is active, high ISO CMOS shot noise causes false sharpness.
-     * We apply a 3x3 low-pass smoothing stage on each sample to eliminate salt-and-pepper noise
-     * while preserving sharp document strokes, text characters, and high-frequency edge gradients.
-     */
     fun calculateCenterRoiLaplacianVariance(
         yBuffer: java.nio.ByteBuffer,
         width: Int,
@@ -125,7 +169,6 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         var sumSq = 0.0
         var count = 0
 
-        // 1:1 pixel grid, step 2 for ultra-fast 1-2 ms execution on Cortex-A75
         val step = 2
         for (y in startY + 2 until startY + actualRoi - 2 step step) {
             val rowOffset = y * rowStride
@@ -138,7 +181,6 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
 
                 if (bIdx >= limit || rIdx >= limit || tIdx < 0 || lIdx < 0) continue
 
-                // 3x3 Box smoothing filter for CMOS noise immunity
                 fun getSmoothed(offset: Int): Int {
                     if (offset - rowStride - 1 < 0 || offset + rowStride + 1 >= limit) {
                         return yBuffer.get(offset).toInt() and 0xFF
@@ -174,17 +216,62 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
     }
 
     /**
-     * Fast subsampled luminance clipping detector (0..100%) for real-time False-Color Exposure telemetry.
+     * Real-time Y-plane gradient Focus Peaking contour sampler.
+     * Returns normalized [0f..1f] coordinates rotated to match portrait preview orientation.
      */
-    fun calculateOverexposurePercent(
+    fun computeFocusPeakingPoints(
+        yBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        rotationDegrees: Int = 90,
+        edgeThreshold: Int = 46,
+        maxPoints: Int = 380
+    ): List<Offset> {
+        if (width <= 16 || height <= 16) return emptyList()
+        val limit = yBuffer.limit()
+        val points = ArrayList<Offset>(minOf(maxPoints, 256))
+        val step = 10
+
+        for (y in 4 until height - 4 step step) {
+            val rowOff = y * rowStride
+            for (x in 4 until width - 4 step step) {
+                val c = rowOff + x
+                val r = c + 2
+                val b = c + rowStride * 2
+                if (b >= limit || r >= limit) continue
+
+                val yc = yBuffer.get(c).toInt() and 0xFF
+                val yr = yBuffer.get(r).toInt() and 0xFF
+                val yb = yBuffer.get(b).toInt() and 0xFF
+                val grad = abs(yc - yr) + abs(yc - yb)
+                if (grad >= edgeThreshold) {
+                    val nx = x.toFloat() / width.toFloat()
+                    val ny = y.toFloat() / height.toFloat()
+                    val rotated = when (((rotationDegrees % 360) + 360) % 360) {
+                        90 -> Offset(1f - ny, nx)
+                        180 -> Offset(1f - nx, 1f - ny)
+                        270 -> Offset(ny, 1f - nx)
+                        else -> Offset(nx, ny)
+                    }
+                    points.add(rotated)
+                    if (points.size >= maxPoints) return points
+                }
+            }
+        }
+        return points
+    }
+
+    fun calculateExposureMetrics(
         yBuffer: java.nio.ByteBuffer,
         width: Int,
         height: Int,
         rowStride: Int
-    ): Int {
-        if (width <= 8 || height <= 8) return 0
+    ): Pair<Int, Int> {
+        if (width <= 8 || height <= 8) return 0 to 0
         val limit = yBuffer.limit()
-        var clipped = 0
+        var over = 0
+        var under = 0
         var total = 0
         val step = 8
         for (y in 0 until height step step) {
@@ -193,19 +280,22 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
                 val idx = rowOffset + x
                 if (idx >= limit) continue
                 val lum = yBuffer.get(idx).toInt() and 0xFF
-                if (lum >= 245) clipped++
+                if (lum >= 245) over++
+                if (lum <= 14) under++
                 total++
             }
         }
-        if (total == 0) return 0
-        return (clipped * 100) / total
+        if (total == 0) return 0 to 0
+        return ((over * 100) / total) to ((under * 100) / total)
     }
 
-    /**
-     * Handheld Multi-Frame Super-Resolution (MFSR 2x):
-     * Merges a series of 6-8 frames taken with natural micro-tremor.
-     * Uses subpixel Wronski alignment to synthesize a crisp 2x image without pixelation.
-     */
+    fun calculateOverexposurePercent(
+        yBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int
+    ): Int = calculateExposureMetrics(yBuffer, width, height, rowStride).first
+
     fun processHandheldMfsr(frames: List<Bitmap>): Bitmap {
         if (frames.isEmpty()) throw IllegalArgumentException("Frame list empty")
         if (frames.size == 1) return frames[0]
@@ -243,11 +333,6 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         return output
     }
 
-    /**
-     * Polyblur Blind Deconvolution:
-     * Fast, halo-free deblurring via local gradient deconvolution.
-     * Avoids the ringing/haloing artifacts of standard Unsharp Masking.
-     */
     fun applyPolyblur(bitmap: Bitmap, iterations: Int = 1): Bitmap {
         val w = bitmap.width
         val h = bitmap.height

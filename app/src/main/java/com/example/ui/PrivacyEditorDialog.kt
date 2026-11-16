@@ -3,6 +3,7 @@ package com.example.ui
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.RectF
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -82,6 +83,7 @@ fun PrivacyEditorDialog(
     var antiPrnu by remember { mutableStateOf(ZverPrefs.isAntiPrnuEnabled(context)) }
     var isProcessing by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("Обнаружь лица/текст или обведи область пальцем") }
+    var osintReport by remember { mutableStateOf<OfflinePrivacyEngine.OsintRiskReport?>(null) }
 
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
@@ -162,8 +164,29 @@ fun PrivacyEditorDialog(
                 color = EdCyan,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                modifier = Modifier.padding(bottom = 6.dp)
+                modifier = Modifier.padding(bottom = 4.dp)
             )
+
+            osintReport?.let { rep ->
+                if (rep.warnings.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp)
+                            .background(EdRed.copy(alpha = 0.14f), RoundedCornerShape(6.dp))
+                            .border(1.dp, EdRed.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = "⚠ OSINT-РИСК (${rep.riskScore}%): ${rep.warnings.joinToString(" • ")}",
+                            color = Color(0xFFFFB74D),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            lineHeight = 12.sp
+                        )
+                    }
+                }
+            }
 
             // Detection Action Row
             Row(
@@ -197,10 +220,16 @@ fun PrivacyEditorDialog(
                     onClick = {
                         scope.launch {
                             isProcessing = true
-                            val (found, _) = withContext(Dispatchers.Default) {
+                            val (found, rawText) = withContext(Dispatchers.Default) {
                                 OfflinePrivacyEngine.detectTextOffline(sourceBitmap)
                             }
                             regions = regions + found
+                            val det = OfflinePrivacyEngine.DetectionResult(
+                                faces = regions.filter { it.kind == OfflinePrivacyEngine.RegionKind.FACE },
+                                textBlocks = found,
+                                extractedText = rawText
+                            )
+                            osintReport = OfflinePrivacyEngine.assessOsintRisks(det)
                             isProcessing = false
                             statusText = if (found.isEmpty()) "Блоки текста не найдены" else "Найдено текстовых зон: ${found.size}"
                         }
@@ -212,6 +241,32 @@ fun PrivacyEditorDialog(
                     Icon(Icons.Default.DocumentScanner, contentDescription = "Текст", tint = EdCyan, modifier = Modifier.size(15.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("АВТО-ТЕКСТ", color = EdCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                }
+
+                Button(
+                    onClick = {
+                        scope.launch {
+                            isProcessing = true
+                            val targetBmp = previewBitmap ?: sourceBitmap
+                            val full = withContext(Dispatchers.Default) {
+                                OfflinePrivacyEngine.analyzeFullOffline(targetBmp)
+                            }
+                            osintReport = OfflinePrivacyEngine.assessOsintRisks(full)
+                            isProcessing = false
+                            statusText = if ((osintReport?.warnings ?: emptyList()).isEmpty()) {
+                                "OSINT-линтер: чистый кадр (утечек не найдено)"
+                            } else {
+                                "OSINT-линтер: найдено угроз ${osintReport!!.warnings.size}"
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = EdSurface),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("obscura_osint_lint")
+                ) {
+                    Icon(Icons.Default.Security, contentDescription = "OSINT", tint = Color(0xFFFFB74D), modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("OSINT-ЛИНТ", color = Color(0xFFFFB74D), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }
 
                 Button(

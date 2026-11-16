@@ -1,6 +1,7 @@
 package com.example.assist
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
@@ -21,6 +22,14 @@ object ByokManager {
     private const val KEY_CIPHERTEXT = "byok_ciphertext"
     private const val KEY_IV = "byok_iv"
     private const val AES_GCM = "AES/GCM/NoPadding"
+
+    fun isStrongBoxSupported(context: Context): Boolean {
+        return try {
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     @Synchronized
     private fun getOrCreateKey(): SecretKey {

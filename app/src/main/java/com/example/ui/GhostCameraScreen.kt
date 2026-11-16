@@ -58,13 +58,16 @@ import com.example.assist.ByokManager
 import com.example.assist.GhostAssistService
 import com.example.camera.AntiBlurSensorEngine
 import com.example.camera.CaptureManager
+import com.example.camera.Mp4Sanitizer
 import com.example.crypto.GhostCryptoVault
 import com.example.security.AntiForensicsGuard
 import com.example.security.CamouflageManager
+import com.example.security.ZverPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
@@ -79,15 +82,11 @@ private val CyberBorder = Color(0xFF223240)
 private val NeonCyan = Color(0xFF00E5FF)
 private val NeonYellow = Color(0xFFFFEA00)
 
-enum class StealthCoverMode(val titleRu: String) {
-    BLACKOUT("Чёрный экран"),
-    LOCKSCREEN_CLOCK("Часы (Блокировка)"),
-    BROWSER_MOCK("Поиск (Браузер)")
-}
-
 @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 @Composable
-fun GhostCameraScreen() {
+fun GhostCameraScreen(
+    onQuickExitToCamouflage: () -> Unit = {}
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -104,15 +103,20 @@ fun GhostCameraScreen() {
     val antiBlurEngine = remember { AntiBlurSensorEngine(context) }
 
     var liveLaplacianVariance by remember { mutableStateOf(0.0) }
+    var peakingPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var overexposedPercent by remember { mutableStateOf(0) }
+    var underexposedPercent by remember { mutableStateOf(0) }
+    var isProximityLocked by remember { mutableStateOf(false) }
     var isCapturing by remember { mutableStateOf(false) }
     var lastStatusMessage by remember { mutableStateOf<String?>(null) }
     var showShutterFlash by remember { mutableStateOf(false) }
-    var vaultCount by remember { mutableStateOf(GhostCryptoVault.listVaultFiles(context).size) }
+    var vaultCount by remember { mutableStateOf(GhostCryptoVault.totalVaultItemsCount(context)) }
     var showVaultDialog by remember { mutableStateOf(false) }
+    var forcePinSetupFlow by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showCamouflageDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showJellyTankScreen by remember { mutableStateOf(false) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
     var previousCameraMode by remember { mutableStateOf("PHOTO") }
 
@@ -223,10 +227,35 @@ fun GhostCameraScreen() {
         label = "redBorderAlpha"
     )
 
-    // Sensor engine lifecycle
+    // Sensor engine lifecycle (with Snatch Lock & Flip-to-Disguise hooks)
     DisposableEffect(Unit) {
+        antiBlurEngine.onSnatchDetected = {
+            if (ZverPrefs.isSnatchProtectionEnabled(context)) {
+                scope.launch(Dispatchers.Main) {
+                    GhostCryptoVault.lockSession()
+                    showVaultDialog = false
+                    showSettingsDialog = false
+                    showJellyTankScreen = false
+                    isStealthBlackoutActive = true
+                    lastStatusMessage = "⚡ SNATCH LOCK: ДОСТУП ЗАБЛОКИРОВАН"
+                    onQuickExitToCamouflage()
+                }
+            }
+        }
+        antiBlurEngine.onFaceDownDetected = {
+            if (ZverPrefs.isFlipToDisguiseEnabled(context)) {
+                scope.launch(Dispatchers.Main) {
+                    if (!isStealthBlackoutActive) {
+                        if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
+                        isStealthBlackoutActive = true
+                    }
+                }
+            }
+        }
         antiBlurEngine.start()
         onDispose {
+            antiBlurEngine.onSnatchDetected = null
+            antiBlurEngine.onFaceDownDetected = null
             antiBlurEngine.stop()
             captureExecutor.shutdown()
             analysisExecutor.shutdown()
@@ -249,6 +278,7 @@ fun GhostCameraScreen() {
             isTripodMode = antiBlurEngine.isTripodMode
             documentTiltDeg = antiBlurEngine.currentTiltDeg
             isDocumentParallel = antiBlurEngine.isDocumentParallel
+            isProximityLocked = isStealthBlackoutActive && antiBlurEngine.isProximityNear
             delay(100)
         }
     }
@@ -308,7 +338,7 @@ fun GhostCameraScreen() {
                             captureExecutor = captureExecutor
                         )
                         manager.takeSecurePhoto(applyDehaze = isDcpDehazeActive)
-                        vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                        vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         delay(250)
                     }
                     lastStatusMessage = "📸 СЕРИЯ ИЗ 3 КАДРОВ СОХРАНЕНА В СЕЙФ!"
@@ -320,10 +350,11 @@ fun GhostCameraScreen() {
                             captureExecutor = captureExecutor
                         )
                         val result = manager.takeSecurePhoto(applyDehaze = isDcpDehazeActive)
-                        vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                        vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         val kb = result.encryptedSizeBytes / 1024
+                        val contourTag = if (result.isRamOnly) " [ОЗУ]" else ""
                         val dehazeTag = if (isDcpDehazeActive) " [АНТИ-ТУМАН]" else ""
-                        lastStatusMessage = "📸 КАДР В СЕЙФЕ! [#$vaultCount] (${kb}КБ за ${result.durationMs}мс)$dehazeTag"
+                        lastStatusMessage = "📸 ${result.formatLabel} (${kb}КБ, 0 EXIF) за ${result.durationMs}мс$contourTag$dehazeTag"
 
                         if (shotIdx < burstCount) {
                             delay(1000)
@@ -363,12 +394,13 @@ fun GhostCameraScreen() {
                 lastStatusMessage = "СБОЙ ОСТАНОВКИ: ${e.message}"
             }
         } else {
-            val tempVideoFile = java.io.File(context.cacheDir, "raw_video_${System.currentTimeMillis()}.mp4")
+            val tempVideoFile = File(context.cacheDir, "raw_video_${System.currentTimeMillis()}.mp4")
             val outputOptions = androidx.camera.video.FileOutputOptions.Builder(tempVideoFile).build()
 
             try {
                 val pendingRec = vCap.output.prepareRecording(context, outputOptions)
-                val hasAudio = ContextCompat.checkSelfPermission(
+                val muteAudio = ZverPrefs.isMuteVideoAudio(context)
+                val hasAudio = !muteAudio && ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
@@ -388,20 +420,33 @@ fun GhostCameraScreen() {
                             isRecordingVideo = false
                             if (!event.hasError()) {
                                 scope.launch(Dispatchers.IO) {
+                                    val cleanVideoFile = File(context.cacheDir, "clean_video_${System.currentTimeMillis()}.mp4")
                                     try {
-                                        GhostCryptoVault.encryptFileToVault(context, tempVideoFile, prefix = "vid")
-                                        vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                                        val sanitized = Mp4Sanitizer.sanitizeMp4File(tempVideoFile, cleanVideoFile)
+                                        val targetInput = if (sanitized && cleanVideoFile.exists()) cleanVideoFile else tempVideoFile
+                                        if (ZverPrefs.isRamOnlyMode(context)) {
+                                            val bytes = targetInput.readBytes()
+                                            GhostCryptoVault.addRamShot(bytes, isVideo = true)
+                                            GhostCryptoVault.shredFile(cleanVideoFile)
+                                        } else {
+                                            GhostCryptoVault.encryptFileToVault(context, targetInput, prefix = GhostCryptoVault.MEDIA_VIDEO)
+                                        }
+                                        GhostCryptoVault.shredFile(tempVideoFile)
+                                        GhostCryptoVault.shredFile(cleanVideoFile)
+                                        vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                                         withContext(Dispatchers.Main) {
-                                            lastStatusMessage = "🎥 ВИДЕО ЗАШИФРОВАНО В СЕЙФ! [#$vaultCount]"
+                                            lastStatusMessage = "🎥 MP4 ОЧИЩЕН (0 МЕТА) И ЗАШИФРОВАН [#$vaultCount]"
                                         }
                                     } catch (e: Exception) {
+                                        GhostCryptoVault.shredFile(tempVideoFile)
+                                        GhostCryptoVault.shredFile(cleanVideoFile)
                                         withContext(Dispatchers.Main) {
                                             lastStatusMessage = "ОШИБКА ШИФРОВАНИЯ: ${e.message}"
                                         }
                                     }
                                 }
                             } else {
-                                tempVideoFile.delete()
+                                GhostCryptoVault.shredFile(tempVideoFile)
                                 lastStatusMessage = "ОШИБКА: ${event.cause?.message ?: "Сбой"}"
                             }
                         }
@@ -458,6 +503,10 @@ fun GhostCameraScreen() {
 
     fun triggerVideoRecordingToggle() {
         if (isRecordingVideo) {
+            startVideoRecordingInternal()
+            return
+        }
+        if (ZverPrefs.isMuteVideoAudio(context)) {
             startVideoRecordingInternal()
             return
         }
@@ -587,14 +636,26 @@ fun GhostCameraScreen() {
                     rowStride = plane.rowStride,
                     targetRoiSize = 400
                 )
-                val overPct = antiBlurEngine.calculateOverexposurePercent(
+                val (overPct, underPct) = antiBlurEngine.calculateExposureMetrics(
                     yBuffer = plane.buffer,
                     width = imageProxy.width,
                     height = imageProxy.height,
                     rowStride = plane.rowStride
                 )
+                if (isFocusPeakingEnabled) {
+                    peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
+                        yBuffer = plane.buffer,
+                        width = imageProxy.width,
+                        height = imageProxy.height,
+                        rowStride = plane.rowStride,
+                        rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                    )
+                } else if (peakingPoints.isNotEmpty()) {
+                    peakingPoints = emptyList()
+                }
                 liveLaplacianVariance = variance
                 overexposedPercent = overPct
+                underexposedPercent = underPct
             } finally {
                 imageProxy.close()
             }
@@ -677,11 +738,13 @@ fun GhostCameraScreen() {
     if (isStealthBlackoutActive) {
         StealthBlackoutScreen(
             mode = stealthCoverMode,
+            isProximityLocked = isProximityLocked,
             onCycleMode = {
                 stealthCoverMode = when (stealthCoverMode) {
                     StealthCoverMode.BLACKOUT -> StealthCoverMode.LOCKSCREEN_CLOCK
                     StealthCoverMode.LOCKSCREEN_CLOCK -> StealthCoverMode.BROWSER_MOCK
-                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.BLACKOUT
+                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.JELLY_TANK
+                    StealthCoverMode.JELLY_TANK -> StealthCoverMode.BLACKOUT
                 }
             },
             onCapture = { triggerPhotoCapture() },
@@ -776,6 +839,7 @@ fun GhostCameraScreen() {
         // Focus Peaking Live Sharpness Overlay
         if (isFocusPeakingEnabled) {
             FocusPeakingOverlay(
+                peakingPoints = peakingPoints,
                 sharpnessVariance = liveLaplacianVariance,
                 modifier = Modifier.fillMaxSize()
             )
@@ -784,7 +848,8 @@ fun GhostCameraScreen() {
         // False-Color Exposure Overlay
         if (isFalseColorEnabled) {
             FalseColorExposureOverlay(
-                overexposedPercent = overexposedPercent,
+                overexposedPct = overexposedPercent,
+                underexposedPct = underexposedPercent,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -857,9 +922,16 @@ fun GhostCameraScreen() {
                             fontSize = 12.sp
                         )
                     }
+                    val ramMode = ZverPrefs.isRamOnlyMode(context)
+                    val presetShort = when (ZverPrefs.getCompressionPreset(context)) {
+                        com.example.camera.ExifStripper.CompressionPreset.ULTRA_TINY -> "МИНИ-WebP"
+                        com.example.camera.ExifStripper.CompressionPreset.BALANCED -> "БАЛАНС-WebP"
+                        com.example.camera.ExifStripper.CompressionPreset.DOCUMENT_BW -> "ДОК-Ч/Б"
+                        com.example.camera.ExifStripper.CompressionPreset.HIGH_QUALITY -> "МАКС-JPEG"
+                    }
                     Text(
-                        text = "СЕНСОР 50МП // ХОЛОДНЫЙ РЕЖИМ",
-                        color = CyberMuted,
+                        text = if (ramMode) "ОЗУ-КОНТУР // 0B НА ДИСК ($presetShort)" else "ХОЛОДНЫЙ РЕЖИМ // $presetShort",
+                        color = if (ramMode) NeonYellow else CyberMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp
                     )
@@ -1390,14 +1462,16 @@ fun GhostCameraScreen() {
         // Vault Viewer Dialog
         if (showVaultDialog) {
             GhostVaultDialog(
+                forceSetupFlow = forcePinSetupFlow,
                 onDismiss = {
                     showVaultDialog = false
+                    forcePinSetupFlow = false
                     currentProfile = GhostCryptoVault.activeProfile
-                    vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                    vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                 },
                 onVaultUpdated = {
                     currentProfile = GhostCryptoVault.activeProfile
-                    vaultCount = GhostCryptoVault.listVaultFiles(context).size
+                    vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                 }
             )
         }
@@ -1416,6 +1490,7 @@ fun GhostCameraScreen() {
                                 CamouflageManager.CamouflageMode.ZVER -> "Zver Camera (По умолчанию)"
                                 CamouflageManager.CamouflageMode.CALCULATOR -> "Калькулятор"
                                 CamouflageManager.CamouflageMode.SYSTEM_TOOLS -> "Системные утилиты"
+                                CamouflageManager.CamouflageMode.JELLY_TRACKER -> "BioTracker (Жилистый танк)"
                             }
                             Row(
                                 modifier = Modifier
@@ -1443,11 +1518,21 @@ fun GhostCameraScreen() {
             )
         }
 
-        // Settings, AI Prompts & Termux Center Dialog
+        // Settings, Security, AI Prompts & Termux Center Dialog
         if (showSettingsDialog) {
             GhostSettingsDialog(
                 onDismiss = { showSettingsDialog = false },
                 onStatusMessage = { msg -> lastStatusMessage = msg },
+                onOpenPinSetup = {
+                    forcePinSetupFlow = true
+                    showVaultDialog = true
+                },
+                onOpenBioTracker = {
+                    showJellyTankScreen = true
+                },
+                onCamouflageChanged = { mode ->
+                    currentCamouflage = mode
+                },
                 onSelectMode = { modeKey ->
                     if (modeKey == "STEALTH" && selectedCameraMode != "STEALTH") {
                         previousCameraMode = selectedCameraMode
@@ -1484,6 +1569,18 @@ fun GhostCameraScreen() {
             )
         }
 
+        if (showJellyTankScreen) {
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = { showJellyTankScreen = false },
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                JellyTankScreen(
+                    isCamouflageGate = false,
+                    onClose = { showJellyTankScreen = false }
+                )
+            }
+        }
+
         // Emergency Crypto-Shred Confirmation
         if (showPanicConfirm) {
             AlertDialog(
@@ -1508,301 +1605,5 @@ fun GhostCameraScreen() {
                 containerColor = CyberSurface
             )
         }
-    }
-}
-
-/**
- * Advanced Stealth Cover Screen:
- * 1. PURE_BLACK (Minimum IPS screen glow, single tiny dot).
- * 2. LOCKSCREEN_CLOCK (Mimics locked Android/MIUI screen with real live time and battery).
- * 3. BROWSER_MOCK (Mimics open Google search article).
- *
- * Tap anywhere or press volume keys = takes silent photo with discreet haptic tick!
- * Top-right / double-tap = exit stealth mode.
- */
-@Composable
-private fun StealthBlackoutScreen(
-    mode: StealthCoverMode,
-    onCycleMode: () -> Unit,
-    onCapture: () -> Unit,
-    onExit: () -> Unit
-) {
-    BackHandler { onExit() }
-    var currentTimeStr by remember { mutableStateOf("") }
-    var currentDateStr by remember { mutableStateOf("") }
-
-    LaunchedEffect(Unit) {
-        val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-        val dateFormat = SimpleDateFormat("EEEE, d MMMM", Locale("ru"))
-        while (true) {
-            val now = Date()
-            currentTimeStr = timeFormat.format(now)
-            currentDateStr = dateFormat.format(now).replaceFirstChar { it.uppercase() }
-            delay(1000)
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onDoubleTap = { onExit() },
-                    onTap = { onCapture() }
-                )
-            }
-    ) {
-        when (mode) {
-            StealthCoverMode.BLACKOUT -> {
-                // Pitch black with barely visible indicator
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "•",
-                        color = Color.DarkGray.copy(alpha = 0.15f),
-                        fontSize = 12.sp
-                    )
-                }
-            }
-            StealthCoverMode.LOCKSCREEN_CLOCK -> {
-                // Realistic Android Lockscreen: live clock, date, subtle lock icon
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(top = 90.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = "Заблокировано",
-                        tint = Color.White.copy(alpha = 0.5f),
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = currentTimeStr,
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 68.sp,
-                        fontWeight = FontWeight.Light,
-                        fontFamily = FontFamily.SansSerif
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = currentDateStr,
-                        color = Color.LightGray.copy(alpha = 0.7f),
-                        fontSize = 15.sp,
-                        fontFamily = FontFamily.SansSerif
-                    )
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    Text(
-                        text = "Проведите вверх для разблокировки",
-                        color = Color.Gray.copy(alpha = 0.4f),
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(bottom = 40.dp)
-                    )
-                }
-            }
-            StealthCoverMode.BROWSER_MOCK -> {
-                // Mimics Chrome search page
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .statusBarsPadding()
-                        .padding(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(24.dp))
-                            .background(Color(0xFF202124))
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Search, contentDescription = "Поиск", tint = Color.Gray, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text("google.com/search?q=новости+чернигов", color = Color.LightGray, fontSize = 12.sp)
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    Text("Главные новости дня", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        "Погода в регионе: облачно с прояснениями, температура +14°C. Ветер юго-западный до 4 м/с. Прогноз на ближайшие сутки без существенных изменений.",
-                        color = Color.Gray,
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp
-                    )
-                }
-            }
-        }
-
-        // Top stealth controls (Switch disguise & Exit)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Mode switcher button
-            Text(
-                text = "Маскировка: ${mode.titleRu}",
-                color = Color.DarkGray.copy(alpha = 0.5f),
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color.White.copy(alpha = 0.05f))
-                    .clickable { onCycleMode() }
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
-
-            // Exit button
-            IconButton(
-                onClick = onExit,
-                modifier = Modifier.size(32.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Выйти из стелса",
-                    tint = Color.DarkGray.copy(alpha = 0.4f),
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FocusPeakingOverlay(
-    sharpnessVariance: Double,
-    modifier: Modifier = Modifier
-) {
-    val isInFocus = sharpnessVariance >= AntiBlurSensorEngine.SHARPNESS_PASS_THRESHOLD
-    val ringColor = if (isInFocus) CyberGreen else NeonCyan
-
-    Box(modifier = modifier) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val stroke = if (isInFocus) 2.dp.toPx() else 1.2.dp.toPx()
-            val cx = size.width / 2
-            val cy = size.height / 2
-            drawCircle(color = ringColor.copy(alpha = 0.65f), radius = 64.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = stroke))
-            drawCircle(color = ringColor.copy(alpha = 0.3f), radius = 124.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = 1.dp.toPx()))
-        }
-        Text(
-            text = if (isInFocus) "ФОКУС-ПИК: РЕЗКОСТЬ OK (${sharpnessVariance.toInt()})" else "ФОКУС-ПИК: ПОДСТРОЙКА (${sharpnessVariance.toInt()})",
-            color = ringColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 14.dp, bottom = 220.dp)
-                .background(CyberBlack.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 6.dp, vertical = 3.dp)
-        )
-    }
-}
-
-@Composable
-private fun FalseColorExposureOverlay(
-    overexposedPercent: Int,
-    modifier: Modifier = Modifier
-) {
-    val isClipping = overexposedPercent >= 12
-    val alertColor = if (isClipping) CyberRed else NeonYellow
-    Box(
-        modifier = modifier
-            .border(2.dp, alertColor.copy(alpha = 0.65f))
-            .padding(10.dp)
-    ) {
-        Text(
-            text = if (isClipping) "ПЕРЕСВЕТ: $overexposedPercent% [СНИЗЬ ЭКСПОЗИЦИЮ]" else "ЭКСПО-КАРТА: ПЕРЕСВЕТ $overexposedPercent%",
-            color = alertColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(bottom = 210.dp)
-                .background(CyberBlack.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 6.dp, vertical = 3.dp)
-        )
-    }
-}
-
-@Composable
-private fun ShutterButton(
-    isCapturing: Boolean,
-    isAssistMode: Boolean,
-    onClick: () -> Unit
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 0.9f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseAlpha"
-    )
-
-    val activeColor = if (isAssistMode) CyberRed else CyberGreen
-
-    Box(
-        modifier = Modifier
-            .size(72.dp)
-            .testTag("shutter_button")
-            .clickable(enabled = !isCapturing, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            drawCircle(
-                color = if (isCapturing) CyberRed else activeColor.copy(alpha = pulseAlpha),
-                style = Stroke(width = 3.dp.toPx())
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .clip(CircleShape)
-                .background(if (isCapturing) CyberRed.copy(alpha = 0.4f) else activeColor.copy(alpha = 0.25f))
-                .border(2.dp, if (isCapturing) CyberRed else activeColor, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Default.CameraAlt,
-                contentDescription = "Спуск",
-                tint = if (isCapturing) CyberRed else activeColor,
-                modifier = Modifier.size(26.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun TacticalReticle(modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val cx = size.width / 2
-        val cy = size.height / 2
-        val reticleRadius = 40.dp.toPx()
-        val tickLen = 14.dp.toPx()
-        val cornerColor = CyberGreen.copy(alpha = 0.35f)
-        val strokeW = 1.5.dp.toPx()
-
-        drawLine(cornerColor, Offset(cx - reticleRadius, cy), Offset(cx - reticleRadius + tickLen, cy), strokeW)
-        drawLine(cornerColor, Offset(cx + reticleRadius - tickLen, cy), Offset(cx + reticleRadius, cy), strokeW)
-        drawLine(cornerColor, Offset(cx, cy - reticleRadius), Offset(cx, cy - reticleRadius + tickLen), strokeW)
-        drawLine(cornerColor, Offset(cx, cy + reticleRadius - tickLen), Offset(cx, cy + reticleRadius), strokeW)
-        drawCircle(color = CyberGreen.copy(alpha = 0.5f), radius = 2.5.dp.toPx(), center = Offset(cx, cy))
     }
 }
