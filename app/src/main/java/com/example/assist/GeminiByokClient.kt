@@ -147,7 +147,8 @@ object GeminiByokClient {
         systemPrompt: String,
         userPrompt: String,
         imageBytes: ByteArray? = null,
-        imageMimeType: String = "image/webp"
+        imageMimeType: String = "image/webp",
+        extraImages: List<Pair<ByteArray, String>> = emptyList()
     ): Result<GenerationResponse> = withContext(Dispatchers.IO) {
         val keyCopy = apiKeyChars.clone()
         val startMs = System.currentTimeMillis()
@@ -172,6 +173,22 @@ object GeminiByokClient {
                         )
                     }
                 )
+            }
+            for ((bytes, mime) in extraImages) {
+                if (bytes.isNotEmpty()) {
+                    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    parts.put(
+                        JSONObject().apply {
+                            put(
+                                "inline_data",
+                                JSONObject().apply {
+                                    put("mime_type", mime)
+                                    put("data", b64)
+                                }
+                            )
+                        }
+                    )
+                }
             }
             parts.put(JSONObject().apply { put("text", userPrompt) })
 

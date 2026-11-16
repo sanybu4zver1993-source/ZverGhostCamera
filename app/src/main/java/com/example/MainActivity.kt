@@ -35,6 +35,7 @@ import androidx.core.content.ContextCompat
 import com.example.assist.ByokManager
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
+import com.example.security.SentinelEngine
 import com.example.security.ZverPrefs
 import com.example.ui.DecoyCalculatorScreen
 import com.example.ui.GhostCameraScreen
@@ -111,6 +112,7 @@ class MainActivity : ComponentActivity() {
         if (ZverPrefs.isAutoLockOnBackground(this)) {
             GhostCryptoVault.lockSession()
             ByokManager.clearSessionMemory()
+            SentinelEngine.clearSession()
         }
     }
 
@@ -135,6 +137,7 @@ class MainActivity : ComponentActivity() {
                 "lock" -> {
                     GhostCryptoVault.lockSession()
                     ByokManager.clearSessionMemory()
+                    SentinelEngine.clearSession()
                     onLockGateTrigger?.invoke()
                 }
             }
@@ -149,6 +152,7 @@ class MainActivity : ComponentActivity() {
         if (isFinishing) {
             GhostCryptoVault.clearRamShots()
             ByokManager.clearSessionMemory()
+            SentinelEngine.clearSession()
         }
     }
 

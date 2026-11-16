@@ -233,6 +233,61 @@ object ExifStripper {
     }
 
     /**
+     * Two-stage CV helper (ported from Sentinel v5.0):
+     * Crops primary detected region with [paddingRatio] context (default 40%), optionally boosts glare/contrast,
+     * strips all metadata, and returns compact WebP/JPEG bytes strictly in RAM for sharp Gemini Vision inspection.
+     */
+    fun extractRegionCropClean(
+        sourceBitmap: Bitmap,
+        normalizedRect: android.graphics.RectF,
+        paddingRatio: Float = 0.40f,
+        applyAntiGlare: Boolean = true,
+        maxCropDim: Int = 640
+    ): CleanBitmapResult? {
+        val w = sourceBitmap.width
+        val h = sourceBitmap.height
+        if (w < 32 || h < 32) return null
+
+        val rw = (normalizedRect.width() * w).coerceAtLeast(16f)
+        val rh = (normalizedRect.height() * h).coerceAtLeast(16f)
+        val padX = rw * paddingRatio
+        val padY = rh * paddingRatio
+
+        val left = (normalizedRect.left * w - padX).toInt().coerceIn(0, w - 16)
+        val top = (normalizedRect.top * h - padY).toInt().coerceIn(0, h - 16)
+        val right = (normalizedRect.right * w + padX).toInt().coerceIn(left + 16, w)
+        val bottom = (normalizedRect.bottom * h + padY).toInt().coerceIn(top + 16, h)
+        val cw = right - left
+        val ch = bottom - top
+        if (cw < 16 || ch < 16) return null
+
+        val rawCrop = Bitmap.createBitmap(sourceBitmap, left, top, cw, ch)
+        val maxSide = max(cw, ch)
+        val crop = if (maxSide > maxCropDim) {
+            val scale = maxCropDim.toFloat() / maxSide.toFloat()
+            val nw = max(16, (cw * scale).toInt() and 0xFFFE)
+            val nh = max(16, (ch * scale).toInt() and 0xFFFE)
+            val scaled = Bitmap.createScaledBitmap(rawCrop, nw, nh, true)
+            rawCrop.recycle()
+            scaled
+        } else {
+            rawCrop
+        }
+        return try {
+            processBitmapClean(
+                sourceBitmap = crop,
+                recycleSource = true,
+                preset = CompressionPreset.ULTRA_TINY,
+                antiPrnu = false,
+                applyDehaze = applyAntiGlare
+            )
+        } finally {
+            if (!crop.isRecycled) crop.recycle()
+        }
+    }
+
+
+    /**
      * Multi-layer Anti-PRNU Cascade (Helio G85 optimized):
      * - Step A: Random 1.5%..2.5% asymmetric edge crop + non-integer scale warp (0.962x -> original size)
      *   using bilinear/bicubic filtering to destroy pixel-grid phase alignment needed by PRNU PCE tests.
@@ -359,55 +414,114 @@ object ExifStripper {
     }
 
     /**
-     * Fast dark-channel haze lift & adaptive contrast stretch for low-contrast / foggy captures.
+     * Tiled CLAHE (Contrast Limited Adaptive Histogram Equalization, 8x8 grid, clipLimit = 3.0f)
+     * ported from Sentinel Anti-Glare for backlit hallways, fog, and deep shadow lift without blowing out highlights.
      */
-    private fun applyContrastDehaze(bitmap: Bitmap): Bitmap {
+    fun applyContrastDehaze(bitmap: Bitmap, clipLimitFactor: Float = 3.0f): Bitmap {
         val w = bitmap.width
         val h = bitmap.height
+        if (w < 16 || h < 16) return bitmap.copy(Bitmap.Config.ARGB_8888, false)
+
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        val hist = IntArray(256)
-        val step = maxOf(1, (w * h) / 20_000)
-        var sampled = 0
-        var idx = 0
-        while (idx < pixels.size) {
-            val c = pixels[idx]
-            val r = (c ushr 16) and 0xFF
-            val g = (c ushr 8) and 0xFF
-            val b = c and 0xFF
-            val lum = (r * 77 + g * 150 + b * 29) ushr 8
-            hist[lum]++
-            sampled++
-            idx += step
-        }
+        val gridX = 8
+        val gridY = 8
+        val tileW = max(2, (w + gridX - 1) / gridX)
+        val tileH = max(2, (h + gridY - 1) / gridY)
 
-        val lowTarget = (sampled * 0.015).toInt()
-        val highTarget = (sampled * 0.985).toInt()
-        var acc = 0
-        var minLum = 0
-        var maxLum = 255
-        for (i in 0..255) {
-            acc += hist[i]
-            if (acc >= lowTarget && minLum == 0) minLum = i
-            if (acc >= highTarget) {
-                maxLum = i
-                break
+        // Build clipped + redistributed LUT [ty][tx][0..255]
+        val luts = Array(gridY) { Array(gridX) { IntArray(256) } }
+        val hist = IntArray(256)
+
+        for (ty in 0 until gridY) {
+            val y0 = min(h - 1, ty * tileH)
+            val y1 = min(h, (ty + 1) * tileH)
+            for (tx in 0 until gridX) {
+                val x0 = min(w - 1, tx * tileW)
+                val x1 = min(w, (tx + 1) * tileW)
+                Arrays.fill(hist, 0)
+                var count = 0
+                for (y in y0 until y1) {
+                    val rowOff = y * w
+                    for (x in x0 until x1) {
+                        val c = pixels[rowOff + x]
+                        val r = (c ushr 16) and 0xFF
+                        val g = (c ushr 8) and 0xFF
+                        val b = c and 0xFF
+                        val lum = (r * 77 + g * 150 + b * 29) ushr 8
+                        hist[lum]++
+                        count++
+                    }
+                }
+                if (count == 0) {
+                    for (i in 0..255) luts[ty][tx][i] = i
+                    continue
+                }
+
+                // Clip histogram + evenly redistribute excess (true CLAHE step)
+                val clipLimit = max(2, ((clipLimitFactor * count) / 256f).toInt())
+                var excess = 0
+                for (i in 0..255) {
+                    if (hist[i] > clipLimit) {
+                        excess += hist[i] - clipLimit
+                        hist[i] = clipLimit
+                    }
+                }
+                val bonus = excess / 256
+                val rem = excess % 256
+                var cdf = 0
+                val lut = luts[ty][tx]
+                for (i in 0..255) {
+                    hist[i] += bonus + if (i < rem) 1 else 0
+                    cdf += hist[i]
+                    lut[i] = ((cdf * 255L) / count).toInt().coerceIn(0, 255)
+                }
             }
         }
 
-        val span = maxOf(32, maxLum - minLum)
-        val scale = 255f / span
+        // Bilinearly interpolate LUT across neighboring tile centers and blend 72% CLAHE luminance into RGB
+        val blend = 0.72f
+        val tileCenterW = tileW.toFloat()
+        val tileCenterH = tileH.toFloat()
 
-        for (i in pixels.indices) {
-            val c = pixels[i]
-            val r = (((c ushr 16) and 0xFF) - minLum) * scale
-            val g = (((c ushr 8) and 0xFF) - minLum) * scale
-            val b = ((c and 0xFF) - minLum) * scale
-            val nr = r.toInt().coerceIn(0, 255)
-            val ng = g.toInt().coerceIn(0, 255)
-            val nb = b.toInt().coerceIn(0, 255)
-            pixels[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        for (y in 0 until h) {
+            val fy = (y.toFloat() / tileCenterH) - 0.5f
+            val ty0 = fy.toInt().coerceIn(0, gridY - 1)
+            val ty1 = (ty0 + 1).coerceIn(0, gridY - 1)
+            val wy = (fy - ty0).coerceIn(0f, 1f)
+            val rowOff = y * w
+
+            for (x in 0 until w) {
+                val fx = (x.toFloat() / tileCenterW) - 0.5f
+                val tx0 = fx.toInt().coerceIn(0, gridX - 1)
+                val tx1 = (tx0 + 1).coerceIn(0, gridX - 1)
+                val wx = (fx - tx0).coerceIn(0f, 1f)
+
+                val c = pixels[rowOff + x]
+                val r = (c ushr 16) and 0xFF
+                val g = (c ushr 8) and 0xFF
+                val b = c and 0xFF
+                val lum = ((r * 77 + g * 150 + b * 29) ushr 8).coerceIn(0, 255)
+
+                val v00 = luts[ty0][tx0][lum].toFloat()
+                val v10 = luts[ty0][tx1][lum].toFloat()
+                val v01 = luts[ty1][tx0][lum].toFloat()
+                val v11 = luts[ty1][tx1][lum].toFloat()
+
+                val top = v00 + (v10 - v00) * wx
+                val bot = v01 + (v11 - v01) * wx
+                val targetLum = top + (bot - top) * wy
+
+                val newLum = lum * (1f - blend) + targetLum * blend
+                val ratio = if (lum > 4) (newLum / lum.toFloat()).coerceIn(0.35f, 2.8f) else 1f
+                val delta = if (lum <= 4) (newLum - lum).toInt() else 0
+
+                val nr = if (lum > 4) (r * ratio).toInt().coerceIn(0, 255) else (r + delta).coerceIn(0, 255)
+                val ng = if (lum > 4) (g * ratio).toInt().coerceIn(0, 255) else (g + delta).coerceIn(0, 255)
+                val nb = if (lum > 4) (b * ratio).toInt().coerceIn(0, 255) else (b + delta).coerceIn(0, 255)
+                pixels[rowOff + x] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+            }
         }
 
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)

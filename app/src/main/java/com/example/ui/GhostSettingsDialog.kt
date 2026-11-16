@@ -538,6 +538,7 @@ fun GhostSettingsDialog(
                             ) {
                                 listOf(
                                     "Вика База" to ByokManager.DEFAULT_PROMPT,
+                                    "Дозор" to ByokManager.PROMPT_SENTINEL,
                                     "OSINT-разведка" to ByokManager.PROMPT_OSINT,
                                     "OCR Документов" to ByokManager.PROMPT_OCR,
                                     "Форензик" to ByokManager.PROMPT_FORENSIC,
@@ -610,6 +611,15 @@ fun GhostSettingsDialog(
                                 title = "🌙 НОЧНОЙ РЕЖИМ (СВЕТОСИЛА)",
                                 desc = "Выдержка и экспозиция увеличиваются на +1. Затвор делает снимок только в момент полного замирания рук, чтобы кадр не размазался.",
                                 modeKey = "NIGHT",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
+                            )
+                            ModeExplanationCard(
+                                title = "🛡️ ДОЗОР (APEX SENTINEL v5.0)",
+                                desc = "Автономная охрана порога/комнаты: 12x12 детектор движения с отсечкой соседа (2/4/6 сек), датчик удара/стука по акселерометру, авто-CLAHE анти-блик в темноте, 2-Stage кроп лица через ML Kit и опциональный триаж в Вику AI.",
+                                modeKey = "SENTINEL",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
                                     onDismiss()

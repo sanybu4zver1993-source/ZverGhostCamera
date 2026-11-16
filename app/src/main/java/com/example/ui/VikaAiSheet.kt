@@ -36,7 +36,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.assist.ByokManager
 import com.example.assist.GeminiByokClient
+import com.example.camera.CaptureManager
 import com.example.camera.ExifStripper
+import com.example.privacy.OfflinePrivacyEngine
 import com.example.security.VaultAnalytics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -67,6 +69,7 @@ fun VikaAiSheet(
     initialTab: VikaSheetTab = VikaSheetTab.TASKS,
     externalBitmap: Bitmap? = null,
     onCaptureLiveFrame: (suspend () -> Pair<ByteArray, String>?)? = null,
+    onCaptureTwoStageFrame: (suspend (Boolean) -> CaptureManager.TwoStageAiFrame?)? = null,
     onStatusMessage: (String) -> Unit = {},
     onDismiss: () -> Unit
 ) {
@@ -89,8 +92,9 @@ fun VikaAiSheet(
     var modelStatusText by remember { mutableStateOf<String?>(null) }
 
     var attachFrame by remember {
-        mutableStateOf(externalBitmap != null || onCaptureLiveFrame != null)
+        mutableStateOf(externalBitmap != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null)
     }
+    var enableFaceCropCascade by remember { mutableStateOf(true) }
     var taskInput by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
     var chatFeed by remember { mutableStateOf(ByokManager.getChatHistory()) }
@@ -162,6 +166,8 @@ fun VikaAiSheet(
             try {
                 var imageBytes: ByteArray? = null
                 var mimeType = "image/webp"
+                val extraCrops = mutableListOf<Pair<ByteArray, String>>()
+                var detectedFaces = 0
 
                 if (includeImage) {
                     if (externalBitmap != null) {
@@ -175,6 +181,40 @@ fun VikaAiSheet(
                         }
                         imageBytes = processed.cleanBytes
                         mimeType = if (processed.isWebP) "image/webp" else "image/jpeg"
+
+                        if (enableFaceCropCascade) {
+                            val faces = withContext(Dispatchers.Default) {
+                                OfflinePrivacyEngine.detectFacesOffline(externalBitmap)
+                            }
+                            detectedFaces = faces.size
+                            val primaryFace = faces.maxByOrNull { it.rect.width() * it.rect.height() }
+                            if (primaryFace != null) {
+                                val cropRes = withContext(Dispatchers.Default) {
+                                    ExifStripper.extractRegionCropClean(
+                                        sourceBitmap = externalBitmap,
+                                        normalizedRect = primaryFace.rect,
+                                        paddingRatio = 0.40f,
+                                        applyAntiGlare = true,
+                                        maxCropDim = 640
+                                    )
+                                }
+                                if (cropRes != null) {
+                                    extraCrops.add(
+                                        cropRes.cleanBytes to if (cropRes.isWebP) "image/webp" else "image/jpeg"
+                                    )
+                                }
+                            }
+                        }
+                    } else if (onCaptureTwoStageFrame != null) {
+                        val twoStage = onCaptureTwoStageFrame.invoke(enableFaceCropCascade)
+                        if (twoStage != null) {
+                            imageBytes = twoStage.fullBytes
+                            mimeType = twoStage.fullMimeType
+                            detectedFaces = twoStage.detectedFacesCount
+                            twoStage.faceCropBytes?.let { cropB ->
+                                extraCrops.add(cropB to twoStage.faceCropMimeType)
+                            }
+                        }
                     } else if (onCaptureLiveFrame != null) {
                         val captured = onCaptureLiveFrame.invoke()
                         if (captured != null) {
@@ -184,10 +224,13 @@ fun VikaAiSheet(
                     }
                 }
 
+                val taskSuffix = if (extraCrops.isNotEmpty()) {
+                    "\n[2-Stage CV: приложен общий кадр + 40% CLAHE-кроп лица ($detectedFaces лиц)]"
+                } else ""
                 val fullTask = if (includeAnalytics) {
-                    "$userTask\n\n${VaultAnalytics.buildTelemetrySummaryForAi(context)}"
+                    "$userTask$taskSuffix\n\n${VaultAnalytics.buildTelemetrySummaryForAi(context)}"
                 } else {
-                    userTask
+                    "$userTask$taskSuffix"
                 }
 
                 val res = GeminiByokClient.generateContent(
@@ -196,16 +239,19 @@ fun VikaAiSheet(
                     systemPrompt = systemOverride ?: customPrompt,
                     userPrompt = fullTask,
                     imageBytes = imageBytes,
-                    imageMimeType = mimeType
+                    imageMimeType = mimeType,
+                    extraImages = extraCrops
                 )
 
                 imageBytes?.let { Arrays.fill(it, 0.toByte()) }
+                extraCrops.forEach { Arrays.fill(it.first, 0.toByte()) }
 
+                val labelSuffix = if (extraCrops.isNotEmpty()) " (+кроп лица)" else ""
                 res.onSuccess { ok ->
                     ByokManager.addChatEntry(
                         ByokManager.AiChatEntry(
                             modelId = ok.modelId,
-                            userTask = userTask,
+                            userTask = "$userTask$labelSuffix",
                             replyText = ok.text,
                             hadImage = imageBytes != null,
                             latencyMs = ok.latencyMs,
@@ -217,7 +263,7 @@ fun VikaAiSheet(
                     ByokManager.addChatEntry(
                         ByokManager.AiChatEntry(
                             modelId = selectedModel,
-                            userTask = userTask,
+                            userTask = "$userTask$labelSuffix",
                             replyText = "Облом: ${err.message}",
                             hadImage = imageBytes != null,
                             latencyMs = 0L,
@@ -386,17 +432,17 @@ fun VikaAiSheet(
                             Spacer(modifier = Modifier.height(8.dp))
                         }
 
-                        // Source selector (Frame vs Text-only)
-                        if (externalBitmap != null || onCaptureLiveFrame != null) {
+                        // Source selector (Frame vs Text-only + 2-Stage ML Kit Face Crop)
+                        if (externalBitmap != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                val frameLabel = if (externalBitmap != null) "🖼️ С ФОТО ИЗ СЕЙФА" else "📸 С КАДРОМ КАМЕРЫ"
+                                val frameLabel = if (externalBitmap != null) "🖼️ ИЗ СЕЙФА" else "📸 КАМЕРА"
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(40.dp)
+                                        .height(38.dp)
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(if (attachFrame) CyberGreen.copy(alpha = 0.2f) else SheetCard)
                                         .border(1.dp, if (attachFrame) CyberGreen else SheetBorder, RoundedCornerShape(8.dp))
@@ -408,14 +454,34 @@ fun VikaAiSheet(
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(40.dp)
+                                        .height(38.dp)
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(if (!attachFrame) CyberCyan.copy(alpha = 0.2f) else SheetCard)
                                         .border(1.dp, if (!attachFrame) CyberCyan else SheetBorder, RoundedCornerShape(8.dp))
                                         .clickable { attachFrame = false },
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("💬 ТОЛЬКО ТЕКСТ", color = if (!attachFrame) CyberCyan else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    Text("💬 ТЕКСТ", color = if (!attachFrame) CyberCyan else CyberMuted, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                }
+                                if (attachFrame) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1.1f)
+                                            .height(38.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (enableFaceCropCascade) CyberAmber.copy(alpha = 0.2f) else SheetCard)
+                                            .border(1.dp, if (enableFaceCropCascade) CyberAmber else SheetBorder, RoundedCornerShape(8.dp))
+                                            .clickable { enableFaceCropCascade = !enableFaceCropCascade },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (enableFaceCropCascade) "🎯 +КРОП ЛИЦА" else "🎯 КРОП ВЫКЛ",
+                                            color = if (enableFaceCropCascade) CyberAmber else CyberMuted,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.sp
+                                        )
+                                    }
                                 }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
@@ -430,6 +496,9 @@ fun VikaAiSheet(
                         ) {
                             QuickTaskChip("👁️ Разбор кадра") {
                                 executeTask("Разбери что на кадре: ключевые детали, риски и чё делать дальше.", includeImage = true)
+                            }
+                            QuickTaskChip("🛡️ Дозор-триаж") {
+                                executeTask("Оцени обстановку на кадре: кто в кадре, форма/гражданка, уровень угрозы.", includeImage = true, systemOverride = ByokManager.PROMPT_SENTINEL)
                             }
                             QuickTaskChip("📝 OCR текста") {
                                 executeTask("Вытащи весь текст, даты, цифры и печати без выдумок.", includeImage = true, systemOverride = ByokManager.PROMPT_OCR)
@@ -873,6 +942,7 @@ fun VikaAiSheet(
                             ) {
                                 listOf(
                                     "Вика База" to ByokManager.DEFAULT_PROMPT,
+                                    "Дозор" to ByokManager.PROMPT_SENTINEL,
                                     "OSINT" to ByokManager.PROMPT_OSINT,
                                     "OCR" to ByokManager.PROMPT_OCR,
                                     "Форензик" to ByokManager.PROMPT_FORENSIC,

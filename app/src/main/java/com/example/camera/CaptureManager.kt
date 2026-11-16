@@ -251,27 +251,98 @@ class CaptureManager(
         )
     }
 
+    data class TwoStageAiFrame(
+        val fullBytes: ByteArray,
+        val fullMimeType: String,
+        val faceCropBytes: ByteArray? = null,
+        val faceCropMimeType: String = "image/webp",
+        val detectedFacesCount: Int = 0
+    )
+
+    /**
+     * Two-stage Vision Pipeline (Edge CV -> Gemini BYOK):
+     * 1) Decodes raw camera shot strictly in RAM & runs bundled ML Kit Face Detection on-device.
+     * 2) Encodes EXIF-stripped full frame + optional 40%-padded CLAHE face crop (if faces > 0).
+     * 3) Immediately zero-wipes raw camera buffer. Zero disk writes.
+     */
+    suspend fun captureTwoStageFrameForAi(
+        applyClahe: Boolean = false,
+        detectFaceCrop: Boolean = true
+    ): TwoStageAiFrame = captureMutex.withLock {
+        val rawShot = captureRawJpeg()
+        var decoded: android.graphics.Bitmap? = null
+        var upright: android.graphics.Bitmap? = null
+        try {
+            val res = withContext(Dispatchers.Default) {
+                val processedFull = ExifStripper.processAndPurgeExif(
+                    rawJpeg = rawShot.bytes,
+                    rotationDegrees = rawShot.rotationDegrees,
+                    applyDehaze = applyClahe,
+                    preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                    antiPrnu = false
+                )
+                val fullMime = if (processedFull.isWebP) "image/webp" else "image/jpeg"
+
+                var cropBytes: ByteArray? = null
+                var cropMime = "image/webp"
+                var facesCount = 0
+
+                if (detectFaceCrop) {
+                    val opts = android.graphics.BitmapFactory.Options().apply {
+                        inSampleSize = 2
+                        inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                    }
+                    decoded = android.graphics.BitmapFactory.decodeByteArray(rawShot.bytes, 0, rawShot.bytes.size, opts)
+                    val srcBmp = decoded
+                    if (srcBmp != null) {
+                        upright = if (rawShot.rotationDegrees % 360 == 0) {
+                            srcBmp
+                        } else {
+                            val m = android.graphics.Matrix().apply { postRotate(rawShot.rotationDegrees.toFloat()) }
+                            android.graphics.Bitmap.createBitmap(srcBmp, 0, 0, srcBmp.width, srcBmp.height, m, true)
+                        }
+                        val faces = com.example.privacy.OfflinePrivacyEngine.detectFacesOffline(upright!!)
+                        facesCount = faces.size
+                        val primaryFace = faces.maxByOrNull { it.rect.width() * it.rect.height() }
+                        if (primaryFace != null) {
+                            val cropRes = ExifStripper.extractRegionCropClean(
+                                sourceBitmap = upright!!,
+                                normalizedRect = primaryFace.rect,
+                                paddingRatio = 0.40f,
+                                applyAntiGlare = true,
+                                maxCropDim = 640
+                            )
+                            if (cropRes != null) {
+                                cropBytes = cropRes.cleanBytes
+                                cropMime = if (cropRes.isWebP) "image/webp" else "image/jpeg"
+                            }
+                        }
+                    }
+                }
+
+                TwoStageAiFrame(
+                    fullBytes = processedFull.cleanJpegBytes,
+                    fullMimeType = fullMime,
+                    faceCropBytes = cropBytes,
+                    faceCropMimeType = cropMime,
+                    detectedFacesCount = facesCount
+                )
+            }
+            res
+        } finally {
+            Arrays.fill(rawShot.bytes, 0.toByte())
+            upright?.let { if (it !== decoded && !it.isRecycled) it.recycle() }
+            decoded?.let { if (!it.isRecycled) it.recycle() }
+        }
+    }
+
     /**
      * Captures a compact, EXIF-stripped WebP frame strictly in RAM for user-triggered BYOK AI analysis.
      * Never touches disk or MediaStore, and zeroes out the raw JPEG camera buffer immediately.
      */
-    suspend fun captureCleanFrameForAi(): Pair<ByteArray, String> = captureMutex.withLock {
-        val rawShot = captureRawJpeg()
-        try {
-            withContext(Dispatchers.Default) {
-                val processed = ExifStripper.processAndPurgeExif(
-                    rawJpeg = rawShot.bytes,
-                    rotationDegrees = rawShot.rotationDegrees,
-                    applyDehaze = false,
-                    preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                    antiPrnu = false
-                )
-                val mime = if (processed.isWebP) "image/webp" else "image/jpeg"
-                Pair(processed.cleanJpegBytes, mime)
-            }
-        } finally {
-            Arrays.fill(rawShot.bytes, 0.toByte())
-        }
+    suspend fun captureCleanFrameForAi(): Pair<ByteArray, String> {
+        val frame = captureTwoStageFrameForAi(applyClahe = false, detectFaceCrop = false)
+        return Pair(frame.fullBytes, frame.fullMimeType)
     }
 
     private fun u(b: Byte): Int = b.toInt() and 0xFF

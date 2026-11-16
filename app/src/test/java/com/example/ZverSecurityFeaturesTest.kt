@@ -213,4 +213,70 @@ class ZverSecurityFeaturesTest {
         val summary = com.example.security.VaultAnalytics.buildTelemetrySummaryForAi(context)
         assertTrue(summary.contains("gemini-4-hydrogen") || summary.contains("ОЗУ-сейф"))
     }
+
+    @Test
+    fun testSentinelEngineLingerKnockAndClahePipeline() {
+        com.example.security.SentinelEngine.clearSession()
+        com.example.security.SentinelEngine.updateConfig {
+            it.copy(lingerThresholdSec = 4, cooldownSec = 25, motionPercentThreshold = 8)
+        }
+        val t0 = 1_000_000L
+        com.example.security.SentinelEngine.setArmed(true, nowMs = t0)
+        assertTrue(com.example.security.SentinelEngine.isArmed())
+
+        // 1. Short neighbor pass (1.5s motion -> quiet) should be ignored, NOT trigger alarm
+        assertTrue(com.example.security.SentinelEngine.evaluateMotionFrame(t0 + 100, 15, 45) is com.example.security.SentinelEngine.SentinelStepResult.Tracking)
+        assertTrue(com.example.security.SentinelEngine.evaluateMotionFrame(t0 + 1_600, 18, 45) is com.example.security.SentinelEngine.SentinelStepResult.Tracking)
+        val ignored = com.example.security.SentinelEngine.evaluateMotionFrame(t0 + 2_600, 0, 45)
+        assertTrue(ignored is com.example.security.SentinelEngine.SentinelStepResult.NeighborIgnored)
+
+        // 2. Sustained linger >= 4s in low light (avgLuma=45) triggers alarm with nightClahe=true
+        val tLinger = t0 + 3_000
+        assertTrue(com.example.security.SentinelEngine.evaluateMotionFrame(tLinger, 22, 45) is com.example.security.SentinelEngine.SentinelStepResult.Tracking)
+        val alarm = com.example.security.SentinelEngine.evaluateMotionFrame(tLinger + 4_100, 25, 45)
+        assertTrue(alarm is com.example.security.SentinelEngine.SentinelStepResult.TriggerLingerCapture)
+        assertTrue((alarm as com.example.security.SentinelEngine.SentinelStepResult.TriggerLingerCapture).nightClahe)
+
+        // 3. During 25s cooldown, knock impulse & motion are throttled (anti-spam)
+        assertTrue(com.example.security.SentinelEngine.evaluateMotionFrame(tLinger + 6_000, 30, 45) is com.example.security.SentinelEngine.SentinelStepResult.Cooldown)
+        assertFalse(com.example.security.SentinelEngine.evaluateKnockImpulse(tLinger + 7_000, 9.5f))
+
+        // 4. After cooldown, knock triggers immediately
+        assertTrue(com.example.security.SentinelEngine.evaluateKnockImpulse(tLinger + 30_000, 10.2f))
+
+        // 5. Verify CLAHE anti-glare + region crop pipeline (ShadowBitmap in Robolectric produces PNG mock container -> verify 0 metadataBytes & non-empty crop)
+        val bmp = android.graphics.Bitmap.createBitmap(128, 128, android.graphics.Bitmap.Config.ARGB_8888)
+        for (y in 0 until 128) {
+            for (x in 0 until 128) {
+                val v = ((x + y) / 2).coerceIn(10, 120)
+                bmp.setPixel(x, y, android.graphics.Color.rgb(v, v, v))
+            }
+        }
+        val claheBmp = ExifStripper.applyContrastDehaze(bmp)
+        assertEquals(128, claheBmp.width)
+        assertEquals(128, claheBmp.height)
+        val crop = ExifStripper.extractRegionCropClean(
+            sourceBitmap = claheBmp,
+            normalizedRect = RectF(0.2f, 0.2f, 0.6f, 0.6f),
+            paddingRatio = 0.40f
+        )
+        assertNotNull(crop)
+        assertTrue(crop!!.cleanBytes.isNotEmpty())
+        assertEquals(0, crop.audit.metadataBytes)
+        bmp.recycle()
+        claheBmp.recycle()
+
+        // 6. Verify AntiBlurSensorEngine 12x12 Y-plane motion & Day/Night luma detector
+        val sensorEngine = com.example.camera.AntiBlurSensorEngine(context)
+        val frameDark = java.nio.ByteBuffer.wrap(ByteArray(96 * 96) { 25.toByte() })
+        val frameShifted = java.nio.ByteBuffer.wrap(ByteArray(96 * 96) { 180.toByte() })
+        val m1 = sensorEngine.computeMotionAndLuma(frameDark, 96, 96, 96, null)
+        assertEquals(0, m1.motionScore)
+        assertTrue(m1.isLowLight)
+        val m2 = sensorEngine.computeMotionAndLuma(frameShifted, 96, 96, 96, m1.grid)
+        assertEquals(100, m2.motionScore)
+        assertFalse(m2.isLowLight)
+
+        com.example.security.SentinelEngine.clearSession()
+    }
 }

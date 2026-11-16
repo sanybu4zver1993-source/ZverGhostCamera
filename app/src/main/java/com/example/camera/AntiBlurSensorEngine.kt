@@ -55,11 +55,20 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
 
     var onSnatchDetected: (() -> Unit)? = null
     var onFaceDownDetected: (() -> Unit)? = null
+    var onKnockDetected: ((Float) -> Unit)? = null
 
     private var lastLinearAccelSpikeMs = 0L
     private var lastSnatchTriggerMs = 0L
     private var lastFaceDownTriggerMs = 0L
+    private var lastKnockTriggerMs = 0L
     private var lastAccelMag = 9.81f
+
+    data class MotionTelemetry(
+        val motionScore: Int,       // 0..100 (% of blocks shifted above noise floor)
+        val avgLuma: Int,           // 0..255 ambient scene brightness
+        val isLowLight: Boolean,    // avgLuma < 60
+        val grid: IntArray
+    )
 
     companion object {
         const val MICRO_BLUR_THRESHOLD = 0.075f // rad/s
@@ -67,7 +76,10 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         const val SHARPNESS_PASS_THRESHOLD = 110.0
         const val DOCUMENT_PARALLEL_THRESHOLD_DEG = 3.0f
         const val SNATCH_ACCEL_THRESHOLD = 28.0f // m/s^2 sudden jerk
+        const val KNOCK_ACCEL_MIN = 4.2f         // m/s^2 door/desk knock tap
+        const val KNOCK_ACCEL_MAX = 24.0f        // below snatch threshold
         const val SNATCH_GYRO_THRESHOLD = 5.0f   // rad/s rapid twist
+        const val MOTION_GRID_SIZE = 12
     }
 
     fun start() {
@@ -115,6 +127,11 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
                 val linMag = sqrt(ax * ax + ay * ay + az * az)
                 if (linMag >= SNATCH_ACCEL_THRESHOLD) {
                     lastLinearAccelSpikeMs = nowMs
+                } else if (linMag in KNOCK_ACCEL_MIN..KNOCK_ACCEL_MAX) {
+                    if (nowMs - lastKnockTriggerMs > 1200L) {
+                        lastKnockTriggerMs = nowMs
+                        onKnockDetected?.invoke(linMag)
+                    }
                 }
             }
             Sensor.TYPE_ACCELEROMETER -> {
@@ -295,6 +312,82 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         height: Int,
         rowStride: Int
     ): Int = calculateExposureMetrics(yBuffer, width, height, rowStride).first
+
+    /**
+     * Sentinel v5.0: Lightweight 12x12 Y-plane block motion detector + ambient Day/Night luma sampler.
+     * Runs in <1 ms with zero allocations beyond the tiny 144-int grid.
+     */
+    fun computeMotionAndLuma(
+        yBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        previousGrid: IntArray?,
+        lumaDeltaThreshold: Int = 14
+    ): MotionTelemetry {
+        val gridN = MOTION_GRID_SIZE
+        val totalCells = gridN * gridN
+        if (width < gridN || height < gridN) {
+            return MotionTelemetry(0, 128, false, IntArray(totalCells) { 128 })
+        }
+
+        val limit = yBuffer.limit()
+        val cellW = width / gridN
+        val cellH = height / gridN
+        val grid = IntArray(totalCells)
+        var globalLumaSum = 0L
+        var activeBlocks = 0
+
+        for (gy in 0 until gridN) {
+            val yStart = gy * cellH
+            val yEnd = minOf(height, yStart + cellH)
+            for (gx in 0 until gridN) {
+                val xStart = gx * cellW
+                val xEnd = minOf(width, xStart + cellW)
+                var sum = 0
+                var samples = 0
+                val stepY = maxOf(2, cellH / 4)
+                val stepX = maxOf(2, cellW / 4)
+
+                var y = yStart + stepY / 2
+                while (y < yEnd) {
+                    val rowOff = y * rowStride
+                    var x = xStart + stepX / 2
+                    while (x < xEnd) {
+                        val idx = rowOff + x
+                        if (idx in 0 until limit) {
+                            sum += (yBuffer.get(idx).toInt() and 0xFF)
+                            samples++
+                        }
+                        x += stepX
+                    }
+                    y += stepY
+                }
+                val mean = if (samples > 0) sum / samples else 0
+                val cellIdx = gy * gridN + gx
+                grid[cellIdx] = mean
+                globalLumaSum += mean
+                if (previousGrid != null && previousGrid.size == totalCells) {
+                    if (abs(mean - previousGrid[cellIdx]) >= lumaDeltaThreshold) {
+                        activeBlocks++
+                    }
+                }
+            }
+        }
+
+        val avgLuma = (globalLumaSum / totalCells).toInt().coerceIn(0, 255)
+        val motionScore = if (previousGrid != null && previousGrid.size == totalCells) {
+            ((activeBlocks * 100) / totalCells).coerceIn(0, 100)
+        } else {
+            0
+        }
+        return MotionTelemetry(
+            motionScore = motionScore,
+            avgLuma = avgLuma,
+            isLowLight = avgLuma < 60,
+            grid = grid
+        )
+    }
 
     fun processHandheldMfsr(frames: List<Bitmap>): Bitmap {
         if (frames.isEmpty()) throw IllegalArgumentException("Frame list empty")

@@ -58,6 +58,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.assist.ByokManager
+import com.example.assist.GeminiByokClient
 import com.example.assist.GhostAssistService
 import com.example.camera.AntiBlurSensorEngine
 import com.example.camera.CaptureManager
@@ -65,6 +66,7 @@ import com.example.camera.Mp4Sanitizer
 import com.example.crypto.GhostCryptoVault
 import com.example.security.AntiForensicsGuard
 import com.example.security.CamouflageManager
+import com.example.security.SentinelEngine
 import com.example.security.ZverPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -126,6 +128,17 @@ fun GhostCameraScreen(
     var vikaSheetInitialTab by remember { mutableStateOf(VikaSheetTab.TASKS) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
     var previousCameraMode by remember { mutableStateOf("PHOTO") }
+
+    // Sentinel v5.0 ("КИБЕР-ДОЗОР") States
+    var sentinelArmed by remember { mutableStateOf(SentinelEngine.isArmed()) }
+    var sentinelConfig by remember { mutableStateOf(SentinelEngine.getConfig()) }
+    var sentinelMotionScore by remember { mutableStateOf(0) }
+    var sentinelAvgLuma by remember { mutableStateOf(128) }
+    var sentinelIsNight by remember { mutableStateOf(false) }
+    var sentinelStepLabel by remember { mutableStateOf("ОЖИДАНИЕ") }
+    var sentinelEvents by remember { mutableStateOf(SentinelEngine.getEvents()) }
+    var previousMotionGrid by remember { mutableStateOf<IntArray?>(null) }
+    var sentinelJobActive by remember { mutableStateOf(false) }
 
     // MIUI-style Camera Mode Carousel
     var selectedCameraMode by remember { mutableStateOf("PHOTO") }
@@ -241,6 +254,9 @@ fun GhostCameraScreen(
                 scope.launch(Dispatchers.Main) {
                     GhostCryptoVault.lockSession()
                     ByokManager.clearSessionMemory()
+                    SentinelEngine.clearSession()
+                    sentinelArmed = false
+                    sentinelEvents = emptyList()
                     showVaultDialog = false
                     showSettingsDialog = false
                     showJellyTankScreen = false
@@ -266,10 +282,114 @@ fun GhostCameraScreen(
         onDispose {
             antiBlurEngine.onSnatchDetected = null
             antiBlurEngine.onFaceDownDetected = null
+            antiBlurEngine.onKnockDetected = null
             antiBlurEngine.stop()
             captureExecutor.shutdown()
             analysisExecutor.shutdown()
             MainActivity.onVolumeShutterTrigger = null
+        }
+    }
+
+    fun launchSentinelCapture(reason: String, useNightClahe: Boolean) {
+        val cap = imageCapture ?: return
+        if (sentinelJobActive || isCapturing) return
+        sentinelJobActive = true
+        scope.launch {
+            try {
+                triggerHapticFeedback(isStealth = true)
+                val manager = CaptureManager(
+                    context = context,
+                    imageCapture = cap,
+                    captureExecutor = captureExecutor
+                )
+                val shotRes = manager.takeSecurePhoto(applyDehaze = useNightClahe)
+                vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                lastStatusMessage = "🛡️ ДОЗОР: СНЯТ В ${if (shotRes.isRamOnly) "ОЗУ" else "СЕЙФ"} (${shotRes.encryptedSizeBytes / 1024}КБ)"
+
+                val cfg = SentinelEngine.getConfig()
+                if (cfg.twoStageFaceCropEnabled || (cfg.aiTriageEnabled && ByokManager.hasKey(context))) {
+                    val twoStage = manager.captureTwoStageFrameForAi(
+                        applyClahe = useNightClahe,
+                        detectFaceCrop = cfg.twoStageFaceCropEnabled
+                    )
+                    try {
+                        if (twoStage.detectedFacesCount > 0) {
+                            SentinelEngine.logEvent(
+                                SentinelEngine.EventKind.INFO,
+                                "ML Kit: обнаружено лиц — ${twoStage.detectedFacesCount}",
+                                facesCount = twoStage.detectedFacesCount
+                            )
+                        }
+                        if (cfg.aiTriageEnabled && ByokManager.hasKey(context)) {
+                            val keyChars = ByokManager.decryptKey(context)
+                            if (keyChars != null && keyChars.isNotEmpty()) {
+                                try {
+                                    val extras = twoStage.faceCropBytes?.let {
+                                        listOf(it to twoStage.faceCropMimeType)
+                                    } ?: emptyList()
+                                    val aiRes = GeminiByokClient.generateContent(
+                                        apiKeyChars = keyChars,
+                                        modelId = ByokManager.getModelName(context),
+                                        systemPrompt = ByokManager.PROMPT_SENTINEL,
+                                        userPrompt = "Событие дозора: $reason. Лиц обнаружено локально: ${twoStage.detectedFacesCount}. Оцени сцену кратко и строго по фактам.",
+                                        imageBytes = twoStage.fullBytes,
+                                        imageMimeType = twoStage.fullMimeType,
+                                        extraImages = extras
+                                    )
+                                    aiRes.onSuccess { ok ->
+                                        SentinelEngine.logEvent(
+                                            SentinelEngine.EventKind.AI_VERDICT,
+                                            ok.text,
+                                            facesCount = twoStage.detectedFacesCount
+                                        )
+                                        ByokManager.addChatEntry(
+                                            ByokManager.AiChatEntry(
+                                                modelId = ok.modelId,
+                                                userTask = "[ДОЗОР] $reason",
+                                                replyText = ok.text,
+                                                hadImage = true,
+                                                latencyMs = ok.latencyMs,
+                                                totalTokens = ok.totalTokens
+                                            )
+                                        )
+                                    }.onFailure { err ->
+                                        SentinelEngine.logEvent(
+                                            SentinelEngine.EventKind.INFO,
+                                            "Вика AI не ответила: ${err.message}"
+                                        )
+                                    }
+                                } finally {
+                                    Arrays.fill(keyChars, '0')
+                                }
+                            }
+                        }
+                    } finally {
+                        Arrays.fill(twoStage.fullBytes, 0.toByte())
+                        twoStage.faceCropBytes?.let { Arrays.fill(it, 0.toByte()) }
+                    }
+                }
+            } catch (e: Exception) {
+                SentinelEngine.logEvent(SentinelEngine.EventKind.INFO, "Сбой съёмки дозора: ${e.message}")
+            } finally {
+                sentinelEvents = SentinelEngine.getEvents()
+                sentinelJobActive = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        antiBlurEngine.onKnockDetected = { mag ->
+            if (SentinelEngine.evaluateKnockImpulse(System.currentTimeMillis(), mag)) {
+                scope.launch(Dispatchers.Main) {
+                    sentinelEvents = SentinelEngine.getEvents()
+                    sentinelStepLabel = "⚡ СТУК / УДАР!"
+                    val cfg = SentinelEngine.getConfig()
+                    launchSentinelCapture(
+                        reason = "Стук/вибрация (${String.format("%.1f", mag)} м/с²)",
+                        useNightClahe = cfg.autoNightClaheEnabled && SentinelEngine.isNightProfileActive()
+                    )
+                }
+            }
         }
     }
 
@@ -663,6 +783,52 @@ fun GhostCameraScreen(
                 } else if (peakingPoints.isNotEmpty()) {
                     peakingPoints = emptyList()
                 }
+                val motion = antiBlurEngine.computeMotionAndLuma(
+                    yBuffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride,
+                    previousGrid = previousMotionGrid
+                )
+                previousMotionGrid = motion.grid
+                sentinelMotionScore = motion.motionScore
+                sentinelAvgLuma = motion.avgLuma
+                sentinelIsNight = motion.isLowLight
+
+                val sentinelRes = SentinelEngine.evaluateMotionFrame(
+                    nowMs = System.currentTimeMillis(),
+                    motionScore = motion.motionScore,
+                    avgLuma = motion.avgLuma
+                )
+                when (sentinelRes) {
+                    is SentinelEngine.SentinelStepResult.TriggerLingerCapture -> {
+                        scope.launch(Dispatchers.Main) {
+                            sentinelStepLabel = "🚨 ЗАВИСАНИЕ > ${sentinelRes.durationMs / 1000}с!"
+                            sentinelEvents = SentinelEngine.getEvents()
+                            launchSentinelCapture(
+                                reason = "Объект у цели ${sentinelRes.durationMs / 1000}с (движ ${motion.motionScore}%)",
+                                useNightClahe = sentinelRes.nightClahe
+                            )
+                        }
+                    }
+                    is SentinelEngine.SentinelStepResult.NeighborIgnored -> {
+                        scope.launch(Dispatchers.Main) {
+                            sentinelStepLabel = "ПРОХОЖИЙ [ИГНОР]"
+                            sentinelEvents = SentinelEngine.getEvents()
+                        }
+                    }
+                    is SentinelEngine.SentinelStepResult.Tracking -> {
+                        val thr = SentinelEngine.getConfig().lingerThresholdSec
+                        sentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
+                    }
+                    is SentinelEngine.SentinelStepResult.Cooldown -> {
+                        sentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
+                    }
+                    SentinelEngine.SentinelStepResult.Idle -> {
+                        sentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
+                    }
+                }
+
                 liveLaplacianVariance = variance
                 overexposedPercent = overPct
                 underexposedPercent = underPct
@@ -774,6 +940,7 @@ fun GhostCameraScreen(
             "ВИДЕО" to "VIDEO",
             "ФОТО" to "PHOTO",
             "НОЧЬ" to "NIGHT",
+            "ДОЗОР" to "SENTINEL",
             "ДОК" to "DOCUMENTS",
             "ГОЛОС" to "VOICE"
         )
@@ -801,6 +968,10 @@ fun GhostCameraScreen(
             "NIGHT" -> {
                 exposureIndex = 1
                 lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+            }
+            "SENTINEL" -> {
+                isDocumentModeActive = false
+                lastStatusMessage = "РЕЖИМ: КИБЕР-ДОЗОР (SENTINEL v5)"
             }
             "DOCUMENTS" -> {
                 isDocumentModeActive = true
@@ -1349,6 +1520,53 @@ fun GhostCameraScreen(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // APEX SENTINEL v5.0 ("ДОЗОР") Live Control Card (shown only in SENTINEL mode)
+            if (selectedCameraMode == "SENTINEL") {
+                SentinelControlCard(
+                    armed = sentinelArmed,
+                    config = sentinelConfig,
+                    motionScore = sentinelMotionScore,
+                    avgLuma = sentinelAvgLuma,
+                    isNight = sentinelIsNight,
+                    stepLabel = sentinelStepLabel,
+                    hasByokKey = hasByokKey,
+                    events = sentinelEvents,
+                    onToggleArmed = {
+                        val next = !sentinelArmed
+                        SentinelEngine.setArmed(next)
+                        sentinelArmed = next
+                        sentinelEvents = SentinelEngine.getEvents()
+                        lastStatusMessage = if (next) "🛡️ ДОЗОР НА ПОСТУ (${sentinelConfig.lingerThresholdSec}с фильтр)" else "🛡️ ДОЗОР СНЯТ"
+                    },
+                    onCycleLinger = {
+                        val nextSec = when (sentinelConfig.lingerThresholdSec) {
+                            2 -> 4
+                            4 -> 6
+                            else -> 2
+                        }
+                        sentinelConfig = SentinelEngine.updateConfig { it.copy(lingerThresholdSec = nextSec) }
+                    },
+                    onToggleKnock = {
+                        sentinelConfig = SentinelEngine.updateConfig { it.copy(knockTriggerEnabled = !it.knockTriggerEnabled) }
+                    },
+                    onToggleClaheNight = {
+                        sentinelConfig = SentinelEngine.updateConfig { it.copy(autoNightClaheEnabled = !it.autoNightClaheEnabled) }
+                    },
+                    onToggleAiTriage = {
+                        if (!hasByokKey) {
+                            vikaSheetInitialTab = VikaSheetTab.KEYS_MODELS
+                            showVikaSheet = true
+                        } else {
+                            sentinelConfig = SentinelEngine.updateConfig { it.copy(aiTriageEnabled = !it.aiTriageEnabled) }
+                        }
+                    },
+                    onStealthGuard = {
+                        if (selectedCameraMode != "STEALTH") previousCameraMode = "SENTINEL"
+                        isStealthBlackoutActive = true
+                    }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
             // Compact Zoom + EV Floating Strip
             Row(
                 modifier = Modifier
@@ -1679,6 +1897,18 @@ fun GhostCameraScreen(
                     )
                     manager.captureCleanFrameForAi()
                 },
+                onCaptureTwoStageFrame = { detectFaceCrop ->
+                    val cap = imageCapture ?: return@VikaAiSheet null
+                    val manager = CaptureManager(
+                        context = context,
+                        imageCapture = cap,
+                        captureExecutor = captureExecutor
+                    )
+                    manager.captureTwoStageFrameForAi(
+                        applyClahe = isDcpDehazeActive || sentinelIsNight,
+                        detectFaceCrop = detectFaceCrop
+                    )
+                },
                 onStatusMessage = { msg -> lastStatusMessage = msg },
                 onDismiss = { showVikaSheet = false }
             )
@@ -1708,6 +1938,9 @@ fun GhostCameraScreen(
                             GhostCryptoVault.cryptoShred(context)
                             com.example.crypto.MonoVaultEngine.cryptoShredMonolith(context)
                             ByokManager.clearSessionMemory()
+                            SentinelEngine.clearSession()
+                            sentinelArmed = false
+                            sentinelEvents = emptyList()
                             vaultCount = 0
                             showPanicConfirm = false
                             lastStatusMessage = "СХРОН И КЛЮЧИ ПОЛНОСТЬЮ УНИЧТОЖЕНЫ"
@@ -1722,6 +1955,130 @@ fun GhostCameraScreen(
             )
         }
     }
+}
+
+@Composable
+private fun SentinelControlCard(
+    armed: Boolean,
+    config: SentinelEngine.SentinelConfig,
+    motionScore: Int,
+    avgLuma: Int,
+    isNight: Boolean,
+    stepLabel: String,
+    hasByokKey: Boolean,
+    events: List<SentinelEngine.SentinelEvent>,
+    onToggleArmed: () -> Unit,
+    onCycleLinger: () -> Unit,
+    onToggleKnock: () -> Unit,
+    onToggleClaheNight: () -> Unit,
+    onToggleAiTriage: () -> Unit,
+    onStealthGuard: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(CyberBlack.copy(alpha = 0.86f))
+            .border(1.dp, if (armed) CyberRed.copy(alpha = 0.7f) else NeonCyan.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (armed) "🛡️ ДОЗОР НА ПОСТУ // $stepLabel" else "🛡️ SENTINEL v5.0 // $stepLabel",
+                    color = if (armed) CyberRed else NeonCyan,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+                Text(
+                    text = "Движение: $motionScore% • ${if (isNight) "НОЧЬ-CLAHE" else "ДЕНЬ-HDR"} (L=$avgLuma)",
+                    color = CyberMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp
+                )
+            }
+            Button(
+                onClick = onToggleArmed,
+                colors = ButtonDefaults.buttonColors(containerColor = if (armed) CyberRed else CyberGreenDark),
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                modifier = Modifier.height(40.dp).testTag("sentinel_arm_button")
+            ) {
+                Text(
+                    text = if (armed) "СТОП" else "НА ПОСТ",
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            SentinelChip("Фильтр ${config.lingerThresholdSec}с", active = true, accent = NeonYellow, onClick = onCycleLinger)
+            SentinelChip("Стук", active = config.knockTriggerEnabled, accent = CyberGreen, onClick = onToggleKnock)
+            SentinelChip("CLAHE Ночь", active = config.autoNightClaheEnabled, accent = NeonCyan, onClick = onToggleClaheNight)
+            SentinelChip(
+                label = if (!hasByokKey) "ИИ (нет ключа)" else "ИИ-триаж",
+                active = config.aiTriageEnabled && hasByokKey,
+                accent = NeonCyan,
+                onClick = onToggleAiTriage
+            )
+            SentinelChip("Стелс-пост", active = false, accent = CyberRed, onClick = onStealthGuard)
+        }
+
+        if (events.isNotEmpty()) {
+            val timeFmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                events.take(3).forEach { ev ->
+                    val col = when (ev.kind) {
+                        SentinelEngine.EventKind.LINGER_ALARM, SentinelEngine.EventKind.KNOCK_ALARM -> CyberRed
+                        SentinelEngine.EventKind.AI_VERDICT -> NeonCyan
+                        SentinelEngine.EventKind.IGNORED -> CyberGreen
+                        SentinelEngine.EventKind.INFO -> CyberMuted
+                    }
+                    Text(
+                        text = "${timeFmt.format(Date(ev.timestampMs))} [${ev.kind.tagRu}] ${ev.message}",
+                        color = col,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        maxLines = 2
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SentinelChip(
+    label: String,
+    active: Boolean,
+    accent: Color,
+    onClick: () -> Unit
+) {
+    Text(
+        text = label,
+        color = if (active) Color.Black else CyberMuted,
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Bold,
+        fontSize = 9.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) accent else CyberSurface)
+            .border(1.dp, if (active) accent else CyberBorder, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 9.dp, vertical = 6.dp)
+    )
 }
 
 @Composable
