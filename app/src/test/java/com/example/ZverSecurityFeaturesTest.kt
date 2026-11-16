@@ -350,4 +350,34 @@ class ZverSecurityFeaturesTest {
         assertEquals(120, com.example.camera.VideoKeyframeExtractor.RECOMMENDED_MAX_SECONDS)
         assertEquals(5, com.example.camera.VideoKeyframeExtractor.MAX_KEYFRAMES)
     }
+
+    @Test
+    fun testCyberVisorRppgAndScreenshotsUnlockedByDefault() {
+        // 1. Screenshots and screen video recording MUST be unlocked by default
+        assertFalse(ZverPrefs.isScreenRecBlockEnabled(context))
+
+        // 2. Pulse BPM persistence for BioTracker ("Жилистый Танк")
+        ZverPrefs.saveLastPulseBpm(context, 74, 1_700_000_000_000L)
+        assertEquals(74, ZverPrefs.getLastPulseBpm(context))
+        assertEquals(1_700_000_000_000L, ZverPrefs.getLastPulseTimestampMs(context))
+        ZverPrefs.clearLastPulseBpm(context)
+        assertEquals(0, ZverPrefs.getLastPulseBpm(context))
+
+        // 3. Synthetic 72 BPM (1.2 Hz) photoplethysmographic skin oscillation at 30 FPS (180 frames = 6s)
+        val tracker = com.example.visor.PosRppgTracker()
+        var lastResult: Pair<Int?, Float> = null to 0f
+        for (i in 0 until 180) {
+            val tSec = i / 30.0
+            val tsNs = (tSec * 1_000_000_000.0).toLong()
+            val pulse = kotlin.math.sin(2.0 * kotlin.math.PI * 1.2 * tSec) // 72 BPM
+            val meanR = 175.0 + 0.35 * pulse
+            val meanG = 132.0 + 1.45 * pulse
+            val meanB = 115.0 + 0.45 * pulse
+            lastResult = tracker.pushSample(tsNs, meanR, meanG, meanB)
+        }
+        val detectedBpm = lastResult.first
+        assertNotNull("Expected valid BPM estimate for clean 72 BPM pulse wave", detectedBpm)
+        assertTrue("Expected ~72 BPM, got $detectedBpm", detectedBpm!! in 70..74)
+        assertTrue("Expected solid SNR quality, got ${lastResult.second}", lastResult.second >= 0.45f)
+    }
 }

@@ -116,6 +116,8 @@ fun JellyTankScreen(
     var doneIds by remember {
         mutableStateOf(ZverPrefs.getJellyChecklist(context, morningTasks.map { it.id }))
     }
+    var savedPulseBpm by remember { mutableStateOf(ZverPrefs.getLastPulseBpm(context)) }
+    var savedPulseTs by remember { mutableStateOf(ZverPrefs.getLastPulseTimestampMs(context)) }
 
     // Neuroacoustic Tone & Breathing Pacer State
     val neuroProtocols = remember {
@@ -268,8 +270,12 @@ fun JellyTankScreen(
                     fontSize = 14.sp
                 )
                 Text(
-                    text = "БОЕВАЯ БИОСИСТЕМА // РЕЗОНАНС И ВОССТАНОВЛЕНИЕ",
-                    color = BioMuted,
+                    text = if (savedPulseBpm > 0) {
+                        "БОЕВАЯ БИОСИСТЕМА // ЧСС: $savedPulseBpm BPM"
+                    } else {
+                        "БОЕВАЯ БИОСИСТЕМА // РЕЗОНАНС И ВОССТАНОВЛЕНИЕ"
+                    },
+                    color = if (savedPulseBpm > 0) BioCyan else BioMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp
                 )
@@ -469,6 +475,54 @@ fun JellyTankScreen(
                 }
 
                 JellyTab.NEURO -> {
+                    if (savedPulseBpm > 0) {
+                        val pulseTimeStr = remember(savedPulseTs) {
+                            if (savedPulseTs > 0L) {
+                                java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+                                    .format(java.util.Date(savedPulseTs))
+                            } else "сегодня"
+                        }
+                        val pulseZone = when {
+                            savedPulseBpm < 60 -> "Парасимпатический покой / высокий тонус"
+                            savedPulseBpm <= 82 -> "Норма / готовность ЦНС"
+                            savedPulseBpm <= 100 -> "Умеренная активация / после нагрузки"
+                            else -> "Повышенный пульс — рекомендуется дыхание 6/мин"
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(BioCard, RoundedCornerShape(10.dp))
+                                .border(1.dp, BioGreen.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "❤️ ЧСС С БИО-ВИЗОРА (rPPG): $savedPulseBpm УД/МИН",
+                                    color = BioGreen,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = "$pulseZone • $pulseTimeStr",
+                                    color = BioMuted,
+                                    fontSize = 9.sp
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    ZverPrefs.clearLastPulseBpm(context)
+                                    savedPulseBpm = 0
+                                    savedPulseTs = 0L
+                                }
+                            ) {
+                                Text("СБРОС", color = BioMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                            }
+                        }
+                    }
+
                     // Live Resonant Breathing Pacer + Session Player
                     Column(
                         modifier = Modifier

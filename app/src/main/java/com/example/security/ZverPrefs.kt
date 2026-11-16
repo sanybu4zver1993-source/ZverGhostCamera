@@ -20,7 +20,7 @@ object ZverPrefs {
     private const val KEY_SNATCH_PROTECTION = "snatch_protection_enabled"
     private const val KEY_FLIP_DISGUISE = "flip_disguise_enabled"
     private const val KEY_MUTE_VIDEO_AUDIO = "mute_video_audio"
-    private const val KEY_SCREEN_REC_BLOCK = "screen_rec_block_enabled"
+    private const val KEY_SCREEN_REC_BLOCK = "screen_rec_block_v2"
     private const val KEY_AUTO_LOCK_BG = "auto_lock_on_background"
 
     private const val KEY_DEAD_MAN_DAYS = "dead_man_days"
@@ -31,6 +31,8 @@ object ZverPrefs {
 
     private const val KEY_JELLY_DATE = "jelly_last_date"
     private const val KEY_JELLY_DONE_PREFIX = "jelly_done_"
+    private const val KEY_LAST_PULSE_BPM = "jelly_last_pulse_bpm"
+    private const val KEY_LAST_PULSE_TS = "jelly_last_pulse_ts"
 
     fun getCompressionPreset(context: Context): ExifStripper.CompressionPreset {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -103,7 +105,7 @@ object ZverPrefs {
 
     fun isScreenRecBlockEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SCREEN_REC_BLOCK, true)
+            .getBoolean(KEY_SCREEN_REC_BLOCK, false)
 
     fun setScreenRecBlockEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -201,6 +203,30 @@ object ZverPrefs {
         prefs.edit()
             .putString(KEY_JELLY_DATE, todayKey())
             .putBoolean(KEY_JELLY_DONE_PREFIX + itemId, done)
+            .apply()
+    }
+
+    fun saveLastPulseBpm(context: Context, bpm: Int, timestampMs: Long = System.currentTimeMillis()) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_LAST_PULSE_BPM, bpm.coerceIn(30, 220))
+            .putLong(KEY_LAST_PULSE_TS, timestampMs)
+            .apply()
+    }
+
+    fun getLastPulseBpm(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_LAST_PULSE_BPM, 0)
+
+    fun getLastPulseTimestampMs(context: Context): Long =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_PULSE_TS, 0L)
+
+    fun clearLastPulseBpm(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_LAST_PULSE_BPM, 0)
+            .putLong(KEY_LAST_PULSE_TS, 0L)
             .apply()
     }
 }

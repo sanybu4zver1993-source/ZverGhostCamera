@@ -222,8 +222,11 @@ fun GhostSettingsDialog(
                             SecurityToggleRow("Переворот экраном вниз", "Кладёшь экраном вниз → мгновенный стелс", flipDisguise) {
                                 flipDisguise = it; ZverPrefs.setFlipToDisguiseEnabled(context, it)
                             }
-                            SecurityToggleRow("Стоп-запись экрана (Android 15)", "Скрывает UI при обнаружении захвата экрана", screenRecBlock) {
-                                screenRecBlock = it; ZverPrefs.setScreenRecBlockEnabled(context, it)
+                            SecurityToggleRow("Блок скриншотов и записи экрана", "Выкл по умолчанию (разрешены скрины/видео). Вкл = FLAG_SECURE + щит Android 15", screenRecBlock) {
+                                screenRecBlock = it
+                                ZverPrefs.setScreenRecBlockEnabled(context, it)
+                                com.example.MainActivity.onScreenCapturePolicyChanged?.invoke()
+                                onStatusMessage(if (it) "СКРИНШОТЫ И ЗАПИСЬ ЗАБЛОКИРОВАНЫ" else "СКРИНШОТЫ И ЗАПИСЬ РАЗРЕШЕНЫ")
                             }
 
                             Spacer(modifier = Modifier.height(10.dp))
@@ -611,6 +614,15 @@ fun GhostSettingsDialog(
                                 title = "🌙 НОЧНОЙ РЕЖИМ (СВЕТОСИЛА)",
                                 desc = "Выдержка и экспозиция увеличиваются на +1. Затвор делает снимок только в момент полного замирания рук, чтобы кадр не размазался.",
                                 modeKey = "NIGHT",
+                                onSelectMode = { key ->
+                                    onSelectMode(key)
+                                    onDismiss()
+                                }
+                            )
+                            ModeExplanationCard(
+                                title = "🔬 БИО-ВИЗОР (КИБЕР-СКАНЕР 6-в-1)",
+                                desc = "Реальная биофизика на лету: бесконтактный пульс по коже (POS rPPG -> запись в ЦНС), Веновизор (гемоглобин ln R/G), Дерма-УФ (меланин 450 нм), палитра Ironbow, Ночь-гамма и Поиск ИК-диодов (850-940 нм).",
+                                modeKey = "VISOR",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
                                     onDismiss()

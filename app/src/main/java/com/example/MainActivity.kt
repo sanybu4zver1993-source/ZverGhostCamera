@@ -55,10 +55,21 @@ class MainActivity : ComponentActivity() {
         var onTorchToggleTrigger: (() -> Unit)? = null
         var onBlackoutToggleTrigger: (() -> Unit)? = null
         var onLockGateTrigger: (() -> Unit)? = null
+        var onScreenCapturePolicyChanged: (() -> Unit)? = null
     }
 
     private val isScreenBeingRecorded = mutableStateOf(false)
     private var screenRecCallback: Consumer<Int>? = null
+
+    private fun applyScreenCapturePolicy() {
+        val blockEnabled = ZverPrefs.isScreenRecBlockEnabled(this)
+        if (blockEnabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            isScreenBeingRecorded.value = false
+        }
+    }
 
     private val externalCommandReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
@@ -118,6 +129,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        applyScreenCapturePolicy()
         GhostCryptoVault.shredEphemeralShareFiles(this)
     }
 
@@ -175,7 +187,10 @@ class MainActivity : ComponentActivity() {
             ContextCompat.RECEIVER_EXPORTED
         )
 
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        applyScreenCapturePolicy()
+        onScreenCapturePolicyChanged = {
+            runOnUiThread { applyScreenCapturePolicy() }
+        }
         handleCustomUri(intent)
         enableEdgeToEdge()
 

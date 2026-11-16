@@ -22,6 +22,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,9 +44,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
@@ -62,12 +65,16 @@ import com.example.assist.GeminiByokClient
 import com.example.assist.GhostAssistService
 import com.example.camera.AntiBlurSensorEngine
 import com.example.camera.CaptureManager
+import com.example.camera.ExifStripper
 import com.example.camera.Mp4Sanitizer
 import com.example.crypto.GhostCryptoVault
 import com.example.security.AntiForensicsGuard
 import com.example.security.CamouflageManager
 import com.example.security.SentinelEngine
 import com.example.security.ZverPrefs
+import com.example.visor.CyberVisorEngine
+import com.example.visor.VisorMode
+import com.example.visor.VisorTelemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -76,6 +83,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 private val CyberBlack = Color(0xFF070B0E)
@@ -139,6 +147,19 @@ fun GhostCameraScreen(
     var sentinelEvents by remember { mutableStateOf(SentinelEngine.getEvents()) }
     var previousMotionGrid by remember { mutableStateOf<IntArray?>(null) }
     var sentinelJobActive by remember { mutableStateOf(false) }
+
+    // CyberVisorEngine ("БИО-ВИЗОР / КИБЕР-СКАНЕР")
+    val cyberVisorEngine = remember { CyberVisorEngine() }
+    val visorTickCounter = remember { AtomicLong(0L) }
+    var visorMode by remember { mutableStateOf(VisorMode.NORMAL) }
+    var visorDisplayState by remember { mutableStateOf<Triple<android.graphics.Bitmap, VisorTelemetry, Long>?>(null) }
+
+    LaunchedEffect(visorMode) {
+        cyberVisorEngine.currentMode = visorMode
+        if (visorMode == VisorMode.NORMAL) {
+            visorDisplayState = null
+        }
+    }
 
     // MIUI-style Camera Mode Carousel
     var selectedCameraMode by remember { mutableStateOf("PHOTO") }
@@ -284,6 +305,7 @@ fun GhostCameraScreen(
             antiBlurEngine.onFaceDownDetected = null
             antiBlurEngine.onKnockDetected = null
             antiBlurEngine.stop()
+            cyberVisorEngine.release()
             captureExecutor.shutdown()
             analysisExecutor.shutdown()
             MainActivity.onVolumeShutterTrigger = null
@@ -837,6 +859,18 @@ fun GhostCameraScreen(
                 liveLaplacianVariance = variance
                 overexposedPercent = overPct
                 underexposedPercent = underPct
+
+                if (visorMode != VisorMode.NORMAL && !isStealthBlackoutActive) {
+                    val res = cyberVisorEngine.processYuv420Frame(
+                        imageProxy = imageProxy,
+                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                        isFrontCamera = (lensFacing == CameraSelector.LENS_FACING_FRONT)
+                    )
+                    if (res != null) {
+                        val tick = visorTickCounter.incrementAndGet()
+                        visorDisplayState = Triple(res.bitmap, res.telemetry, tick)
+                    }
+                }
             } finally {
                 imageProxy.close()
             }
@@ -945,6 +979,7 @@ fun GhostCameraScreen(
             "ВИДЕО" to "VIDEO",
             "ФОТО" to "PHOTO",
             "НОЧЬ" to "NIGHT",
+            "ВИЗОР" to "VISOR",
             "ДОЗОР" to "SENTINEL",
             "ДОК" to "DOCUMENTS",
             "ГОЛОС" to "VOICE"
@@ -965,14 +1000,22 @@ fun GhostCameraScreen(
                 exposureIndex = 0
                 isDocumentModeActive = false
                 isVoiceControlActive = false
+                visorMode = VisorMode.NORMAL
                 lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
             }
             "VIDEO" -> {
+                visorMode = VisorMode.NORMAL
                 lastStatusMessage = "РЕЖИМ: ВИДЕО В СЕЙФ"
             }
             "NIGHT" -> {
                 exposureIndex = 1
                 lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+            }
+            "VISOR" -> {
+                if (visorMode == VisorMode.NORMAL) {
+                    visorMode = VisorMode.VEIN_HEMO
+                }
+                lastStatusMessage = "РЕЖИМ: БИО-ВИЗОР (${visorMode.title})"
             }
             "SENTINEL" -> {
                 isDocumentModeActive = false
@@ -980,6 +1023,7 @@ fun GhostCameraScreen(
             }
             "DOCUMENTS" -> {
                 isDocumentModeActive = true
+                visorMode = VisorMode.NORMAL
                 lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (УРОВЕНЬ)"
             }
             "VOICE" -> {
@@ -995,6 +1039,7 @@ fun GhostCameraScreen(
         isDocumentModeActive,
         isFocusBracketingActive,
         isDcpDehazeActive,
+        visorMode != VisorMode.NORMAL,
         timerSeconds > 0,
         isVoiceControlActive,
         isAssistModeActive
@@ -1023,6 +1068,17 @@ fun GhostCameraScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        // Live CyberVisorEngine Biophysical / Optical Overlay (rendered only when visorMode != NORMAL)
+        val activeVisorFrame = if (visorMode != VisorMode.NORMAL) visorDisplayState else null
+        if (activeVisorFrame != null && !activeVisorFrame.first.isRecycled) {
+            Image(
+                bitmap = activeVisorFrame.first.asImageBitmap(),
+                contentDescription = "Био-Визор (${visorMode.title})",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // Fullscreen Gesture Layer: Tap-to-Focus + Horizontal Mode Swipe + Vertical Drawer/Vika AI Swipe
         Box(
@@ -1572,6 +1628,64 @@ fun GhostCameraScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
+            // CYBER-VISOR / BIO-SCANNER LIVE CONTROL DECK
+            if (selectedCameraMode == "VISOR" || visorMode != VisorMode.NORMAL) {
+                CyberVisorControlCard(
+                    activeMode = visorMode,
+                    telemetry = visorDisplayState?.second ?: VisorTelemetry(mode = visorMode),
+                    hasVisorFrame = (visorDisplayState != null),
+                    onSelectVisorMode = { m ->
+                        visorMode = m
+                        if (m == VisorMode.NORMAL && selectedCameraMode == "VISOR") {
+                            selectedCameraMode = "PHOTO"
+                        }
+                        lastStatusMessage = "ВИЗОР: ${m.title}"
+                    },
+                    onSavePulseToCns = { bpm ->
+                        ZverPrefs.saveLastPulseBpm(context, bpm)
+                        triggerHapticFeedback(isStealth = true)
+                        lastStatusMessage = "❤️ ПУЛЬС $bpm BPM ЗАПИСАН В ЖИЛИСТЫЙ ТАНК"
+                    },
+                    onSaveVisorSnapshot = {
+                        val snapBmp = cyberVisorEngine.snapshotLatestBitmapCopy()
+                        if (snapBmp != null) {
+                            scope.launch {
+                                try {
+                                    val bytes = withContext(Dispatchers.Default) {
+                                        ExifStripper.processBitmapClean(
+                                            sourceBitmap = snapBmp,
+                                            recycleSource = true,
+                                            preset = ZverPrefs.getCompressionPreset(context),
+                                            antiPrnu = false
+                                        ).cleanBytes
+                                    }
+                                    val savedRam = withContext(Dispatchers.IO) {
+                                        if (ZverPrefs.isRamOnlyMode(context)) {
+                                            GhostCryptoVault.addRamShot(bytes.clone(), isVideo = false)
+                                            true
+                                        } else {
+                                            val (file, cos) = GhostCryptoVault.openEncryptedOutputStream(
+                                                context,
+                                                prefix = GhostCryptoVault.MEDIA_PHOTO
+                                            )
+                                            cos.use { it.write(bytes); it.flush() }
+                                            false
+                                        }
+                                    }
+                                    Arrays.fill(bytes, 0.toByte())
+                                    vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                                    triggerHapticFeedback(isStealth = true)
+                                    lastStatusMessage = "🔬 КАДР ВИЗОРА (${visorMode.badgeRu}) СОХРАНЁН В ${if (savedRam) "ОЗУ" else "СЕЙФ"}"
+                                } catch (e: Exception) {
+                                    lastStatusMessage = "ОШИБКА ВИЗОРА: ${e.message}"
+                                }
+                            }
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             // Compact Zoom + EV Floating Strip
             Row(
                 modifier = Modifier
@@ -2134,3 +2248,145 @@ private fun DrawerTileButton(
         )
     }
 }
+
+@Composable
+private fun CyberVisorControlCard(
+    activeMode: VisorMode,
+    telemetry: VisorTelemetry,
+    hasVisorFrame: Boolean,
+    onSelectVisorMode: (VisorMode) -> Unit,
+    onSavePulseToCns: (Int) -> Unit,
+    onSaveVisorSnapshot: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(CyberBlack.copy(alpha = 0.86f))
+            .border(1.dp, NeonCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "🔬 БИО-ВИЗОР // ${activeMode.badgeRu}",
+                color = NeonCyan,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp
+            )
+            if (activeMode != VisorMode.NORMAL && hasVisorFrame) {
+                Text(
+                    text = "📸 В СЕЙФ",
+                    color = Color.Black,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(CyberGreen)
+                        .clickable { onSaveVisorSnapshot() }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("visor_snapshot_button")
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            VisorMode.values().forEach { m ->
+                val sel = m == activeMode
+                Text(
+                    text = m.title,
+                    color = if (sel) Color.Black else CyberMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (sel) NeonCyan else CyberSurface)
+                        .border(1.dp, if (sel) NeonCyan else CyberBorder, RoundedCornerShape(8.dp))
+                        .clickable { onSelectVisorMode(m) }
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
+                        .testTag("visor_mode_${m.name.lowercase()}")
+                )
+            }
+        }
+
+        when (activeMode) {
+            VisorMode.BIO_RPPG -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        val bpmText = telemetry.estimatedBpm?.let { "$it BPM" } ?: "Калибровка..."
+                        val qualPct = (telemetry.signalQuality * 100f).toInt()
+                        Text(
+                            text = "❤️ ЧСС: $bpmText • Сигнал $qualPct%",
+                            color = if (telemetry.estimatedBpm != null) CyberGreen else NeonYellow,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        LinearProgressIndicator(
+                            progress = { telemetry.signalQuality.coerceIn(0f, 1f) },
+                            color = if (telemetry.signalQuality >= 0.35f) CyberGreen else NeonYellow,
+                            trackColor = CyberBorder,
+                            modifier = Modifier.fillMaxWidth(0.9f).height(4.dp).clip(RoundedCornerShape(2.dp))
+                        )
+                    }
+                    telemetry.estimatedBpm?.let { bpm ->
+                        Text(
+                            text = "💾 В ТАНК",
+                            color = Color.Black,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(CyberGreen)
+                                .clickable { onSavePulseToCns(bpm) }
+                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                .testTag("visor_save_bpm_button")
+                        )
+                    }
+                }
+                Text(
+                    text = activeMode.hintRu,
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
+            VisorMode.IR_BEACON -> {
+                Text(
+                    text = if (telemetry.irPeakDetected) {
+                        "🚨 ИК-ИЗЛУЧЕНИЕ ОБНАРУЖЕНО (${telemetry.irHotPixels} пикс.)"
+                    } else {
+                        activeMode.hintRu
+                    },
+                    color = if (telemetry.irPeakDetected) CyberRed else CyberMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = if (telemetry.irPeakDetected) FontWeight.Bold else FontWeight.Normal,
+                    fontSize = 9.sp
+                )
+            }
+            else -> {
+                Text(
+                    text = activeMode.hintRu,
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
+        }
+    }
+}
+
