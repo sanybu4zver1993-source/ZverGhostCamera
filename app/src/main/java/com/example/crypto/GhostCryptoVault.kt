@@ -1046,6 +1046,99 @@ object GhostCryptoVault {
         }.toString(2)
     }
 
+    data class ProofVerificationResult(
+        val valid: Boolean,
+        val sha256Matches: Boolean,
+        val signatureValid: Boolean,
+        val expectedSha256: String,
+        val actualSha256: String,
+        val detailRu: String
+    )
+
+    fun verifyDetachedProofJson(
+        mediaBytes: ByteArray,
+        proofJson: String,
+        verifySignatureFn: (ByteArray, ByteArray) -> Boolean = { d, s -> MonoVaultEngine.verifySignature(d, s) }
+    ): ProofVerificationResult {
+        val digest = MessageDigest.getInstance("SHA-256").digest(mediaBytes)
+        val actualSha256 = digest.joinToString("") { "%02x".format(it) }
+        val obj = JSONObject(proofJson)
+        val expectedSha256 = obj.optString("sha256", "")
+        val sha256Matches = actualSha256.equals(expectedSha256, ignoreCase = true)
+
+        val sigB64 = obj.optString("ecdsa_sha256_sig_b64", "")
+        val sigBytes = try {
+            Base64.decode(sigB64, Base64.DEFAULT)
+        } catch (_: Exception) {
+            ByteArray(0)
+        }
+
+        val signatureValid = if (sigBytes.isNotEmpty()) {
+            try {
+                verifySignatureFn(digest, sigBytes)
+            } catch (_: Exception) {
+                false
+            }
+        } else false
+
+        val valid = sha256Matches && signatureValid
+        val detail = when {
+            valid -> "Целостность и ECDSA подпись подтверждены"
+            !sha256Matches -> "Хэш SHA-256 файла не совпал с proof-манифестом"
+            !signatureValid -> "Подпись ECDSA не прошла верификацию"
+            else -> "Неверная структура proof"
+        }
+
+        return ProofVerificationResult(valid, sha256Matches, signatureValid, expectedSha256, actualSha256, detail)
+    }
+
+    fun generateVaultChainManifestJson(context: Context, profile: VaultProfile = activeProfile): String {
+        val dir = profile.getDirectory(context)
+        val files = dir.listFiles()?.filter { it.name.endsWith(".gcf") }?.sortedBy { it.lastModified() } ?: emptyList()
+
+        var prevChainHash = "0000000000000000000000000000000000000000000000000000000000000000"
+        val itemsArray = org.json.JSONArray()
+        val md = MessageDigest.getInstance("SHA-256")
+
+        for (file in files) {
+            val fileBytes = try { file.readBytes() } catch (_: Exception) { ByteArray(0) }
+            val fileHash = md.digest(fileBytes).joinToString("") { "%02x".format(it) }
+            md.reset()
+
+            val combined = (prevChainHash + fileHash + file.name).toByteArray(Charsets.UTF_8)
+            val currentChainHash = md.digest(combined).joinToString("") { "%02x".format(it) }
+            md.reset()
+
+            itemsArray.put(JSONObject().apply {
+                put("file_name", file.name)
+                put("last_modified_ms", file.lastModified())
+                put("file_size_bytes", file.length())
+                put("file_sha256", fileHash)
+                put("chain_hash", currentChainHash)
+            })
+            prevChainHash = currentChainHash
+        }
+
+        val manifestObj = JSONObject().apply {
+            put("schema", "zver-chain-manifest-v1")
+            put("profile", profile.name)
+            put("total_files", files.size)
+            put("chain_head_sha256", prevChainHash)
+            put("timestamp_ms", System.currentTimeMillis())
+            put("items", itemsArray)
+        }
+
+        val manifestBytes = manifestObj.toString(2).toByteArray(Charsets.UTF_8)
+        val manifestDigest = md.digest(manifestBytes)
+        val sigB64 = try {
+            Base64.encodeToString(MonoVaultEngine.signData(manifestDigest), Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        }
+        manifestObj.put("manifest_ecdsa_sig_b64", sigB64)
+        return manifestObj.toString(2)
+    }
+
     fun getVideoStageDir(context: Context): File {
         val dir = File(context.noBackupFilesDir, "video_stage")
         if (!dir.exists()) dir.mkdirs()
