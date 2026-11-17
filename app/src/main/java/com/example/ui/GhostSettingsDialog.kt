@@ -24,15 +24,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.platform.testTag
 import com.example.assist.ByokManager
-import com.example.assist.GeminiByokClient
+import com.example.camera.CameraDiagnostics
 import com.example.camera.ExifStripper
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
 import com.example.security.SecureClipboard
 import com.example.security.ZverPrefs
-import kotlinx.coroutines.launch
-import java.util.Arrays
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val CyberBlack = Color(0xFF070B0E)
 private val CyberGreen = Color(0xFF00FF66)
@@ -51,6 +53,7 @@ enum class SettingsTab(val titleRu: String) {
     TERMUX_AUTOMATION("⚡ Termux & Скрипты")
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun GhostSettingsDialog(
     onDismiss: () -> Unit,
@@ -58,20 +61,24 @@ fun GhostSettingsDialog(
     onSelectMode: (String) -> Unit = {},
     onOpenPinSetup: () -> Unit = {},
     onOpenVikaSheet: () -> Unit = {},
-    onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {}
+    onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {},
+    boundUseCasesSummary: String = "N/A"
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) {
+        ByokManager.syncFromPrefs(context)
+    }
     var selectedTab by remember { mutableStateOf(SettingsTab.SECURITY_CODECS) }
 
-    // AI States
+    // Shared Reactive AI States (Single Source of Truth in ByokManager)
     var apiKeyInput by remember { mutableStateOf("") }
-    var hasKeyConfigured by remember { mutableStateOf(ByokManager.hasKey(context)) }
-    var currentPrompt by remember { mutableStateOf(ByokManager.getCustomPrompt(context)) }
-    var selectedModel by remember { mutableStateOf(ByokManager.getModelName(context)) }
-    var discoveredModels by remember { mutableStateOf(ByokManager.getDiscoveredModels(context)) }
-    var isFetchingModels by remember { mutableStateOf(false) }
-    var modelFetchStatus by remember { mutableStateOf<String?>(null) }
+    val hasKeyConfigured by ByokManager.hasKeyFlow.collectAsState()
+    val currentPrompt by ByokManager.customPromptFlow.collectAsState()
+    val selectedModel by ByokManager.selectedModelFlow.collectAsState()
+    val discoveredModels by ByokManager.discoveredModelsFlow.collectAsState()
+    val isFetchingModels by ByokManager.isFetchingModelsFlow.collectAsState()
+    val modelFetchStatus by ByokManager.modelFetchStatusFlow.collectAsState()
+    val httpLogs by ByokManager.httpLogsFlow.collectAsState()
 
     // Security & Codec States
     var preset by remember { mutableStateOf(ZverPrefs.getCompressionPreset(context)) }
@@ -86,6 +93,9 @@ fun GhostSettingsDialog(
     var deadManDays by remember { mutableStateOf(ZverPrefs.getDeadManDays(context)) }
     var currentCamo by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
     val strongBoxCapable = remember { ByokManager.isStrongBoxSupported(context) }
+    val cameraDiagReport = remember(boundUseCasesSummary) {
+        CameraDiagnostics.buildTextReport(context, boundUseCasesSummary)
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -95,6 +105,9 @@ fun GhostSettingsDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(CyberBlack.copy(alpha = 0.95f))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(14.dp)
         ) {
             Column(
@@ -120,8 +133,11 @@ fun GhostSettingsDialog(
                             fontSize = 14.sp
                         )
                     }
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = CyberMuted, modifier = Modifier.size(18.dp))
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(48.dp).testTag("settings_close_button")
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = CyberMuted, modifier = Modifier.size(20.dp))
                     }
                 }
 
@@ -336,40 +352,43 @@ fun GhostSettingsDialog(
                             val duressState = if (GhostCryptoVault.hasDuressConfigured(context)) "DURESS ПИН: АКТИВЕН" else "DURESS ПИН: НЕ ЗАДАН"
                             val teeLabel = if (strongBoxCapable) "KeyStore: StrongBox" else "KeyStore: Hardware TEE"
                             Text("$teeLabel • $duressState", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("5. ДИАГНОСТИКА CAMERA2 / HAL (ФАКТИЧЕСКАЯ)", color = NeonCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp)
+                                    .background(CyberSurface, RoundedCornerShape(8.dp))
+                                    .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = cameraDiagReport,
+                                    color = Color.White,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 9.sp,
+                                    lineHeight = 13.sp
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                OutlinedButton(
+                                    onClick = {
+                                        SecureClipboard.copySensitive(context, "Zver Camera2 Diagnostics", cameraDiagReport)
+                                        onStatusMessage("ОТЧЁТ CAMERA2 СКОПИРОВАН (45с)")
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.height(40.dp).testTag("copy_camera_diag_button")
+                                ) {
+                                    Text("КОПИРОВАТЬ ОТЧЁТ HAL", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                }
+                            }
                         }
 
                         SettingsTab.AI_VIKA -> {
                             fun fetchModelsNow(explicitChars: CharArray? = null) {
-                                if (isFetchingModels) return
-                                isFetchingModels = true
-                                modelFetchStatus = "Запрос моделей к Gemini API..."
-                                scope.launch {
-                                    val keyChars = explicitChars ?: ByokManager.decryptKey(context)
-                                    if (keyChars == null || keyChars.isEmpty()) {
-                                        isFetchingModels = false
-                                        modelFetchStatus = "Ключ не найден"
-                                        return@launch
-                                    }
-                                    val res = try {
-                                        GeminiByokClient.fetchAvailableModels(keyChars)
-                                    } finally {
-                                        Arrays.fill(keyChars, '0')
-                                    }
-                                    isFetchingModels = false
+                                ByokManager.refreshModelsInBackground(context, explicitChars) { res ->
                                     res.onSuccess { list ->
-                                        discoveredModels = list
-                                        ByokManager.saveDiscoveredModels(context, list)
-                                        if (list.isNotEmpty() && list.none { it.id == selectedModel }) {
-                                            val preferred = list.firstOrNull { it.id.contains("hydrogen", ignoreCase = true) }
-                                                ?: list.firstOrNull { it.id.contains("flash", ignoreCase = true) }
-                                                ?: list.first()
-                                            selectedModel = preferred.id
-                                            ByokManager.saveModelName(context, preferred.id)
-                                        }
-                                        modelFetchStatus = "Загружено моделей ключа: ${list.size}"
                                         onStatusMessage("МОДЕЛИ ЗАГРУЖЕНЫ: ${list.size}")
-                                    }.onFailure { err ->
-                                        modelFetchStatus = "Ошибка: ${err.message}"
                                     }
                                 }
                             }
@@ -422,7 +441,6 @@ fun GhostSettingsDialog(
                                         if (clean.isNotEmpty()) {
                                             val chars = clean.toCharArray()
                                             ByokManager.saveKey(context, chars.clone())
-                                            hasKeyConfigured = true
                                             apiKeyInput = ""
                                             onStatusMessage("КЛЮЧ СОХРАНЁН — ЗАГРУЗКА МОДЕЛЕЙ")
                                             fetchModelsNow(chars)
@@ -449,9 +467,6 @@ fun GhostSettingsDialog(
                                     Button(
                                         onClick = {
                                             ByokManager.deleteKey(context)
-                                            hasKeyConfigured = false
-                                            discoveredModels = emptyList()
-                                            modelFetchStatus = "Ключ удалён"
                                             onStatusMessage("КЛЮЧ УДАЛЁН ИЗ KEYSTORE")
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberRed.copy(alpha = 0.8f)),
@@ -495,7 +510,6 @@ fun GhostSettingsDialog(
                                                 .background(if (isCur) CyberGreen.copy(alpha = 0.2f) else CyberSurface)
                                                 .border(1.dp, if (isCur) CyberGreen else CyberBorder, RoundedCornerShape(6.dp))
                                                 .clickable {
-                                                    selectedModel = m.id
                                                     ByokManager.saveModelName(context, m.id)
                                                     onStatusMessage("МОДЕЛЬ: ${m.id}")
                                                 }
@@ -541,7 +555,6 @@ fun GhostSettingsDialog(
                                             .background(NeonCyan.copy(alpha = 0.15f))
                                             .border(1.dp, NeonCyan.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                                             .clickable {
-                                                currentPrompt = text
                                                 ByokManager.saveCustomPrompt(context, text)
                                                 onStatusMessage("ПРОМПТ: $title")
                                             }
@@ -555,7 +568,6 @@ fun GhostSettingsDialog(
                             OutlinedTextField(
                                 value = currentPrompt,
                                 onValueChange = {
-                                    currentPrompt = it
                                     ByokManager.saveCustomPrompt(context, it)
                                 },
                                 label = { Text("Текст системного промпта", fontSize = 11.sp) },
@@ -569,6 +581,35 @@ fun GhostSettingsDialog(
                                     unfocusedTextColor = Color.White
                                 )
                             )
+
+                            if (httpLogs.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("4. HTTP-ЖУРНАЛ (${httpLogs.size}, БЕЗ КЛЮЧЕЙ)", color = NeonCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    TextButton(onClick = {
+                                        val txt = httpLogs.joinToString("\n") { l ->
+                                            val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(l.timestampMs))
+                                            "[$ts] ${l.method} ${l.endpoint} -> HTTP ${l.httpCode} (${l.latencyMs}ms): ${l.detail}"
+                                        }
+                                        SecureClipboard.copySensitive(context, "Zver HTTP Logs", txt)
+                                        onStatusMessage("HTTP-ЖУРНАЛ СКОПИРОВАН (45с)")
+                                    }) {
+                                        Text("КОПИРОВАТЬ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                    }
+                                }
+                                httpLogs.take(5).forEach { l ->
+                                    Text(
+                                        text = "HTTP ${l.httpCode} • ${l.endpoint}: ${l.detail}",
+                                        color = if (l.httpCode in 200..299) CyberGreen else CyberRed,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                            }
                         }
 
                         SettingsTab.MODES_GUIDE -> {
@@ -684,7 +725,11 @@ fun GhostSettingsDialog(
                             Text("СТАТУС ПОДКЛЮЧЕНИЯ В СИСТЕМЕ:", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.height(4.dp))
 
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 AppBadge("Termux", isTermuxInstalled) {
                                     val intent = context.packageManager.getLaunchIntentForPackage("com.termux")
                                     if (intent != null) context.startActivity(intent)
@@ -851,7 +896,15 @@ private fun AppBadge(name: String, isInstalled: Boolean, onClick: () -> Unit) {
                 .background(if (isInstalled) CyberGreen else CyberRed)
         )
         Spacer(modifier = Modifier.width(4.dp))
-        Text(name, color = if (isInstalled) Color.White else CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+        Text(
+            text = name,
+            color = if (isInstalled) Color.White else CyberMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 

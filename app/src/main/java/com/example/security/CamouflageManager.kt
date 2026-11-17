@@ -17,7 +17,8 @@ object CamouflageManager {
         SYSTEM_TOOLS("MainActivitySystem", "System Tools");
 
         fun getComponentName(context: Context): ComponentName {
-            return ComponentName(context.packageName, "${context.packageName}.$aliasSuffix")
+            val aliasPkg = com.example.MainActivity::class.java.`package`?.name ?: "com.example"
+            return ComponentName(context.packageName, "$aliasPkg.$aliasSuffix")
         }
     }
 
@@ -43,6 +44,19 @@ object CamouflageManager {
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED
             }
             pm.setComponentEnabledSetting(component, state, PackageManager.DONT_KILL_APP)
+        }
+    }
+
+    fun verifyManifestAliases(context: Context): Map<CamouflageMode, Boolean> {
+        val pm = context.packageManager
+        return CamouflageMode.values().associateWith { mode ->
+            try {
+                @Suppress("DEPRECATION")
+                pm.getActivityInfo(mode.getComponentName(context), PackageManager.MATCH_DISABLED_COMPONENTS)
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 }

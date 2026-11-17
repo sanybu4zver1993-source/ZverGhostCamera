@@ -47,21 +47,23 @@ object GeminiByokClient {
         apiKeyChars: CharArray
     ): Result<List<ByokManager.DiscoveredModel>> = withContext(Dispatchers.IO) {
         val keyCopy = apiKeyChars.clone()
+        val keyString = String(keyCopy).trim()
         try {
-            val keyString = String(keyCopy).trim()
             if (keyString.isEmpty()) {
                 return@withContext Result.failure(IllegalArgumentException("API-ключ пустой"))
             }
 
             val allModels = mutableListOf<ByokManager.DiscoveredModel>()
+            val seenTokens = mutableSetOf<String>()
             var pageToken: String? = null
             var pages = 0
 
             do {
+                val pageStart = System.currentTimeMillis()
                 val url = buildString {
                     append("$BASE_URL/models?pageSize=100")
                     if (!pageToken.isNullOrBlank()) {
-                        append("&pageToken=$pageToken")
+                        append("&pageToken=${java.net.URLEncoder.encode(pageToken, "UTF-8")}")
                     }
                 }
                 val req = Request.Builder()
@@ -71,13 +73,23 @@ object GeminiByokClient {
                     .build()
 
                 client.newCall(req).execute().use { resp ->
+                    val latency = System.currentTimeMillis() - pageStart
                     val bodyStr = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
-                        val errMsg = extractApiError(bodyStr, resp.code)
+                        val errMsg = ByokManager.sanitizeForLog(extractApiError(bodyStr, resp.code), keyString)
+                        ByokManager.recordHttpLog(
+                            method = "GET",
+                            endpoint = "/v1beta/models?page=${pages + 1}",
+                            httpCode = resp.code,
+                            latencyMs = latency,
+                            detail = errMsg,
+                            secretKey = keyString
+                        )
                         return@withContext Result.failure(IllegalStateException(errMsg))
                     }
                     val root = JSONObject(bodyStr)
                     val modelsArr = root.optJSONArray("models") ?: JSONArray()
+                    var pageAdded = 0
                     for (i in 0 until modelsArr.length()) {
                         val obj = modelsArr.getJSONObject(i)
                         val methodsArr = obj.optJSONArray("supportedGenerationMethods") ?: JSONArray()
@@ -105,16 +117,35 @@ object GeminiByokClient {
                                 outputTokenLimit = obj.optInt("outputTokenLimit", 0)
                             )
                         )
+                        pageAdded++
                     }
-                    pageToken = root.optString("nextPageToken", "").ifBlank { null }
+                    val nextToken = root.optString("nextPageToken", "").ifBlank { null }
+                    ByokManager.recordHttpLog(
+                        method = "GET",
+                        endpoint = "/v1beta/models?page=${pages + 1}",
+                        httpCode = resp.code,
+                        latencyMs = latency,
+                        detail = "raw=${modelsArr.length()}, generateContent=$pageAdded, nextPage=${nextToken != null}",
+                        secretKey = keyString
+                    )
+                    pageToken = if (nextToken != null && seenTokens.add(nextToken)) nextToken else null
                 }
                 pages++
-            } while (pageToken != null && pages < 3)
+            } while (pageToken != null && pages < 15)
 
-            val sorted = sortDiscoveredModels(allModels)
+            val sorted = sortDiscoveredModels(allModels.distinctBy { it.id })
             Result.success(sorted)
         } catch (e: Exception) {
-            Result.failure(IllegalStateException(mapNetworkError(e)))
+            val mapped = ByokManager.sanitizeForLog(mapNetworkError(e), keyString)
+            ByokManager.recordHttpLog(
+                method = "GET",
+                endpoint = "/v1beta/models",
+                httpCode = -1,
+                latencyMs = 0L,
+                detail = mapped,
+                secretKey = keyString
+            )
+            Result.failure(IllegalStateException(mapped))
         } finally {
             Arrays.fill(keyCopy, '0')
         }
@@ -154,10 +185,14 @@ object GeminiByokClient {
         extraImages: List<Pair<ByteArray, String>> = emptyList()
     ): Result<GenerationResponse> = withContext(Dispatchers.IO) {
         val keyCopy = apiKeyChars.clone()
+        val keyString = String(keyCopy).trim()
         val startMs = System.currentTimeMillis()
-        val cleanModel = modelId.removePrefix("models/").trim().ifEmpty { ByokManager.DEFAULT_MODEL_FALLBACK }
+        val cleanModel = modelId.removePrefix("models/").trim()
+        if (cleanModel.isEmpty()) {
+            Arrays.fill(keyCopy, '0')
+            return@withContext Result.failure(IllegalArgumentException("Модель не выбрана"))
+        }
         try {
-            val keyString = String(keyCopy).trim()
             if (keyString.isEmpty()) {
                 return@withContext Result.failure(IllegalArgumentException("API-ключ пустой"))
             }
@@ -232,7 +267,15 @@ object GeminiByokClient {
                 val latency = System.currentTimeMillis() - startMs
                 val bodyStr = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    val errMsg = extractApiError(bodyStr, resp.code)
+                    val errMsg = ByokManager.sanitizeForLog(extractApiError(bodyStr, resp.code), keyString)
+                    ByokManager.recordHttpLog(
+                        method = "POST",
+                        endpoint = "/v1beta/models/$cleanModel:generateContent",
+                        httpCode = resp.code,
+                        latencyMs = latency,
+                        detail = errMsg,
+                        secretKey = keyString
+                    )
                     ByokManager.recordStats(cleanModel, 0, 0, 0, latency, success = false)
                     return@withContext Result.failure(IllegalStateException(errMsg))
                 }
@@ -266,6 +309,14 @@ object GeminiByokClient {
                 val totalTok = usage?.optInt("totalTokenCount", promptTok + outTok) ?: (promptTok + outTok)
 
                 val finalText = sb.toString().ifBlank { "Пустой ответ от модели ($cleanModel)." }
+                ByokManager.recordHttpLog(
+                    method = "POST",
+                    endpoint = "/v1beta/models/$cleanModel:generateContent",
+                    httpCode = resp.code,
+                    latencyMs = latency,
+                    detail = "tokens=$totalTok (in=$promptTok, out=$outTok), img=${imageBytes != null}",
+                    secretKey = keyString
+                )
                 ByokManager.recordStats(cleanModel, promptTok, outTok, totalTok, latency, success = true)
 
                 Result.success(
@@ -281,8 +332,17 @@ object GeminiByokClient {
             }
         } catch (e: Exception) {
             val latency = System.currentTimeMillis() - startMs
+            val mapped = ByokManager.sanitizeForLog(mapNetworkError(e), keyString)
+            ByokManager.recordHttpLog(
+                method = "POST",
+                endpoint = "/v1beta/models/$cleanModel:generateContent",
+                httpCode = -1,
+                latencyMs = latency,
+                detail = mapped,
+                secretKey = keyString
+            )
             ByokManager.recordStats(cleanModel, 0, 0, 0, latency, success = false)
-            Result.failure(IllegalStateException(mapNetworkError(e)))
+            Result.failure(IllegalStateException(mapped))
         } finally {
             Arrays.fill(keyCopy, '0')
         }

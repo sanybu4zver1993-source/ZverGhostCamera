@@ -13,7 +13,7 @@ import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /**
- * AntiBlurSensorEngine v5.0 (Redmi 13C MT6768 Hardened):
+ * AntiBlurSensorEngine v5.0 (Redmi 13C MT6769Z / Helio G85 Hardened):
  * - High-rate Gyroscope sampling (anti-blur / Jello mitigation).
  * - Accelerometer Document Level & Parallelism Indicator.
  * - Proximity sensor pocket-lock detection (stealth blackout touch guard).

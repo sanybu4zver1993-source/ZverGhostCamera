@@ -188,6 +188,8 @@ fun GhostCameraScreen(
 
     // MIUI-style Camera Mode Carousel
     var selectedCameraMode by remember { mutableStateOf("PHOTO") }
+    var boundUseCasesSummary by remember { mutableStateOf("ОЖИДАНИЕ КАМЕРЫ...") }
+    var pendingAutoStartVideo by remember { mutableStateOf(false) }
 
     // Video Recording States
     var videoCapture by remember { mutableStateOf<androidx.camera.video.VideoCapture<androidx.camera.video.Recorder>?>(null) }
@@ -689,6 +691,12 @@ fun GhostCameraScreen(
             startVideoRecordingInternal()
             return
         }
+        if (selectedCameraMode != "VIDEO" || videoCapture == null) {
+            pendingAutoStartVideo = true
+            selectedCameraMode = "VIDEO"
+            lastStatusMessage = "ПЕРЕКЛЮЧЕНИЕ HAL В ВИДЕО-РЕЖИМ..."
+            return
+        }
         if (ZverPrefs.isMuteVideoAudio(context)) {
             startVideoRecordingInternal()
             return
@@ -781,154 +789,170 @@ fun GhostCameraScreen(
         }
     }
 
-    // Bind CameraX
-    LaunchedEffect(lensFacing) {
+    val isVideoCameraMode = (selectedCameraMode == "VIDEO")
+
+    // Bind CameraX split by mode: VIDEO -> Preview + VideoCapture; PHOTO/OPTIC/VISOR -> Preview + ImageCapture + ImageAnalysis
+    LaunchedEffect(lensFacing, isVideoCameraMode) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
 
         val preview = Preview.Builder().build()
-
-        val captureBuilder = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setFlashMode(flashMode)
-
-        val c2Extender = androidx.camera.camera2.interop.Camera2Interop.Extender(captureBuilder)
-        c2Extender.setCaptureRequestOption(
-            android.hardware.camera2.CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
-            android.hardware.camera2.CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO
-        )
-        c2Extender.setCaptureRequestOption(
-            android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE,
-            android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-        )
-
-        val capture = captureBuilder.build()
-
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-            .build()
-
-        imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
-            try {
-                val plane = imageProxy.planes[0]
-                val variance = antiBlurEngine.calculateCenterRoiLaplacianVariance(
-                    yBuffer = plane.buffer,
-                    width = imageProxy.width,
-                    height = imageProxy.height,
-                    rowStride = plane.rowStride,
-                    targetRoiSize = 400
-                )
-                val (overPct, underPct) = antiBlurEngine.calculateExposureMetrics(
-                    yBuffer = plane.buffer,
-                    width = imageProxy.width,
-                    height = imageProxy.height,
-                    rowStride = plane.rowStride
-                )
-                if (isFocusPeakingEnabled) {
-                    peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
-                        yBuffer = plane.buffer,
-                        width = imageProxy.width,
-                        height = imageProxy.height,
-                        rowStride = plane.rowStride,
-                        rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                    )
-                } else if (peakingPoints.isNotEmpty()) {
-                    peakingPoints = emptyList()
-                }
-                val motion = antiBlurEngine.computeMotionAndLuma(
-                    yBuffer = plane.buffer,
-                    width = imageProxy.width,
-                    height = imageProxy.height,
-                    rowStride = plane.rowStride,
-                    previousGrid = previousMotionGrid
-                )
-                previousMotionGrid = motion.grid
-                sentinelMotionScore = motion.motionScore
-                sentinelAvgLuma = motion.avgLuma
-                sentinelIsNight = motion.isLowLight
-
-                val sentinelRes = SentinelEngine.evaluateMotionFrame(
-                    nowMs = System.currentTimeMillis(),
-                    motionScore = motion.motionScore,
-                    avgLuma = motion.avgLuma
-                )
-                when (sentinelRes) {
-                    is SentinelEngine.SentinelStepResult.TriggerLingerCapture -> {
-                        scope.launch(Dispatchers.Main) {
-                            sentinelStepLabel = "🚨 ЗАВИСАНИЕ > ${sentinelRes.durationMs / 1000}с!"
-                            sentinelEvents = SentinelEngine.getEvents()
-                            launchSentinelCapture(
-                                reason = "Объект у цели ${sentinelRes.durationMs / 1000}с (движ ${motion.motionScore}%)",
-                                useNightClahe = sentinelRes.nightClahe
-                            )
-                        }
-                    }
-                    is SentinelEngine.SentinelStepResult.NeighborIgnored -> {
-                        scope.launch(Dispatchers.Main) {
-                            sentinelStepLabel = "ПРОХОЖИЙ [ИГНОР]"
-                            sentinelEvents = SentinelEngine.getEvents()
-                        }
-                    }
-                    is SentinelEngine.SentinelStepResult.Tracking -> {
-                        val thr = SentinelEngine.getConfig().lingerThresholdSec
-                        sentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
-                    }
-                    is SentinelEngine.SentinelStepResult.Cooldown -> {
-                        sentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
-                    }
-                    SentinelEngine.SentinelStepResult.Idle -> {
-                        sentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
-                    }
-                }
-
-                liveLaplacianVariance = variance
-                overexposedPercent = overPct
-                underexposedPercent = underPct
-
-                if (visorMode != VisorMode.NORMAL && !isStealthBlackoutActive) {
-                    val res = cyberVisorEngine.processYuv420Frame(
-                        imageProxy = imageProxy,
-                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
-                        isFrontCamera = (lensFacing == CameraSelector.LENS_FACING_FRONT)
-                    )
-                    if (res != null) {
-                        val tick = visorTickCounter.incrementAndGet()
-                        visorDisplayState = Triple(res.bitmap, res.telemetry, tick)
-                    }
-                }
-            } finally {
-                imageProxy.close()
-            }
-        }
-
         val cameraSelector = CameraSelector.Builder()
             .requireLensFacing(lensFacing)
             .build()
 
-        val recorder = androidx.camera.video.Recorder.Builder()
-            .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD))
-            .build()
-        val vCapture = androidx.camera.video.VideoCapture.withOutput(recorder)
-
-        try {
-            cameraProvider.unbindAll()
-            val camera = cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview,
-                capture,
-                imageAnalysis,
-                vCapture
-            )
-            cameraControl = camera.cameraControl
-            imageCapture = capture
-            videoCapture = vCapture
-
-            previewView?.let { pv ->
-                preview.setSurfaceProvider(pv.surfaceProvider)
+        if (isVideoCameraMode) {
+            imageCapture = null
+            val recorder = androidx.camera.video.Recorder.Builder()
+                .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD))
+                .build()
+            val vCapture = androidx.camera.video.VideoCapture.withOutput(recorder)
+            try {
+                cameraProvider.unbindAll()
+                val camera = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    preview,
+                    vCapture
+                )
+                cameraControl = camera.cameraControl
+                videoCapture = vCapture
+                boundUseCasesSummary = "VIDEO: Preview + VideoCapture (HD)"
+                previewView?.let { pv -> preview.setSurfaceProvider(pv.surfaceProvider) }
+                if (pendingAutoStartVideo) {
+                    pendingAutoStartVideo = false
+                    triggerVideoRecordingToggle()
+                }
+            } catch (e: Exception) {
+                videoCapture = null
+                boundUseCasesSummary = "VIDEO FALLBACK ERROR: ${e.javaClass.simpleName}"
+                lastStatusMessage = "Ошибка видео-потока HAL: ${e.localizedMessage}"
+                pendingAutoStartVideo = false
+                try {
+                    cameraProvider.unbindAll()
+                    val camera = cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
+                    cameraControl = camera.cameraControl
+                    previewView?.let { pv -> preview.setSurfaceProvider(pv.surfaceProvider) }
+                } catch (_: Exception) {}
             }
-        } catch (_: Exception) {
+        } else {
+            videoCapture = null
+            pendingAutoStartVideo = false
+
+            val captureBuilder = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setFlashMode(flashMode)
+
+            val c2Extender = androidx.camera.camera2.interop.Camera2Interop.Extender(captureBuilder)
+            c2Extender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
+                android.hardware.camera2.CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO
+            )
+            c2Extender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE,
+                android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
+
+            val capture = captureBuilder.build()
+
+            val imageAnalysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .build()
+
+            imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                try {
+                    val plane = imageProxy.planes[0]
+                    val variance = antiBlurEngine.calculateCenterRoiLaplacianVariance(
+                        yBuffer = plane.buffer,
+                        width = imageProxy.width,
+                        height = imageProxy.height,
+                        rowStride = plane.rowStride,
+                        targetRoiSize = 400
+                    )
+                    val (overPct, underPct) = antiBlurEngine.calculateExposureMetrics(
+                        yBuffer = plane.buffer,
+                        width = imageProxy.width,
+                        height = imageProxy.height,
+                        rowStride = plane.rowStride
+                    )
+                    if (isFocusPeakingEnabled) {
+                        peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
+                            yBuffer = plane.buffer,
+                            width = imageProxy.width,
+                            height = imageProxy.height,
+                            rowStride = plane.rowStride,
+                            rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                        )
+                    } else if (peakingPoints.isNotEmpty()) {
+                        peakingPoints = emptyList()
+                    }
+                    val motion = antiBlurEngine.computeMotionAndLuma(
+                        yBuffer = plane.buffer,
+                        width = imageProxy.width,
+                        height = imageProxy.height,
+                        rowStride = plane.rowStride,
+                        previousGrid = previousMotionGrid
+                    )
+                    previousMotionGrid = motion.grid
+                    sentinelMotionScore = motion.motionScore
+                    sentinelAvgLuma = motion.avgLuma
+                    sentinelIsNight = motion.isLowLight
+
+                    val sentinelRes = SentinelEngine.evaluateMotionFrame(
+                        nowMs = System.currentTimeMillis(),
+                        motionScore = motion.motionScore,
+                        avgLuma = motion.avgLuma
+                    )
+                    when (sentinelRes) {
+                        is SentinelEngine.SentinelStepResult.TriggerLingerCapture -> {
+                            scope.launch(Dispatchers.Main) {
+                                sentinelStepLabel = "🚨 ЗАВИСАНИЕ > ${sentinelRes.durationMs / 1000}с!"
+                                sentinelEvents = SentinelEngine.getEvents()
+                                launchSentinelCapture(
+                                    reason = "Объект у цели ${sentinelRes.durationMs / 1000}с (движ ${motion.motionScore}%)",
+                                    useNightClahe = sentinelRes.nightClahe
+                                )
+                            }
+                        }
+                        is SentinelEngine.SentinelStepResult.NeighborIgnored -> {
+                            scope.launch(Dispatchers.Main) {
+                                sentinelStepLabel = "ПРОХОЖИЙ [ИГНОР]"
+                                sentinelEvents = SentinelEngine.getEvents()
+                            }
+                        }
+                        is SentinelEngine.SentinelStepResult.Tracking -> {
+                            val thr = SentinelEngine.getConfig().lingerThresholdSec
+                            sentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
+                        }
+                        is SentinelEngine.SentinelStepResult.Cooldown -> {
+                            sentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
+                        }
+                        SentinelEngine.SentinelStepResult.Idle -> {
+                            sentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
+                        }
+                    }
+
+                    liveLaplacianVariance = variance
+                    overexposedPercent = overPct
+                    underexposedPercent = underPct
+
+                    if (visorMode != VisorMode.NORMAL && !isStealthBlackoutActive) {
+                        val res = cyberVisorEngine.processYuv420Frame(
+                            imageProxy = imageProxy,
+                            rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                            isFrontCamera = (lensFacing == CameraSelector.LENS_FACING_FRONT)
+                        )
+                        if (res != null) {
+                            val tick = visorTickCounter.incrementAndGet()
+                            visorDisplayState = Triple(res.bitmap, res.telemetry, tick)
+                        }
+                    }
+                } finally {
+                    imageProxy.close()
+                }
+            }
+
             try {
                 cameraProvider.unbindAll()
                 val camera = cameraProvider.bindToLifecycle(
@@ -936,16 +960,16 @@ fun GhostCameraScreen(
                     cameraSelector,
                     preview,
                     capture,
-                    vCapture
+                    imageAnalysis
                 )
                 cameraControl = camera.cameraControl
                 imageCapture = capture
-                videoCapture = vCapture
+                boundUseCasesSummary = "PHOTO/OPTIC: Preview + ImageCapture + ImageAnalysis (YUV)"
 
                 previewView?.let { pv ->
                     preview.setSurfaceProvider(pv.surfaceProvider)
                 }
-            } catch (_: Exception) {
+            } catch (eAnalysis: Exception) {
                 try {
                     cameraProvider.unbindAll()
                     val camera = cameraProvider.bindToLifecycle(
@@ -956,11 +980,14 @@ fun GhostCameraScreen(
                     )
                     cameraControl = camera.cameraControl
                     imageCapture = capture
+                    boundUseCasesSummary = "FALLBACK (без ImageAnalysis): Preview + ImageCapture (${eAnalysis.javaClass.simpleName})"
+                    lastStatusMessage = "ВНИМАНИЕ HAL: ImageAnalysis отключён (только Фото)"
 
                     previewView?.let { pv ->
                         preview.setSurfaceProvider(pv.surfaceProvider)
                     }
                 } catch (e: Exception) {
+                    boundUseCasesSummary = "CAMERA BIND ERROR: ${e.javaClass.simpleName}"
                     lastStatusMessage = "Ошибка камеры: ${e.localizedMessage}"
                 }
             }
@@ -1070,7 +1097,10 @@ fun GhostCameraScreen(
         isAssistModeActive
     ).count { it }
 
-    val hasByokKey = remember(showVikaSheet, showSettingsDialog) { ByokManager.hasKey(context) }
+    LaunchedEffect(Unit) {
+        ByokManager.syncFromPrefs(context)
+    }
+    val hasByokKey by ByokManager.hasKeyFlow.collectAsState()
 
     // MAIN CAMERA VIEWPORT
     Box(
@@ -1578,6 +1608,41 @@ fun GhostCameraScreen(
                     }
                 }
             }
+
+            // Notification Banner docked cleanly below Top HUD Pill & Drawer (zero status-bar / pill overlap)
+            AnimatedVisibility(
+                visible = isCapturing || lastStatusMessage != null || isRecordingVideo,
+                enter = fadeIn() + slideInVertically(),
+                exit = fadeOut() + slideOutVertically(),
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(top = 6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(CyberBlack.copy(alpha = 0.85f))
+                        .border(1.5.dp, if (isRecordingVideo) CyberRed else if (isCapturing) CyberGreen else CyberGreenDark, RoundedCornerShape(16.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isRecordingVideo) {
+                            val m = recordingDurationSeconds / 60
+                            val s = recordingDurationSeconds % 60
+                            val timerStr = String.format(Locale.ROOT, "%02d:%02d", m, s)
+                            Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(CyberRed))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("🔴 ЗАПИСЬ В СЕЙФ: $timerStr", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        } else if (isCapturing) {
+                            CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("ШИФРОВАНИЕ...", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        } else {
+                            Text(lastStatusMessage ?: "", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
         }
 
         // Live Countdown Overlay
@@ -1590,41 +1655,6 @@ fun GhostCameraScreen(
                     fontWeight = FontWeight.Bold,
                     fontSize = 96.sp
                 )
-            }
-        }
-
-        // Notification Banner
-        AnimatedVisibility(
-            visible = isCapturing || lastStatusMessage != null || isRecordingVideo,
-            enter = fadeIn() + slideInVertically(),
-            exit = fadeOut() + slideOutVertically(),
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 86.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(CyberBlack.copy(alpha = 0.85f))
-                    .border(1.5.dp, if (isRecordingVideo) CyberRed else if (isCapturing) CyberGreen else CyberGreenDark, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isRecordingVideo) {
-                        val m = recordingDurationSeconds / 60
-                        val s = recordingDurationSeconds % 60
-                        val timerStr = String.format(Locale.ROOT, "%02d:%02d", m, s)
-                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(CyberRed))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("🔴 ЗАПИСЬ В СЕЙФ: $timerStr", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                    } else if (isCapturing) {
-                        CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("ШИФРОВАНИЕ...", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                    } else {
-                        Text(lastStatusMessage ?: "", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                    }
-                }
             }
         }
 
@@ -1926,7 +1956,6 @@ fun GhostCameraScreen(
                                 .background(CyberRed.copy(alpha = 0.22f))
                                 .border(1.5.dp, CyberRed, CircleShape)
                                 .clickable {
-                                    selectedCameraMode = "VIDEO"
                                     triggerVideoRecordingToggle()
                                 },
                             contentAlignment = Alignment.Center
@@ -2047,6 +2076,7 @@ fun GhostCameraScreen(
                 onCamouflageChanged = { mode ->
                     currentCamouflage = mode
                 },
+                boundUseCasesSummary = boundUseCasesSummary,
                 onSelectMode = { modeKey ->
                     if (modeKey == "MACRO") {
                         zoomRatio = 2.0f
@@ -2302,6 +2332,8 @@ private fun CyberVisorControlCard(
     onSavePulseMetrics: (Int, Int?) -> Unit,
     onSaveVisorSnapshot: () -> Unit
 ) {
+    var isCollapsed by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2321,25 +2353,51 @@ private fun CyberVisorControlCard(
                 color = NeonCyan,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
-                fontSize = 11.sp
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f)
             )
-            if (activeMode != VisorMode.NORMAL && hasVisorFrame) {
-                Text(
-                    text = "📸 В СЕЙФ",
-                    color = Color.Black,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 9.sp,
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (activeMode != VisorMode.NORMAL && hasVisorFrame) {
+                    Text(
+                        text = "📸 В СЕЙФ",
+                        color = Color.Black,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(CyberGreen)
+                            .clickable { onSaveVisorSnapshot() }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .testTag("visor_snapshot_button")
+                    )
+                }
+                Box(
                     modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(CyberGreen)
-                        .clickable { onSaveVisorSnapshot() }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                        .testTag("visor_snapshot_button")
-                )
+                        .background(CyberSurface)
+                        .border(1.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .clickable { isCollapsed = !isCollapsed }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .testTag("visor_card_toggle_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (isCollapsed) "▲ РАЗВЕРНУТЬ" else "▼ СВЕРНУТЬ",
+                        color = NeonCyan,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp
+                    )
+                }
             }
         }
 
+        if (!isCollapsed) {
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -2495,6 +2553,7 @@ private fun CyberVisorControlCard(
                     fontSize = 9.sp
                 )
             }
+        }
         }
     }
 }

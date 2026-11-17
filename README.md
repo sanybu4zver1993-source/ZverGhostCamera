@@ -1,7 +1,7 @@
 # ZVER CAMERA (v4.1 Hardened Release)
 
-> **Zero-Telemetry, Cryptographically Plausible-Deniable Android Camera & Digital Vault**  
-> Tailored & Benchmarked on MediaTek Helio G85 (MT6768) running Android 15 (API 35).
+> **Plausible-Deniable Android Camera, Digital Vault & Opt-In BYOK Vision**  
+> Targeted at Xiaomi Redmi 13C (MediaTek Helio G85 / `MT6769Z`, Android 15 / API 35). See `MASTER_SPEC.md` and `DOCUMENT_INDEX.md` for live hardware/privacy verification status.
 
 ---
 
@@ -15,7 +15,7 @@ Unlike conventional camera applications that leak metadata through `MediaStore`,
 
 ## ⚙️ Hardware Specifications & HAL Constants
 
-Tested and validated via `dumpsys media.camera` on Xiaomi Redmi 13C (MT6768):
+Reference specifications for Xiaomi Redmi 13C (`MT6769Z` — runtime values verified via `CameraDiagnostics` on device; unprofiled timings marked `UNVERIFIED` in `MASTER_SPEC.md`):
 
 | Parameter | Main Sensor (ID 0) | Front Sensor (ID 1) | Macro Sensor (ID 2) |
 |---|---|---|---|
@@ -67,9 +67,9 @@ Every pixel payload is signed by a hardware-backed `secp256r1` ECDSA key stored 
    * An adversary inspecting the device storage finds only uniform high-entropy data. The existence of the hidden Master zone is deniable.
 2. **Block Swapping & Replay Attacks:**
    * Cryptographic AAD prevents block tampering or rearranging inside the volume.
-3. **OSINT Leaks & Cloud Telemetry:**
-   * The core application process is compiled with `<uses-permission android:name="android.permission.INTERNET" tools:node="remove" />`. Zero network access.
-   * `FLAG_SECURE` prevents screenshots, screen recordings, and Recents menu caching.
+3. **OSINT Leaks & Local Storage Hygiene:**
+   * `INTERNET` is declared in `AndroidManifest.xml` solely for user-initiated BYOK Gemini API (`Вика AI`) calls; offline modes run on-device (full transitive SDK privacy audit is documented in `MASTER_SPEC.md`).
+   * `FLAG_SECURE` prevents screenshots/recordings when enabled (on by default inside `GhostVaultDialog`).
    * Zero writes to `MediaStore` or public shared storage.
 4. **PanicKit Wiping (Anti-Spoofing & Constant-Time):**
    * Constant-time comparison (`MessageDigest.isEqual`) blocks side-channel timing attacks.

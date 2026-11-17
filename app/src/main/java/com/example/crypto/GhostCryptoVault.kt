@@ -81,6 +81,38 @@ object GhostCryptoVault {
         val isVideo: Boolean
     )
 
+    enum class KeySourceKind(val labelRu: String) {
+        ACTIVE_MAIN_PIN("PIN-ключ MAIN (PBKDF2)"),
+        ACTIVE_DECOY_PIN("PIN-ключ DECOY (PBKDF2)"),
+        KEYSTORE_MAIN_FALLBACK("KeyStore Fallback (Ghost_Vault_MAIN)"),
+        KEYSTORE_DECOY_FALLBACK("KeyStore Fallback (Ghost_Vault_DECOY)"),
+        UNKNOWN_OR_CORRUPTED("Неизвестный ключ / Повреждён")
+    }
+
+    data class GcfHeaderInfo(
+        val fileName: String,
+        val sizeBytes: Long,
+        val hasValidMagic: Boolean,
+        val ivHex: String,
+        val ciphertextBytes: Long,
+        val errorMessage: String? = null
+    )
+
+    data class FileKeyDiagnostic(
+        val file: File,
+        val headerInfo: GcfHeaderInfo,
+        val matchedKeyKind: KeySourceKind,
+        val plaintextBytesLength: Int = 0,
+        val errorDetail: String? = null
+    )
+
+    data class BackupResult(
+        val backupDir: File,
+        val copiedFilesCount: Int,
+        val copiedBytes: Long,
+        val metadataFilesCount: Int
+    )
+
     private val ramLock = Any()
     private val ramShots = mutableListOf<RamShot>()
 
@@ -321,6 +353,26 @@ object GhostCryptoVault {
         return getHardwareKeystoreKey(context, "Ghost_Vault_${activeProfile.name}")
     }
 
+    fun getActiveVaultKeySourceLabel(context: Context): String {
+        val unlockedPin = if (activeProfile == VaultProfile.MAIN) activeMainKey else activeDecoyKey
+        return when {
+            unlockedPin != null && activeProfile == VaultProfile.MAIN -> KeySourceKind.ACTIVE_MAIN_PIN.labelRu
+            unlockedPin != null && activeProfile == VaultProfile.DECOY -> KeySourceKind.ACTIVE_DECOY_PIN.labelRu
+            isConfigured(context) -> "KeyStore Fallback при настроенном PIN (Ghost_Vault_${activeProfile.name})"
+            else -> "KeyStore Fallback (Ghost_Vault_${activeProfile.name})"
+        }
+    }
+
+    private fun getExistingHardwareKeystoreKeyOrNull(alias: String): SecretKey? {
+        return try {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            if (!keyStore.containsAlias(alias)) return null
+            (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     @Synchronized
     private fun getHardwareKeystoreKey(context: Context, alias: String): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -462,17 +514,24 @@ object GhostCryptoVault {
     fun encryptFileToVault(context: Context, sourceFile: File, prefix: String = MEDIA_VIDEO): File {
         val (targetFile, cipherOut) = openEncryptedOutputStream(context, prefix)
         try {
-            FileInputStream(sourceFile).use { input ->
-                input.copyTo(cipherOut)
+            cipherOut.use { out ->
+                FileInputStream(sourceFile).use { input ->
+                    input.copyTo(out)
+                }
+                out.flush()
             }
-            cipherOut.flush()
+            return targetFile
+        } catch (e: Exception) {
+            shredFile(targetFile)
+            throw e
         } finally {
-            try { cipherOut.close() } catch (_: Exception) {}
             shredFile(sourceFile)
         }
-        return targetFile
     }
 
+    /**
+     * Standard strict decryption: NEVER performs silent fallback to another key on AEADBadTagException.
+     */
     fun decryptToRam(context: Context, file: File): ByteArray {
         if (!file.exists() || file.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)) {
             throw IOException("Invalid or corrupted GCF file")
@@ -496,7 +555,14 @@ object GhostCryptoVault {
             val gcmSpec = GCMParameterSpec(GCM_TAG_LEN, iv)
             cipher.init(Cipher.DECRYPT_MODE, getActiveVaultKey(context), gcmSpec)
 
-            val decrypted = cipher.doFinal(fileBytes, ciphertextOffset, ciphertextSize)
+            val decrypted = try {
+                cipher.doFinal(fileBytes, ciphertextOffset, ciphertextSize)
+            } catch (e: AEADBadTagException) {
+                val activeLabel = getActiveVaultKeySourceLabel(context)
+                throw AEADBadTagException(
+                    "Несовпадение ключа GCM (активен: $activeLabel). Оригинал не изменён; запустите read-only диагностику."
+                ).apply { initCause(e) }
+            }
             Arrays.fill(iv, 0.toByte())
             return decrypted
         } finally {
@@ -511,6 +577,236 @@ object GhostCryptoVault {
                 ?: throw IOException("Failed to decode decrypted image")
         } finally {
             Arrays.fill(decryptedBytes, 0.toByte())
+        }
+    }
+
+    // --- READ-ONLY VAULT DIAGNOSTICS, BACKUP & COPY-ONLY RECOVERY ---
+
+    fun inspectGcfHeader(file: File): GcfHeaderInfo {
+        if (!file.exists()) {
+            return GcfHeaderInfo(file.name, 0L, false, "", 0L, "Файл не найден")
+        }
+        val size = file.length()
+        val minSize = (MAGIC_HEADER.size + GCM_IV_LEN + 16).toLong()
+        if (size < minSize) {
+            return GcfHeaderInfo(file.name, size, false, "", 0L, "Файл меньше минимального размера GCF ($size < $minSize)")
+        }
+        return try {
+            val head = ByteArray(MAGIC_HEADER.size + GCM_IV_LEN)
+            FileInputStream(file).use { fis ->
+                val read = fis.read(head)
+                if (read < head.size) {
+                    return GcfHeaderInfo(file.name, size, false, "", 0L, "Неполный заголовок ($read Б)")
+                }
+            }
+            val validMagic = MAGIC_HEADER.indices.all { head[it] == MAGIC_HEADER[it] }
+            val ivHex = head.copyOfRange(MAGIC_HEADER.size, head.size)
+                .joinToString("") { "%02x".format(it) }
+            val ctLen = size - head.size
+            Arrays.fill(head, 0.toByte())
+            GcfHeaderInfo(
+                fileName = file.name,
+                sizeBytes = size,
+                hasValidMagic = validMagic,
+                ivHex = ivHex,
+                ciphertextBytes = ctLen,
+                errorMessage = if (validMagic) null else "Отсутствует заголовок GCF1"
+            )
+        } catch (e: Exception) {
+            GcfHeaderInfo(file.name, size, false, "", 0L, e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    /**
+     * Strictly read-only: identifies which key class authenticates a GCF file without altering
+     * originals or creating new KeyStore aliases.
+     */
+    fun diagnoseDecryptKeySource(context: Context, file: File): FileKeyDiagnostic {
+        val header = inspectGcfHeader(file)
+        if (!header.hasValidMagic || header.ciphertextBytes < 16L) {
+            return FileKeyDiagnostic(
+                file = file,
+                headerInfo = header,
+                matchedKeyKind = KeySourceKind.UNKNOWN_OR_CORRUPTED,
+                errorDetail = header.errorMessage ?: "Некорректный GCF"
+            )
+        }
+
+        val candidates = buildList {
+            activeMainKey?.let { add(KeySourceKind.ACTIVE_MAIN_PIN to it) }
+            activeDecoyKey?.let { add(KeySourceKind.ACTIVE_DECOY_PIN to it) }
+            getExistingHardwareKeystoreKeyOrNull("Ghost_Vault_MAIN")?.let {
+                add(KeySourceKind.KEYSTORE_MAIN_FALLBACK to it)
+            }
+            getExistingHardwareKeystoreKeyOrNull("Ghost_Vault_DECOY")?.let {
+                add(KeySourceKind.KEYSTORE_DECOY_FALLBACK to it)
+            }
+        }
+
+        val fileBytes = FileInputStream(file).use { it.readBytes() }
+        val iv = ByteArray(GCM_IV_LEN)
+        try {
+            System.arraycopy(fileBytes, MAGIC_HEADER.size, iv, 0, GCM_IV_LEN)
+            val ctOffset = MAGIC_HEADER.size + GCM_IV_LEN
+            val ctLen = fileBytes.size - ctOffset
+            var lastError: String? = null
+
+            for ((kind, key) in candidates) {
+                try {
+                    val cipher = Cipher.getInstance(AES_GCM)
+                    cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LEN, iv))
+                    val plain = cipher.doFinal(fileBytes, ctOffset, ctLen)
+                    val len = plain.size
+                    Arrays.fill(plain, 0.toByte())
+                    return FileKeyDiagnostic(
+                        file = file,
+                        headerInfo = header,
+                        matchedKeyKind = kind,
+                        plaintextBytesLength = len
+                    )
+                } catch (e: Exception) {
+                    lastError = "${kind.name}: ${e.javaClass.simpleName}"
+                }
+            }
+
+            return FileKeyDiagnostic(
+                file = file,
+                headerInfo = header,
+                matchedKeyKind = KeySourceKind.UNKNOWN_OR_CORRUPTED,
+                errorDetail = if (candidates.isEmpty()) "Нет доступных ключей в сессии/KeyStore" else lastError
+            )
+        } finally {
+            Arrays.fill(iv, 0.toByte())
+            Arrays.fill(fileBytes, 0.toByte())
+        }
+    }
+
+    fun diagnoseVaultDirectory(
+        context: Context,
+        profile: VaultProfile = activeProfile
+    ): List<FileKeyDiagnostic> {
+        val files = listVaultFiles(context, profile)
+        return files.map { diagnoseDecryptKeySource(context, it) }
+    }
+
+    /**
+     * Strictly read-only encrypted backup: copies .gcf files and wrapped key/salt metadata
+     * into backupDir without modifying or removing originals.
+     */
+    fun backupVaultDirectoryReadOnly(
+        context: Context,
+        profile: VaultProfile = activeProfile,
+        backupDir: File
+    ): BackupResult {
+        if (!backupDir.exists()) backupDir.mkdirs()
+        val srcFiles = listVaultFiles(context, profile)
+        var copiedFiles = 0
+        var totalBytes = 0L
+
+        for (src in srcFiles) {
+            val dst = File(backupDir, src.name)
+            if (dst.canonicalPath == src.canonicalPath) {
+                throw IllegalArgumentException("Backup path must not match original file: ${src.name}")
+            }
+            FileInputStream(src).use { input ->
+                FileOutputStream(dst).use { out ->
+                    input.copyTo(out)
+                    out.fd.sync()
+                }
+            }
+            if (dst.length() != src.length()) {
+                throw IOException("Backup size mismatch for ${src.name}")
+            }
+            copiedFiles++
+            totalBytes += dst.length()
+        }
+
+        var metaCount = 0
+        for (metaName in listOf(profile.saltFile, profile.keyFile)) {
+            val metaSrc = File(context.filesDir, metaName)
+            if (metaSrc.exists()) {
+                val metaDst = File(backupDir, metaName)
+                FileInputStream(metaSrc).use { input ->
+                    FileOutputStream(metaDst).use { out ->
+                        input.copyTo(out)
+                        out.fd.sync()
+                    }
+                }
+                metaCount++
+            }
+        }
+
+        return BackupResult(
+            backupDir = backupDir,
+            copiedFilesCount = copiedFiles,
+            copiedBytes = totalBytes,
+            metadataFilesCount = metaCount
+        )
+    }
+
+    /**
+     * Recovers a readable GCF file STRICTLY into a separate output copy file.
+     * Refuses to overwrite the source original. If reencryptTargetKey == null, writes decrypted copy;
+     * otherwise re-encrypts into a brand-new GCF1 container copy with reencryptTargetKey.
+     */
+    fun recoverGcfFileToCopy(
+        context: Context,
+        sourceEncryptedFile: File,
+        outputCopyFile: File,
+        reencryptTargetKey: SecretKey? = null
+    ): KeySourceKind {
+        if (sourceEncryptedFile.canonicalPath == outputCopyFile.canonicalPath) {
+            throw IllegalArgumentException("Отказ: запрещено перезаписывать оригинальный файл ${sourceEncryptedFile.name}")
+        }
+        outputCopyFile.parentFile?.let { if (!it.exists()) it.mkdirs() }
+
+        val diag = diagnoseDecryptKeySource(context, sourceEncryptedFile)
+        val matchedKey = when (diag.matchedKeyKind) {
+            KeySourceKind.ACTIVE_MAIN_PIN -> activeMainKey
+            KeySourceKind.ACTIVE_DECOY_PIN -> activeDecoyKey
+            KeySourceKind.KEYSTORE_MAIN_FALLBACK -> getExistingHardwareKeystoreKeyOrNull("Ghost_Vault_MAIN")
+            KeySourceKind.KEYSTORE_DECOY_FALLBACK -> getExistingHardwareKeystoreKeyOrNull("Ghost_Vault_DECOY")
+            KeySourceKind.UNKNOWN_OR_CORRUPTED -> null
+        } ?: throw AEADBadTagException("Не найден подходящий ключ для ${sourceEncryptedFile.name}: ${diag.errorDetail}")
+
+        val fileBytes = FileInputStream(sourceEncryptedFile).use { it.readBytes() }
+        val iv = ByteArray(GCM_IV_LEN)
+        var plain: ByteArray? = null
+        try {
+            System.arraycopy(fileBytes, MAGIC_HEADER.size, iv, 0, GCM_IV_LEN)
+            val ctOffset = MAGIC_HEADER.size + GCM_IV_LEN
+            val ctLen = fileBytes.size - ctOffset
+            val cipher = Cipher.getInstance(AES_GCM)
+            cipher.init(Cipher.DECRYPT_MODE, matchedKey, GCMParameterSpec(GCM_TAG_LEN, iv))
+            plain = cipher.doFinal(fileBytes, ctOffset, ctLen)
+
+            if (reencryptTargetKey == null) {
+                FileOutputStream(outputCopyFile).use { fos ->
+                    fos.write(plain)
+                    fos.fd.sync()
+                }
+            } else {
+                val newIv = ByteArray(GCM_IV_LEN)
+                secureRandom.nextBytes(newIv)
+                val enc = Cipher.getInstance(AES_GCM)
+                enc.init(Cipher.ENCRYPT_MODE, reencryptTargetKey, GCMParameterSpec(GCM_TAG_LEN, newIv))
+                val outFos = FileOutputStream(outputCopyFile)
+                try {
+                    outFos.write(MAGIC_HEADER)
+                    outFos.write(newIv)
+                    CipherOutputStream(outFos, enc).use { cos ->
+                        cos.write(plain)
+                        cos.flush()
+                    }
+                } finally {
+                    Arrays.fill(newIv, 0.toByte())
+                }
+            }
+            return diag.matchedKeyKind
+        } finally {
+            Arrays.fill(iv, 0.toByte())
+            Arrays.fill(fileBytes, 0.toByte())
+            plain?.let { Arrays.fill(it, 0.toByte()) }
         }
     }
 

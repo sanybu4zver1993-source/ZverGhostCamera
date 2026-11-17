@@ -5,6 +5,13 @@ import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -18,8 +25,9 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * ByokManager (Bring Your Own Key):
  * - Encrypts/decrypts user-supplied Gemini API keys via AndroidKeyStore AES-256-GCM.
- * - Caches discovered models unlocked by that specific key.
- * - Tracks volatile RAM-only AI session chat history & token usage analytics.
+ * - Exposes reactive StateFlows as the single source of truth across GhostSettingsDialog & VikaAiSheet.
+ * - Executes model discovery on a non-cancellable SupervisorJob IO scope so closing a dialog does not abort requests.
+ * - Maintains sanitized in-memory HTTP diagnostic logs (zero API key leakage).
  */
 object ByokManager {
     private const val KS_ALIAS = "ks_byok_gemini_creds"
@@ -99,9 +107,143 @@ object ByokManager {
         val engineBadge: String = "GEMINI"
     )
 
+    data class SanitizedHttpLog(
+        val id: String = UUID.randomUUID().toString().take(8),
+        val timestampMs: Long = System.currentTimeMillis(),
+        val method: String,
+        val endpoint: String,
+        val httpCode: Int,
+        val latencyMs: Long,
+        val detail: String
+    )
+
+    private val appIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ramLock = Any()
     private var sessionStats = AiSessionStats()
     private val chatHistory = mutableListOf<AiChatEntry>()
+    private val httpLogs = mutableListOf<SanitizedHttpLog>()
+
+    // Reactive Shared State (Single Source of Truth across UI dialogs)
+    private val _hasKeyFlow = MutableStateFlow(false)
+    val hasKeyFlow: StateFlow<Boolean> = _hasKeyFlow.asStateFlow()
+
+    private val _selectedModelFlow = MutableStateFlow(DEFAULT_MODEL_FALLBACK)
+    val selectedModelFlow: StateFlow<String> = _selectedModelFlow.asStateFlow()
+
+    private val _discoveredModelsFlow = MutableStateFlow<List<DiscoveredModel>>(emptyList())
+    val discoveredModelsFlow: StateFlow<List<DiscoveredModel>> = _discoveredModelsFlow.asStateFlow()
+
+    private val _customPromptFlow = MutableStateFlow(DEFAULT_PROMPT)
+    val customPromptFlow: StateFlow<String> = _customPromptFlow.asStateFlow()
+
+    private val _isFetchingModelsFlow = MutableStateFlow(false)
+    val isFetchingModelsFlow: StateFlow<Boolean> = _isFetchingModelsFlow.asStateFlow()
+
+    private val _modelFetchStatusFlow = MutableStateFlow<String?>(null)
+    val modelFetchStatusFlow: StateFlow<String?> = _modelFetchStatusFlow.asStateFlow()
+
+    private val _chatHistoryFlow = MutableStateFlow<List<AiChatEntry>>(emptyList())
+    val chatHistoryFlow: StateFlow<List<AiChatEntry>> = _chatHistoryFlow.asStateFlow()
+
+    private val _sessionStatsFlow = MutableStateFlow(AiSessionStats())
+    val sessionStatsFlow: StateFlow<AiSessionStats> = _sessionStatsFlow.asStateFlow()
+
+    private val _httpLogsFlow = MutableStateFlow<List<SanitizedHttpLog>>(emptyList())
+    val httpLogsFlow: StateFlow<List<SanitizedHttpLog>> = _httpLogsFlow.asStateFlow()
+
+    private val apiKeyRegex = Regex("""AIza[0-9A-Za-z\-_]{8,}""")
+    private val queryKeyRegex = Regex("""([?&](?:key|api_key|x-goog-api-key)=)[^&\s]+""", RegexOption.IGNORE_CASE)
+
+    fun sanitizeForLog(raw: String, secretKey: String? = null): String {
+        var cleaned = raw
+        if (!secretKey.isNullOrBlank()) {
+            cleaned = cleaned.replace(secretKey, "***REDACTED***")
+        }
+        cleaned = apiKeyRegex.replace(cleaned, "AIza***REDACTED***")
+        cleaned = queryKeyRegex.replace(cleaned, "$1***REDACTED***")
+        return cleaned
+    }
+
+    fun recordHttpLog(
+        method: String,
+        endpoint: String,
+        httpCode: Int,
+        latencyMs: Long,
+        detail: String,
+        secretKey: String? = null
+    ) {
+        val safeEndpoint = sanitizeForLog(endpoint, secretKey)
+        val safeDetail = sanitizeForLog(detail, secretKey).take(320)
+        val entry = SanitizedHttpLog(
+            method = method,
+            endpoint = safeEndpoint,
+            httpCode = httpCode,
+            latencyMs = latencyMs,
+            detail = safeDetail
+        )
+        synchronized(ramLock) {
+            httpLogs.add(0, entry)
+            if (httpLogs.size > 30) {
+                httpLogs.removeAt(httpLogs.lastIndex)
+            }
+            _httpLogsFlow.value = httpLogs.toList()
+        }
+    }
+
+    fun getHttpLogs(): List<SanitizedHttpLog> = synchronized(ramLock) { httpLogs.toList() }
+
+    fun syncFromPrefs(context: Context) {
+        val appCtx = context.applicationContext ?: context
+        _hasKeyFlow.value = hasKey(appCtx)
+        _selectedModelFlow.value = getModelName(appCtx)
+        _discoveredModelsFlow.value = getDiscoveredModels(appCtx)
+        _customPromptFlow.value = getCustomPrompt(appCtx)
+    }
+
+    fun refreshModelsInBackground(
+        context: Context,
+        explicitKeyChars: CharArray? = null,
+        onFinished: ((Result<List<DiscoveredModel>>) -> Unit)? = null
+    ) {
+        val appCtx = context.applicationContext ?: context
+        if (_isFetchingModelsFlow.value) {
+            explicitKeyChars?.let { Arrays.fill(it, '0') }
+            return
+        }
+        _isFetchingModelsFlow.value = true
+        _modelFetchStatusFlow.value = "Запрос моделей к Gemini API..."
+
+        appIoScope.launch {
+            val keyToUse = explicitKeyChars ?: decryptKey(appCtx)
+            if (keyToUse == null || keyToUse.isEmpty()) {
+                _isFetchingModelsFlow.value = false
+                _modelFetchStatusFlow.value = "Ключ не найден в KeyStore"
+                return@launch
+            }
+            val result = try {
+                GeminiByokClient.fetchAvailableModels(keyToUse)
+            } finally {
+                Arrays.fill(keyToUse, '0')
+            }
+
+            result.onSuccess { list ->
+                saveDiscoveredModels(appCtx, list)
+                val currentModel = getModelName(appCtx)
+                val statusMsg = when {
+                    list.isEmpty() -> "Ключ рабочий, но модели generateContent не вернулись"
+                    list.any { it.id == currentModel } ->
+                        "Загружено моделей: ${list.size} • выбрана $currentModel (подтверждена)"
+                    else ->
+                        "Загружено моделей: ${list.size} • выбранная $currentModel НЕ найдена в списке (подмена отключена, выберите вручную)"
+                }
+                _modelFetchStatusFlow.value = statusMsg
+            }.onFailure { err ->
+                _modelFetchStatusFlow.value = "Ошибка: ${sanitizeForLog(err.message.orEmpty())}"
+            }
+            _isFetchingModelsFlow.value = false
+            onFinished?.invoke(result)
+        }
+    }
 
     fun isStrongBoxSupported(context: Context): Boolean {
         return try {
@@ -143,6 +285,7 @@ object ByokManager {
             .edit()
             .putString(KEY_PROMPT, prompt)
             .apply()
+        _customPromptFlow.value = prompt
     }
 
     fun getModelName(context: Context): String {
@@ -151,10 +294,12 @@ object ByokManager {
     }
 
     fun saveModelName(context: Context, model: String) {
+        val clean = model.removePrefix("models/").trim().ifEmpty { DEFAULT_MODEL_FALLBACK }
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_MODEL, model.removePrefix("models/").trim())
+            .putString(KEY_MODEL, clean)
             .apply()
+        _selectedModelFlow.value = clean
     }
 
     fun hasKey(context: Context): Boolean {
@@ -179,6 +324,7 @@ object ByokManager {
                 .putString(KEY_CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
                 .putString(KEY_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
                 .apply()
+            _hasKeyFlow.value = true
         } finally {
             Arrays.fill(bytes, 0.toByte())
         }
@@ -222,6 +368,7 @@ object ByokManager {
             .edit()
             .putString(KEY_DISCOVERED_MODELS, arr.toString())
             .apply()
+        _discoveredModelsFlow.value = models
     }
 
     fun getDiscoveredModels(context: Context): List<DiscoveredModel> {
@@ -267,6 +414,7 @@ object ByokManager {
                 lastLatencyMs = latencyMs,
                 lastModelId = modelId
             )
+            _sessionStatsFlow.value = sessionStats
         }
     }
 
@@ -276,6 +424,7 @@ object ByokManager {
             if (chatHistory.size > 20) {
                 chatHistory.removeAt(chatHistory.lastIndex)
             }
+            _chatHistoryFlow.value = chatHistory.toList()
         }
     }
 
@@ -286,7 +435,11 @@ object ByokManager {
     fun clearSessionMemory() {
         synchronized(ramLock) {
             chatHistory.clear()
+            httpLogs.clear()
             sessionStats = AiSessionStats()
+            _chatHistoryFlow.value = emptyList()
+            _httpLogsFlow.value = emptyList()
+            _sessionStatsFlow.value = sessionStats
         }
     }
 
@@ -298,6 +451,9 @@ object ByokManager {
             .remove(KEY_IV)
             .remove(KEY_DISCOVERED_MODELS)
             .apply()
+        _hasKeyFlow.value = false
+        _discoveredModelsFlow.value = emptyList()
+        _modelFetchStatusFlow.value = "Ключ удалён из KeyStore"
         try {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             if (ks.containsAlias(KS_ALIAS)) ks.deleteEntry(KS_ALIAS)

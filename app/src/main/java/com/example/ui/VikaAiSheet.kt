@@ -2,7 +2,9 @@ package com.example.ui
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +16,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
@@ -89,17 +93,24 @@ fun VikaAiSheet(
 
     BackHandler { onDismiss() }
 
+    LaunchedEffect(Unit) {
+        ByokManager.syncFromPrefs(context)
+    }
+
     var activeTab by remember { mutableStateOf(initialTab) }
-    var hasKey by remember { mutableStateOf(ByokManager.hasKey(context)) }
-    var selectedModel by remember { mutableStateOf(ByokManager.getModelName(context)) }
-    var discoveredModels by remember { mutableStateOf(ByokManager.getDiscoveredModels(context)) }
-    var customPrompt by remember { mutableStateOf(ByokManager.getCustomPrompt(context)) }
+    val hasKey by ByokManager.hasKeyFlow.collectAsState()
+    val selectedModel by ByokManager.selectedModelFlow.collectAsState()
+    val discoveredModels by ByokManager.discoveredModelsFlow.collectAsState()
+    val customPrompt by ByokManager.customPromptFlow.collectAsState()
+    val isFetchingModels by ByokManager.isFetchingModelsFlow.collectAsState()
+    val modelStatusText by ByokManager.modelFetchStatusFlow.collectAsState()
+    val chatFeed by ByokManager.chatHistoryFlow.collectAsState()
+    val aiStats by ByokManager.sessionStatsFlow.collectAsState()
+    val httpLogs by ByokManager.httpLogsFlow.collectAsState()
 
     var apiKeyInput by remember { mutableStateOf("") }
     var manualModelInput by remember { mutableStateOf("") }
     var modelFilter by remember { mutableStateOf("ALL") }
-    var isFetchingModels by remember { mutableStateOf(false) }
-    var modelStatusText by remember { mutableStateOf<String?>(null) }
 
     val hasMediaSource = externalBitmap != null || externalVideoFile != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null
     var frameMode by remember {
@@ -108,52 +119,46 @@ fun VikaAiSheet(
     var videoEnableCrop by remember { mutableStateOf(true) }
     var taskInput by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
-    var chatFeed by remember { mutableStateOf(ByokManager.getChatHistory()) }
-    var aiStats by remember { mutableStateOf(ByokManager.getStats()) }
+    var isCapturingPreview by remember { mutableStateOf(false) }
+    var stagedPreviewBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var stagedPreviewMime by remember { mutableStateOf("image/webp") }
+    var stagedPreviewCropBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var stagedPreviewCropMime by remember { mutableStateOf("image/webp") }
+    var stagedPreviewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var stagedPreviewReport by remember { mutableStateOf<LocalSymbiosisCvEngine.SymbiosisReport?>(null) }
+    var stagedPreviewNote by remember { mutableStateOf("") }
+    var stagedPreviewMode by remember { mutableStateOf<AiFrameMode?>(null) }
+
     var localSnap by remember { mutableStateOf(VaultAnalytics.captureSnapshot(context)) }
-    val isOnlineNow = remember(activeTab, isGenerating) { GeminiByokClient.isNetworkOnline(context) }
+    val isOnlineNow = remember(activeTab, isGenerating, hasKey) { GeminiByokClient.isNetworkOnline(context) }
+
+    fun clearStagedPreview() {
+        stagedPreviewBitmap?.let { if (!it.isRecycled) it.recycle() }
+        stagedPreviewBitmap = null
+        stagedPreviewBytes?.let { Arrays.fill(it, 0.toByte()) }
+        stagedPreviewBytes = null
+        stagedPreviewCropBytes?.let { Arrays.fill(it, 0.toByte()) }
+        stagedPreviewCropBytes = null
+        stagedPreviewReport = null
+        stagedPreviewNote = ""
+        stagedPreviewMode = null
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            clearStagedPreview()
+        }
+    }
 
     fun refreshTelemetry() {
-        aiStats = ByokManager.getStats()
-        chatFeed = ByokManager.getChatHistory()
         localSnap = VaultAnalytics.captureSnapshot(context)
     }
 
     fun triggerModelDiscovery(explicitKey: CharArray? = null) {
-        if (isFetchingModels) return
-        isFetchingModels = true
-        modelStatusText = "Запрос моделей к Gemini API..."
-        scope.launch {
-            val keyToUse = explicitKey ?: ByokManager.decryptKey(context)
-            if (keyToUse == null || keyToUse.isEmpty()) {
-                isFetchingModels = false
-                modelStatusText = "Ключ не найден в KeyStore"
-                return@launch
-            }
-            val result = try {
-                GeminiByokClient.fetchAvailableModels(keyToUse)
-            } finally {
-                Arrays.fill(keyToUse, '0')
-            }
-            isFetchingModels = false
-            result.onSuccess { list ->
-                discoveredModels = list
-                ByokManager.saveDiscoveredModels(context, list)
-                if (list.isNotEmpty() && list.none { it.id == selectedModel }) {
-                    val preferred = list.firstOrNull { it.id.contains("hydrogen", ignoreCase = true) }
-                        ?: list.firstOrNull { it.id.contains("flash", ignoreCase = true) }
-                        ?: list.first()
-                    selectedModel = preferred.id
-                    ByokManager.saveModelName(context, preferred.id)
-                }
-                modelStatusText = if (list.isEmpty()) {
-                    "Ключ рабочий, но модели generateContent не вернулись"
-                } else {
-                    "Доступно моделей для ключа: ${list.size}"
-                }
+        ByokManager.refreshModelsInBackground(context, explicitKey) { res ->
+            res.onSuccess { list ->
                 onStatusMessage("МОДЕЛИ ЗАГРУЖЕНЫ: ${list.size}")
             }.onFailure { err ->
-                modelStatusText = "Ошибка: ${err.message}"
                 onStatusMessage("ОШИБКА КЛЮЧА: ${err.message}")
             }
         }
@@ -372,6 +377,26 @@ fun VikaAiSheet(
                                 }
                                 AiFrameMode.TEXT_ONLY -> Unit
                             }
+                        } else if (stagedPreviewBytes != null && stagedPreviewMode == frameMode && frameMode != AiFrameMode.TEXT_ONLY) {
+                            val bytesCopy = stagedPreviewBytes!!.clone()
+                            imageBytes = bytesCopy.also { allBuffers.add(it) }
+                            mimeType = stagedPreviewMime
+                            stagedPreviewCropBytes?.let { cb ->
+                                val cCopy = cb.clone()
+                                allBuffers.add(cCopy)
+                                extraCrops.add(cCopy to stagedPreviewCropMime)
+                            }
+                            cachedLocalReport = stagedPreviewReport
+                            dossierNote = stagedPreviewReport?.let {
+                                "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}"
+                            }.orEmpty()
+                            engineBadge = when (frameMode) {
+                                AiFrameMode.FULL_ONLY -> "GEMINI ЧИСТЫЙ (ПРЕВЬЮ)"
+                                AiFrameMode.BG_ISOLATE -> "GEMINI + ✂️ БЕЗ ФОНА (ПРЕВЬЮ)"
+                                AiFrameMode.SYMBIOSIS_CROP -> "GEMINI + 6-NN СИМБИОЗ (ПРЕВЬЮ)"
+                                AiFrameMode.TEXT_ONLY -> "GEMINI ТЕКСТ"
+                            }
+                            labelSuffix = stagedPreviewNote
                         } else if (onCaptureTwoStageFrame != null && frameMode != AiFrameMode.TEXT_ONLY) {
                             val needCrop = frameMode == AiFrameMode.SYMBIOSIS_CROP
                             val needIso = frameMode == AiFrameMode.BG_ISOLATE
@@ -724,6 +749,119 @@ fun VikaAiSheet(
                             Spacer(modifier = Modifier.height(8.dp))
                         }
 
+                        // Frame Preview Thumbnail Bar (inspect captured frame before sending!)
+                        if (frameMode != AiFrameMode.TEXT_ONLY && externalVideoFile == null && hasMediaSource) {
+                            val activeThumbBmp = externalBitmap ?: stagedPreviewBitmap
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(SheetCard, RoundedCornerShape(10.dp))
+                                    .border(1.dp, SheetBorder, RoundedCornerShape(10.dp))
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (activeThumbBmp != null && !activeThumbBmp.isRecycled) {
+                                    Image(
+                                        bitmap = activeThumbBmp.asImageBitmap(),
+                                        contentDescription = "Предпросмотр кадра для ИИ",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .border(1.dp, CyberGreen.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        val sizeInfo = stagedPreviewBytes?.let { "${it.size / 1024} КБ ($stagedPreviewMime)" } ?: "Из Сейфа"
+                                        Text(
+                                            text = "КАДР ГОТОВ: ${activeThumbBmp.width}x${activeThumbBmp.height}",
+                                            color = CyberGreen,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp
+                                        )
+                                        Text(
+                                            text = "$sizeInfo${stagedPreviewNote}",
+                                            color = CyberMuted,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 9.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (externalBitmap == null) {
+                                        IconButton(
+                                            onClick = { clearStagedPreview() },
+                                            modifier = Modifier.size(48.dp).testTag("vika_clear_preview_btn")
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Сбросить кадр", tint = CyberMuted)
+                                        }
+                                    }
+                                } else if (externalBitmap == null) {
+                                    Text(
+                                        text = "Кадр не зафиксирован (снимет автоматически при отправке или сними превью сейчас):",
+                                        color = CyberMuted,
+                                        fontSize = 9.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Button(
+                                        onClick = {
+                                            if (isCapturingPreview || isGenerating) return@Button
+                                            isCapturingPreview = true
+                                            scope.launch {
+                                                try {
+                                                    clearStagedPreview()
+                                                    if (onCaptureTwoStageFrame != null) {
+                                                        val needCrop = frameMode == AiFrameMode.SYMBIOSIS_CROP
+                                                        val needIso = frameMode == AiFrameMode.BG_ISOLATE
+                                                        val two = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                                                        if (two != null) {
+                                                            stagedPreviewBytes = two.fullBytes
+                                                            stagedPreviewMime = two.fullMimeType
+                                                            stagedPreviewCropBytes = two.faceCropBytes
+                                                            stagedPreviewCropMime = two.faceCropMimeType
+                                                            stagedPreviewReport = two.symbiosisReport
+                                                            stagedPreviewMode = frameMode
+                                                            stagedPreviewNote = if (two.cropKindLabel != null && two.faceCropBytes != null) " • +кроп: ${two.cropKindLabel}" else ""
+                                                            stagedPreviewBitmap = withContext(Dispatchers.Default) {
+                                                                BitmapFactory.decodeByteArray(two.fullBytes, 0, two.fullBytes.size)
+                                                            }
+                                                        }
+                                                    } else if (onCaptureLiveFrame != null) {
+                                                        val cap = onCaptureLiveFrame.invoke()
+                                                        if (cap != null) {
+                                                            stagedPreviewBytes = cap.first
+                                                            stagedPreviewMime = cap.second
+                                                            stagedPreviewMode = frameMode
+                                                            stagedPreviewBitmap = withContext(Dispatchers.Default) {
+                                                                BitmapFactory.decodeByteArray(cap.first, 0, cap.first.size)
+                                                            }
+                                                        }
+                                                    }
+                                                } finally {
+                                                    isCapturingPreview = false
+                                                }
+                                            }
+                                        },
+                                        enabled = !isCapturingPreview && !isGenerating,
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(44.dp).testTag("vika_capture_preview_btn")
+                                    ) {
+                                        Text(
+                                            if (isCapturingPreview) "..." else "📷 КАДР",
+                                            color = Color.Black,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
                         // Quick task chips
                         Row(
                             modifier = Modifier
@@ -930,19 +1068,42 @@ fun VikaAiSheet(
                                 Button(
                                     onClick = {
                                         activeTab = VikaSheetTab.TASKS
-                                        executeTask(
-                                            userTask = "Разбери текущую статистику сейфа и настроек защиты: где красавчик, а что стоит дожать?",
-                                            includeImage = false,
-                                            includeAnalytics = true,
-                                            systemOverride = ByokManager.PROMPT_ANALYTICS
-                                        )
+                                        if (hasKey && isOnlineNow) {
+                                            executeTask(
+                                                userTask = "Разбери текущую статистику сейфа и настроек защиты: где красавчик, а что стоит дожать?",
+                                                includeImage = false,
+                                                includeAnalytics = true,
+                                                systemOverride = ByokManager.PROMPT_ANALYTICS
+                                            )
+                                        } else {
+                                            val offlineSummary = VaultAnalytics.buildTelemetrySummaryForAi(context)
+                                            ByokManager.addChatEntry(
+                                                ByokManager.AiChatEntry(
+                                                    modelId = "ОФЛАЙН ТЕЛЕМЕТРИЯ",
+                                                    userTask = "Аудит статистики сейфа и защиты (без сети/ключа)",
+                                                    replyText = offlineSummary,
+                                                    hadImage = false,
+                                                    latencyMs = 0L,
+                                                    totalTokens = 0,
+                                                    isError = false,
+                                                    engineBadge = "📊 ЛОКАЛЬНАЯ СТАТИСТИКА"
+                                                )
+                                            )
+                                            refreshTelemetry()
+                                        }
                                     },
-                                    enabled = hasKey && !isGenerating,
+                                    enabled = !isGenerating,
                                     colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
                                     shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("vika_analyze_stats_btn")
                                 ) {
-                                    Text("🧠 ВИКА, РАЗБЕРИ СТАТИСТИКУ", color = Color.White, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text(
+                                        if (hasKey && isOnlineNow) "🧠 ВИКА, РАЗБЕРИ СТАТИСТИКУ" else "📊 РАЗБРАТЬ СТАТИСТИКУ (ОФЛАЙН)",
+                                        color = Color.White,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
                                 }
                             }
                         }
@@ -983,7 +1144,6 @@ fun VikaAiSheet(
                                         if (raw.isNotEmpty()) {
                                             val chars = raw.toCharArray()
                                             ByokManager.saveKey(context, chars.clone())
-                                            hasKey = true
                                             apiKeyInput = ""
                                             triggerModelDiscovery(chars)
                                         }
@@ -1013,9 +1173,6 @@ fun VikaAiSheet(
                                     Button(
                                         onClick = {
                                             ByokManager.deleteKey(context)
-                                            hasKey = false
-                                            discoveredModels = emptyList()
-                                            modelStatusText = "Ключ удалён из KeyStore"
                                             refreshTelemetry()
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberRed.copy(alpha = 0.85f)),
@@ -1085,7 +1242,6 @@ fun VikaAiSheet(
                                                 .background(if (isCur) CyberGreen.copy(alpha = 0.16f) else SheetCard)
                                                 .border(1.dp, if (isCur) CyberGreen else SheetBorder, RoundedCornerShape(10.dp))
                                                 .clickable {
-                                                    selectedModel = m.id
                                                     ByokManager.saveModelName(context, m.id)
                                                     onStatusMessage("МОДЕЛЬ: ${m.id}")
                                                 }
@@ -1139,7 +1295,6 @@ fun VikaAiSheet(
                                     onClick = {
                                         val clean = manualModelInput.trim()
                                         if (clean.isNotEmpty()) {
-                                            selectedModel = clean
                                             ByokManager.saveModelName(context, clean)
                                             manualModelInput = ""
                                             onStatusMessage("МОДЕЛЬ ЗАДАНА: $clean")
@@ -1164,8 +1319,7 @@ fun VikaAiSheet(
                                 Text("3. ПРОМПТ ВИКИ (ПО УМОЛЧАНИЮ)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 TextButton(
                                     onClick = {
-                                        customPrompt = ByokManager.DEFAULT_PROMPT
-                                        ByokManager.saveCustomPrompt(context, customPrompt)
+                                        ByokManager.saveCustomPrompt(context, ByokManager.DEFAULT_PROMPT)
                                         onStatusMessage("ПРОМПТ СБРОШЕН НА БАЗУ ВИКИ")
                                     }
                                 ) {
@@ -1196,7 +1350,6 @@ fun VikaAiSheet(
                                             .background(CyberCyan.copy(alpha = 0.14f))
                                             .border(1.dp, CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
                                             .clickable {
-                                                customPrompt = pText
                                                 ByokManager.saveCustomPrompt(context, pText)
                                                 onStatusMessage("ПРОМПТ: $title")
                                             }
@@ -1208,7 +1361,6 @@ fun VikaAiSheet(
                             OutlinedTextField(
                                 value = customPrompt,
                                 onValueChange = {
-                                    customPrompt = it
                                     ByokManager.saveCustomPrompt(context, it)
                                 },
                                 modifier = Modifier.fillMaxWidth().height(130.dp),
@@ -1219,6 +1371,63 @@ fun VikaAiSheet(
                                     unfocusedTextColor = Color.White
                                 )
                             )
+
+                            HorizontalDivider(color = SheetBorder)
+
+                            // Section 4: Sanitized HTTP Diagnostic Logs (ZERO API Key Exposure)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "4. HTTP-ЖУРНАЛ API (${httpLogs.size}, БЕЗ КЛЮЧЕЙ)",
+                                    color = CyberCyan,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                                if (httpLogs.isNotEmpty()) {
+                                    TextButton(onClick = {
+                                        val txt = httpLogs.joinToString("\n") { l ->
+                                            val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(l.timestampMs))
+                                            "[$ts] ${l.method} ${l.endpoint} -> HTTP ${l.httpCode} (${l.latencyMs}ms): ${l.detail}"
+                                        }
+                                        SecureClipboard.copySensitive(context, "Zver Gemini HTTP Log", txt)
+                                        onStatusMessage("HTTP-ЖУРНАЛ СКОПИРОВАН (45с)")
+                                    }) {
+                                        Text("КОПИРОВАТЬ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                    }
+                                }
+                            }
+                            if (httpLogs.isEmpty()) {
+                                Text(
+                                    "Пока нет HTTP-вызовов в текущей сессии.",
+                                    color = CyberMuted,
+                                    fontSize = 10.sp
+                                )
+                            } else {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(SheetCard, RoundedCornerShape(8.dp))
+                                        .border(1.dp, SheetBorder, RoundedCornerShape(8.dp))
+                                        .padding(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    httpLogs.take(10).forEach { l ->
+                                        val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(l.timestampMs))
+                                        val codeColor = if (l.httpCode in 200..299) CyberGreen else CyberRed
+                                        Text(
+                                            text = "[$ts] HTTP ${l.httpCode} (${l.latencyMs}мс) ${l.method} ${l.endpoint}\n  ${l.detail}",
+                                            color = codeColor,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 9.sp,
+                                            lineHeight = 12.sp
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -107,6 +107,8 @@ fun GhostVaultDialog(
     var showPrivacyEditor by remember { mutableStateOf(false) }
     var showVikaAi by remember { mutableStateOf(false) }
     var auditDialogReport by remember { mutableStateOf<ExifStripper.AuditReport?>(null) }
+    var vaultDiagReportText by remember { mutableStateOf<String?>(null) }
+    var isRunningVaultDiag by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
     val scrambleEnabled = remember { ZverPrefs.isPinScrambleEnabled(context) }
@@ -656,6 +658,58 @@ fun GhostVaultDialog(
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
+                            } else if (selectedFile != null) {
+                                val failedFile = selectedFile!!
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(CyberSurface)
+                                        .border(1.dp, CyberRed.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                                        .padding(16.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(Icons.Default.Lock, contentDescription = "Ошибка ключа", tint = CyberRed, modifier = Modifier.size(34.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = statusMessage ?: "Ошибка расшифровки (активный ключ: ${GhostCryptoVault.getActiveVaultKeySourceLabel(context)})",
+                                        color = CyberRed,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Button(
+                                        onClick = {
+                                            isRunningVaultDiag = true
+                                            scope.launch {
+                                                val d = withContext(Dispatchers.IO) {
+                                                    GhostCryptoVault.diagnoseDecryptKeySource(context, failedFile)
+                                                }
+                                                isRunningVaultDiag = false
+                                                vaultDiagReportText = buildString {
+                                                    appendLine("READ-ONLY ДИАГНОСТИКА ФАЙЛА (оригинал НЕ изменён):")
+                                                    appendLine("• Файл: ${d.headerInfo.fileName}")
+                                                    appendLine("• Размер: ${d.headerInfo.sizeBytes} Б (шифротекст ${d.headerInfo.ciphertextBytes} Б)")
+                                                    appendLine("• Заголовок GCF1: ${if (d.headerInfo.hasValidMagic) "OK" else "ОШИБКА"}")
+                                                    appendLine("• IV: ${d.headerInfo.ivHex}")
+                                                    appendLine("• Подошедший ключ: ${d.matchedKeyKind.labelRu}")
+                                                    if (d.plaintextBytesLength > 0) {
+                                                        appendLine("• Расшифровано в ОЗУ: ${d.plaintextBytesLength} Б")
+                                                    }
+                                                    d.errorDetail?.let { appendLine("• Детали: $it") }
+                                                }
+                                            }
+                                        },
+                                        enabled = !isRunningVaultDiag,
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
+                                        modifier = Modifier.testTag("vault_diagnose_single_btn")
+                                    ) {
+                                        Text("READ-ONLY ДИАГНОСТИКА КЛЮЧА", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    }
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(6.dp))
@@ -828,6 +882,79 @@ fun GhostVaultDialog(
                             }
                         }
 
+                        if (vaultFiles.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (!isRunningVaultDiag) {
+                                            isRunningVaultDiag = true
+                                            scope.launch {
+                                                val list = withContext(Dispatchers.IO) {
+                                                    GhostCryptoVault.diagnoseVaultDirectory(context)
+                                                }
+                                                isRunningVaultDiag = false
+                                                val grouped = list.groupingBy { it.matchedKeyKind }.eachCount()
+                                                vaultDiagReportText = buildString {
+                                                    appendLine("READ-ONLY ДИАГНОСТИКА СЕЙФА (${list.size} файлов)")
+                                                    appendLine("Оригиналы НЕ изменялись и НЕ перезаписывались.")
+                                                    appendLine("Активный ключ сессии: ${GhostCryptoVault.getActiveVaultKeySourceLabel(context)}")
+                                                    appendLine()
+                                                    grouped.forEach { (kind, count) ->
+                                                        appendLine("• ${kind.labelRu}: $count шт")
+                                                    }
+                                                    appendLine()
+                                                    list.take(35).forEach { d ->
+                                                        appendLine("- ${d.file.name}: ${d.matchedKeyKind.labelRu} (${d.headerInfo.sizeBytes / 1024} КБ)")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    enabled = !isRunningVaultDiag,
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).height(44.dp).testTag("vault_diagnose_all_btn")
+                                ) {
+                                    Text(
+                                        if (isRunningVaultDiag) "СКАН..." else "🩺 КЛЮЧИ (${vaultFiles.size})",
+                                        color = CyberCyan,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            try {
+                                                val res = withContext(Dispatchers.IO) {
+                                                    val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                                                    val bDir = File(context.noBackupFilesDir, "vault_backup_$ts")
+                                                    GhostCryptoVault.backupVaultDirectoryReadOnly(context, GhostCryptoVault.activeProfile, bDir)
+                                                }
+                                                statusMessage = "БЭКАП (READ-ONLY): ${res.copiedFilesCount} ФАЙЛОВ (${res.copiedBytes / 1024} КБ)"
+                                            } catch (e: Exception) {
+                                                statusMessage = "ОШИБКА БЭКАПА: ${e.message}"
+                                            }
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).height(44.dp).testTag("vault_backup_readonly_btn")
+                                ) {
+                                    Text(
+                                        "📦 БЭКАП (КОПИЯ)",
+                                        color = CyberGreen,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
                             onClick = { showWipeConfirm = true },
@@ -841,6 +968,47 @@ fun GhostVaultDialog(
                         }
                     }
                 }
+            }
+
+            vaultDiagReportText?.let { diagText ->
+                AlertDialog(
+                    onDismissRequest = { vaultDiagReportText = null },
+                    title = {
+                        Text(
+                            "READ-ONLY ДИАГНОСТИКА СЕЙФА",
+                            color = CyberCyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    },
+                    text = {
+                        Column(modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                            Text(
+                                text = diagText,
+                                color = Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            com.example.security.SecureClipboard.copySensitive(context, "Zver Vault Diag", diagText)
+                            statusMessage = "ОТЧЁТ ДИАГНОСТИКИ СКОПИРОВАН (45с)"
+                            vaultDiagReportText = null
+                        }) {
+                            Text("КОПИРОВАТЬ", color = CyberGreen, fontFamily = FontFamily.Monospace)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { vaultDiagReportText = null }) {
+                            Text("ЗАКРЫТЬ", color = CyberMuted, fontFamily = FontFamily.Monospace)
+                        }
+                    },
+                    containerColor = CyberSurface
+                )
             }
 
             if (showWipeConfirm) {
