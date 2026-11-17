@@ -12,7 +12,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -349,5 +351,428 @@ fun TacticalReticle(modifier: Modifier = Modifier) {
         drawLine(cornerColor, Offset(cx, cy - reticleRadius), Offset(cx, cy - reticleRadius + tickLen), strokeW)
         drawLine(cornerColor, Offset(cx, cy + reticleRadius - tickLen), Offset(cx, cy + reticleRadius), strokeW)
         drawCircle(color = HudGreen.copy(alpha = 0.5f), radius = 2.5.dp.toPx(), center = Offset(cx, cy))
+    }
+}
+
+/**
+ * Live 32-bin Luma Histogram widget for viewfinder HUD.
+ */
+@Composable
+fun LiveHistogramOverlay(
+    bins32: FloatArray,
+    overexposedPct: Int,
+    underexposedPct: Int,
+    meanLuma: Int,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .width(142.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF070B0E).copy(alpha = 0.72f))
+            .border(1.dp, HudGreen.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+            .padding(6.dp)
+            .testTag("live_histogram_overlay")
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+        ) {
+            val count = bins32.size.coerceAtLeast(1)
+            val barW = size.width / count.toFloat()
+            // Subtle baseline
+            drawLine(
+                color = Color.White.copy(alpha = 0.15f),
+                start = Offset(0f, size.height),
+                end = Offset(size.width, size.height),
+                strokeWidth = 1.dp.toPx()
+            )
+            for (i in 0 until count) {
+                val hRatio = bins32[i].coerceIn(0f, 1f)
+                val barH = hRatio * size.height
+                val barColor = when {
+                    i >= count - 3 && overexposedPct > 5 -> HudRed
+                    i <= 2 && underexposedPct > 15 -> HudCyan
+                    else -> HudGreen.copy(alpha = 0.85f)
+                }
+                drawRect(
+                    color = barColor,
+                    topLeft = Offset(i * barW + 0.5f, size.height - barH),
+                    size = androidx.compose.ui.geometry.Size((barW - 1f).coerceAtLeast(1f), barH)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(3.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Y:$meanLuma",
+                color = Color.White,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 8.sp
+            )
+            Text(
+                text = "▼$underexposedPct% ▲$overexposedPct%",
+                color = if (overexposedPct > 8) HudRed else HudGreen,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 8.sp
+            )
+        }
+    }
+}
+
+/**
+ * Animated diagonal Zebra Overexposure Highlight Overlay from Y-plane hotspots.
+ */
+@Composable
+fun ZebraExposureOverlay(
+    zebraHotspots: List<Offset>,
+    overexposedPct: Int,
+    threshold: Int,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "zebraAnim")
+    val phase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 12f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(700, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "zebraPhase"
+    )
+
+    Box(modifier = modifier.testTag("zebra_exposure_overlay")) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val cellSize = 16.dp.toPx()
+            val half = cellSize * 0.5f
+            val stripeShift = (phase % 8f)
+            for (pt in zebraHotspots) {
+                val cx = pt.x * size.width
+                val cy = pt.y * size.height
+                drawLine(
+                    color = HudRed.copy(alpha = 0.78f),
+                    start = Offset(cx - half + stripeShift * 0.3f, cy + half),
+                    end = Offset(cx + half + stripeShift * 0.3f, cy - half),
+                    strokeWidth = 2.dp.toPx()
+                )
+                drawLine(
+                    color = HudYellow.copy(alpha = 0.55f),
+                    start = Offset(cx - half, cy),
+                    end = Offset(cx, cy - half),
+                    strokeWidth = 1.5.dp.toPx()
+                )
+            }
+        }
+        if (overexposedPct > 0) {
+            Text(
+                text = "ZEBRA≥$threshold: $overexposedPct% ПЕРЕСВЕТ",
+                color = if (overexposedPct > 10) HudRed else HudYellow,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.sp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 74.dp, end = 14.dp)
+                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Collapsible Camera2 Pro Control Deck:
+ * - EV slider within factual HAL evRange
+ * - White Balance presets (AwbPreset)
+ * - Manual Focus normalized slider (0=Infinity .. 1=Macro) when supported
+ * - ISO & Shutter presets when HAL supports MANUAL_SENSOR
+ * - AE-L lock toggle, Photo IQ preset selector, Histogram & Zebra toggles
+ */
+@Composable
+fun ProCameraControlPanel(
+    profile: com.example.camera.CameraCapabilityProfiler.CameraProProfile,
+    exposureIndex: Int,
+    onExposureIndexChange: (Int) -> Unit,
+    awbPreset: com.example.camera.CameraCapabilityProfiler.AwbPreset,
+    onAwbPresetChange: (com.example.camera.CameraCapabilityProfiler.AwbPreset) -> Unit,
+    manualFocusNorm: Float?,
+    onManualFocusChange: (Float?) -> Unit,
+    isoOverride: Int?,
+    onIsoChange: (Int?) -> Unit,
+    shutterNsOverride: Long?,
+    onShutterNsChange: (Long?) -> Unit,
+    isAeLocked: Boolean,
+    onAeLockChange: (Boolean) -> Unit,
+    photoIqProfile: com.example.camera.PhotoIqEngine.PhotoIqProfile,
+    onPhotoIqChange: (com.example.camera.PhotoIqEngine.PhotoIqProfile) -> Unit,
+    isHistogramEnabled: Boolean,
+    onToggleHistogram: () -> Unit,
+    isZebraEnabled: Boolean,
+    onToggleZebra: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF0A1015).copy(alpha = 0.90f))
+            .border(1.dp, HudGreen.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .testTag("pro_camera_panel"),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        // Header telemetry strip
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "PRO HAL:${profile.hardwareLevelName} • ${profile.socModel}",
+                color = HudCyan,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.sp
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ProChip(
+                    label = "ГИСТ",
+                    selected = isHistogramEnabled,
+                    accent = HudGreen,
+                    modifier = Modifier.testTag("pro_toggle_histogram"),
+                    onClick = onToggleHistogram
+                )
+                ProChip(
+                    label = "ZEBRA",
+                    selected = isZebraEnabled,
+                    accent = HudYellow,
+                    modifier = Modifier.testTag("pro_toggle_zebra"),
+                    onClick = onToggleZebra
+                )
+                if (profile.supportsAeLock) {
+                    ProChip(
+                        label = if (isAeLocked) "AE-L 🔒" else "AE-L",
+                        selected = isAeLocked,
+                        accent = HudRed,
+                        modifier = Modifier.testTag("pro_toggle_ael"),
+                        onClick = { onAeLockChange(!isAeLocked) }
+                    )
+                }
+            }
+        }
+
+        // Photo IQ Row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("IQ:", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+            com.example.camera.PhotoIqEngine.PhotoIqProfile.values().forEach { iq ->
+                ProChip(
+                    label = iq.badgeRu,
+                    selected = photoIqProfile == iq,
+                    accent = HudGreen,
+                    modifier = Modifier.testTag("pro_iq_${iq.name.lowercase()}"),
+                    onClick = { onPhotoIqChange(iq) }
+                )
+            }
+        }
+
+        // AWB Presets Row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("WB:", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+            com.example.camera.CameraCapabilityProfiler.AwbPreset.values().forEach { preset ->
+                val available = profile.availableAwbModes.contains(preset.camera2Mode) || preset == com.example.camera.CameraCapabilityProfiler.AwbPreset.AUTO
+                if (available) {
+                    ProChip(
+                        label = preset.labelRu,
+                        selected = awbPreset == preset,
+                        accent = HudCyan,
+                        modifier = Modifier.testTag("pro_wb_${preset.name.lowercase()}"),
+                        onClick = { onAwbPresetChange(preset) }
+                    )
+                }
+            }
+        }
+
+        // EV Compensation Slider
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val evVal = exposureIndex * profile.evStep
+            Text(
+                text = String.format(Locale.US, "EV %+.1f", evVal),
+                color = if (exposureIndex != 0) HudYellow else Color.White,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.sp,
+                modifier = Modifier.width(58.dp)
+            )
+            androidx.compose.material3.Slider(
+                value = exposureIndex.toFloat(),
+                onValueChange = { v -> onExposureIndexChange(kotlin.math.round(v).toInt()) },
+                valueRange = profile.evRange.first.toFloat()..profile.evRange.last.toFloat(),
+                steps = (profile.evRange.last - profile.evRange.first - 1).coerceAtLeast(0),
+                colors = androidx.compose.material3.SliderDefaults.colors(
+                    thumbColor = HudYellow,
+                    activeTrackColor = HudYellow,
+                    inactiveTrackColor = Color.DarkGray
+                ),
+                modifier = Modifier.weight(1f).height(26.dp).testTag("pro_ev_slider")
+            )
+        }
+
+        // Manual Focus Slider (only shown if lens supports AF_MODE_OFF & non-fixed focus)
+        if (profile.isManualFocusSupported) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ProChip(
+                    label = if (manualFocusNorm == null) "AF" else "MF",
+                    selected = manualFocusNorm != null,
+                    accent = HudCyan,
+                    modifier = Modifier.testTag("pro_mf_toggle"),
+                    onClick = {
+                        onManualFocusChange(if (manualFocusNorm == null) 0.5f else null)
+                    }
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                androidx.compose.material3.Slider(
+                    value = manualFocusNorm ?: 0f,
+                    onValueChange = { onManualFocusChange(it.coerceIn(0f, 1f)) },
+                    valueRange = 0f..1f,
+                    colors = androidx.compose.material3.SliderDefaults.colors(
+                        thumbColor = HudCyan,
+                        activeTrackColor = HudCyan,
+                        inactiveTrackColor = Color.DarkGray
+                    ),
+                    modifier = Modifier.weight(1f).height(26.dp).testTag("pro_mf_slider")
+                )
+                Text(
+                    text = if (manualFocusNorm == null) "АВТО" else "${(manualFocusNorm * 100).toInt()}%",
+                    color = HudCyan,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    modifier = Modifier.width(34.dp)
+                )
+            }
+        }
+
+        // Manual ISO & Shutter (when HAL supports MANUAL_SENSOR)
+        if (profile.supportsManualExposure && profile.isoRange != null && profile.exposureTimeNsRange != null) {
+            val isoSteps = remember(profile.isoRange) {
+                listOf(100, 200, 400, 800, 1600, 3200).filter { it in profile.isoRange }
+            }
+            val shutterSteps = remember(profile.exposureTimeNsRange) {
+                listOf(
+                    1_000_000L,   // 1/1000
+                    4_000_000L,   // 1/250
+                    16_666_666L,  // 1/60
+                    33_333_333L,  // 1/30
+                    100_000_000L, // 1/10
+                    250_000_000L  // 1/4
+                ).filter { it in profile.exposureTimeNsRange }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("ISO:", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                ProChip(
+                    label = "AUTO",
+                    selected = isoOverride == null,
+                    accent = HudGreen,
+                    modifier = Modifier.testTag("pro_iso_auto"),
+                    onClick = { onIsoChange(null) }
+                )
+                isoSteps.forEach { isoVal ->
+                    ProChip(
+                        label = isoVal.toString(),
+                        selected = isoOverride == isoVal,
+                        accent = HudGreen,
+                        onClick = { onIsoChange(isoVal) }
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("S:", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                ProChip(
+                    label = "AUTO",
+                    selected = shutterNsOverride == null,
+                    accent = HudYellow,
+                    modifier = Modifier.testTag("pro_shutter_auto"),
+                    onClick = { onShutterNsChange(null) }
+                )
+                shutterSteps.forEach { ns ->
+                    ProChip(
+                        label = com.example.camera.CameraCapabilityProfiler.formatShutterSpeed(ns),
+                        selected = shutterNsOverride == ns,
+                        accent = HudYellow,
+                        onClick = { onShutterNsChange(ns) }
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = profile.halSafetyNoteRu,
+                color = Color(0xFF8FA3B0),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 8.sp,
+                lineHeight = 11.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProChip(
+    label: String,
+    selected: Boolean,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .defaultMinSize(minWidth = 44.dp, minHeight = 32.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (selected) accent.copy(alpha = 0.25f) else Color(0xFF141D26))
+            .border(1.dp, if (selected) accent else Color(0xFF283A4A), RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (selected) accent else Color(0xFF9FB0BE),
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp
+        )
     }
 }

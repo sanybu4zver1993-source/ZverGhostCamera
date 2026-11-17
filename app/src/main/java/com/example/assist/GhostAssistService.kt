@@ -8,20 +8,20 @@ import android.util.Log
 
 /**
  * GhostAssistService:
- * Runs in an isolated process (:assist).
- * Kept completely separated from the core camera process (:core).
- * Never has direct access to the Camera hardware or local vault encryption keys.
+ * Auxiliary companion worker service running in the `:assist` Android process.
+ * Does not hold CameraX handles or vault PINs directly; provides active worker telemetry
+ * for the online BYOK assistant perimeter indicator.
  */
 class GhostAssistService : Service() {
     private val binder = LocalBinder()
 
     class LocalBinder : Binder() {
-        fun getServiceStatus(): String = "ONLINE (:assist process isolated)"
+        fun getServiceStatus(): String = "ACTIVE (:assist worker process)"
     }
 
     override fun onCreate() {
         super.onCreate()
-        Log.i("GhostAssist", "GhostAssistService started in isolated :assist process (PID ${android.os.Process.myPid()})")
+        Log.i("GhostAssist", "GhostAssistService active in :assist worker process (PID ${android.os.Process.myPid()})")
     }
 
     override fun onBind(intent: Intent?): IBinder = binder

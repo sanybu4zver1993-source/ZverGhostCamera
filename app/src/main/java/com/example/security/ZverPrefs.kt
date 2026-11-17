@@ -29,6 +29,75 @@ object ZverPrefs {
     private const val KEY_LAST_PULSE_BPM = "visor_last_pulse_bpm"
     private const val KEY_LAST_PULSE_TS = "visor_last_pulse_ts"
     private const val KEY_LAST_HRV_MS = "visor_last_hrv_ms"
+    private const val KEY_PHOTO_IQ_PROFILE = "photo_iq_profile"
+    private const val KEY_ZOOM_IQ_ENABLED = "zoom_iq_enabled"
+    private const val KEY_ZEBRA_THRESHOLD = "zebra_luma_threshold"
+    private const val KEY_SMART_COMPRESSION = "smart_compression_enabled"
+    private const val KEY_MULTI_FRAME_MODE = "multi_frame_stack_mode"
+
+    fun isSmartCompressionEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SMART_COMPRESSION, true)
+
+    fun setSmartCompressionEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_SMART_COMPRESSION, enabled).apply()
+    }
+
+    fun getMultiFrameMode(context: Context): com.example.camera.MultiFrameStacker.StackMode? {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_MULTI_FRAME_MODE, null) ?: return null
+        return try {
+            com.example.camera.MultiFrameStacker.StackMode.valueOf(raw)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun setMultiFrameMode(context: Context, mode: com.example.camera.MultiFrameStacker.StackMode?) {
+        val editor = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+        if (mode == null) {
+            editor.remove(KEY_MULTI_FRAME_MODE)
+        } else {
+            editor.putString(KEY_MULTI_FRAME_MODE, mode.name)
+        }
+        editor.apply()
+    }
+
+    fun getPhotoIqProfile(context: Context): com.example.camera.PhotoIqEngine.PhotoIqProfile {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_PHOTO_IQ_PROFILE, com.example.camera.PhotoIqEngine.PhotoIqProfile.AUTO_IQ.name)
+        return try {
+            com.example.camera.PhotoIqEngine.PhotoIqProfile.valueOf(
+                raw ?: com.example.camera.PhotoIqEngine.PhotoIqProfile.AUTO_IQ.name
+            )
+        } catch (_: Exception) {
+            com.example.camera.PhotoIqEngine.PhotoIqProfile.AUTO_IQ
+        }
+    }
+
+    fun setPhotoIqProfile(context: Context, profile: com.example.camera.PhotoIqEngine.PhotoIqProfile) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(KEY_PHOTO_IQ_PROFILE, profile.name).apply()
+    }
+
+    fun isZoomIqEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ZOOM_IQ_ENABLED, true)
+
+    fun setZoomIqEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_ZOOM_IQ_ENABLED, enabled).apply()
+    }
+
+    fun getZebraThreshold(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_ZEBRA_THRESHOLD, 240).coerceIn(210, 252)
+
+    fun setZebraThreshold(context: Context, threshold: Int) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putInt(KEY_ZEBRA_THRESHOLD, threshold.coerceIn(210, 252)).apply()
+    }
 
     fun getCompressionPreset(context: Context): ExifStripper.CompressionPreset {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

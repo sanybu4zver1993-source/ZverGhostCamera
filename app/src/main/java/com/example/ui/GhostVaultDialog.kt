@@ -60,7 +60,8 @@ private val CyberMuted = Color(0xFF8A9BA8)
 
 private enum class VaultTab {
     DISK,
-    RAM
+    RAM,
+    MONOLITH
 }
 
 @Composable
@@ -95,9 +96,12 @@ fun GhostVaultDialog(
 
     var vaultFiles by remember { mutableStateOf(emptyList<File>()) }
     var ramShots by remember { mutableStateOf(GhostCryptoVault.listRamShots()) }
+    var monoRecords by remember { mutableStateOf(emptyList<MonoVaultEngine.StoredRecord>()) }
 
     var selectedFile by remember { mutableStateOf<File?>(null) }
     var selectedRamId by remember { mutableStateOf<String?>(null) }
+    var selectedMonoId by remember { mutableStateOf<String?>(null) }
+    var selectedMonoSigValid by remember { mutableStateOf<Boolean?>(null) }
     var decryptedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var decryptedVideoFile by remember { mutableStateOf<File?>(null) }
     var decryptedRawBytes by remember { mutableStateOf<ByteArray?>(null) }
@@ -105,6 +109,8 @@ fun GhostVaultDialog(
 
     var showWipeConfirm by remember { mutableStateOf(false) }
     var showPrivacyEditor by remember { mutableStateOf(false) }
+    var showPhotoEditor by remember { mutableStateOf(false) }
+    var showPcbLab by remember { mutableStateOf(false) }
     var showVikaAi by remember { mutableStateOf(false) }
     var auditDialogReport by remember { mutableStateOf<ExifStripper.AuditReport?>(null) }
     var vaultDiagReportText by remember { mutableStateOf<String?>(null) }
@@ -122,6 +128,19 @@ fun GhostVaultDialog(
         }
     }
 
+    LaunchedEffect(unlockedProfile) {
+        if (unlockedProfile != null) {
+            val vol = if (unlockedProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                MonoVaultEngine.VolumeType.MASTER
+            } else {
+                MonoVaultEngine.VolumeType.DECOY
+            }
+            monoRecords = withContext(Dispatchers.IO) {
+                MonoVaultEngine.listRecords(context, vol)
+            }
+        }
+    }
+
     fun cleanupPreviewMedia() {
         decryptedBitmap?.recycle()
         decryptedBitmap = null
@@ -134,6 +153,16 @@ fun GhostVaultDialog(
     fun refreshFiles() {
         vaultFiles = GhostCryptoVault.listVaultFiles(context)
         ramShots = GhostCryptoVault.listRamShots()
+        scope.launch {
+            val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                MonoVaultEngine.VolumeType.MASTER
+            } else {
+                MonoVaultEngine.VolumeType.DECOY
+            }
+            monoRecords = withContext(Dispatchers.IO) {
+                MonoVaultEngine.listRecords(context, vol)
+            }
+        }
         onVaultUpdated()
     }
 
@@ -406,8 +435,8 @@ fun GhostVaultDialog(
                         }
                     }
 
-                    // Contour Switcher (DISK .GCF vs RAM-ONLY)
-                    if (selectedFile == null && selectedRamId == null) {
+                    // Contour Switcher (DISK .GCF vs RAM-ONLY vs MONOLITH)
+                    if (selectedFile == null && selectedRamId == null && selectedMonoId == null) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -416,7 +445,7 @@ fun GhostVaultDialog(
                         ) {
                             val diskSel = activeTab == VaultTab.DISK
                             Text(
-                                text = "ДИСК .GCF (${vaultFiles.size})",
+                                text = ".GCF (${vaultFiles.size})",
                                 color = if (diskSel) Color.Black else CyberMuted,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
@@ -432,7 +461,7 @@ fun GhostVaultDialog(
                             )
                             val ramSel = activeTab == VaultTab.RAM
                             Text(
-                                text = "ОЗУ-СЕЙФ (${ramShots.size})",
+                                text = "ОЗУ (${ramShots.size})",
                                 color = if (ramSel) Color.Black else CyberCyan,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
@@ -445,6 +474,23 @@ fun GhostVaultDialog(
                                     .border(1.dp, if (ramSel) CyberCyan else CyberBorder, RoundedCornerShape(6.dp))
                                     .clickable { activeTab = VaultTab.RAM }
                                     .padding(vertical = 6.dp)
+                            )
+                            val monoSel = activeTab == VaultTab.MONOLITH
+                            Text(
+                                text = "МОНОЛИТ (${monoRecords.size})",
+                                color = if (monoSel) Color.Black else CyberAmber,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (monoSel) CyberAmber else CyberSurface)
+                                    .border(1.dp, if (monoSel) CyberAmber else CyberBorder, RoundedCornerShape(6.dp))
+                                    .clickable { activeTab = VaultTab.MONOLITH }
+                                    .padding(vertical = 6.dp)
+                                    .testTag("vault_tab_monolith")
                             )
                         }
                     }
@@ -462,7 +508,7 @@ fun GhostVaultDialog(
                     HorizontalDivider(color = CyberBorder, thickness = 1.dp)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    val isViewingItem = selectedFile != null || selectedRamId != null
+                    val isViewingItem = selectedFile != null || selectedRamId != null || selectedMonoId != null
                     if (isViewingItem) {
                         Column(
                             modifier = Modifier
@@ -492,6 +538,8 @@ fun GhostVaultDialog(
                                             cleanupPreviewMedia()
                                             selectedFile = null
                                             selectedRamId = null
+                                            selectedMonoId = null
+                                            selectedMonoSigValid = null
                                         }
                                         .padding(horizontal = 8.dp, vertical = 6.dp)
                                 )
@@ -507,6 +555,30 @@ fun GhostVaultDialog(
                                         Icon(Icons.Default.Face, contentDescription = "Маска", modifier = Modifier.size(14.dp), tint = CyberCyan)
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text("МАСКА", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberCyan)
+                                    }
+
+                                    Button(
+                                        onClick = { showPhotoEditor = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberAmber.copy(alpha = 0.2f)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_open_editor")
+                                    ) {
+                                        Icon(Icons.Default.Tune, contentDescription = "Редактор", modifier = Modifier.size(14.dp), tint = CyberAmber)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("РЕДАКТОР", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberAmber)
+                                    }
+
+                                    Button(
+                                        onClick = { showPcbLab = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan.copy(alpha = 0.16f)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_open_pcb_lab")
+                                    ) {
+                                        Icon(Icons.Default.Memory, contentDescription = "PCB Лаб", modifier = Modifier.size(14.dp), tint = CyberCyan)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("ПЛАТА", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberCyan)
                                     }
                                 }
 
@@ -552,13 +624,19 @@ fun GhostVaultDialog(
                                                 val isVideo = selectedFile?.let { GhostCryptoVault.isVideoFile(it) }
                                                     ?: (selectedRamId?.let { id -> ramShots.firstOrNull { it.id == id }?.isVideo } ?: false)
                                                 val shareTmp = withContext(Dispatchers.IO) {
-                                                    if (selectedFile != null) {
-                                                        GhostCryptoVault.createEphemeralShareFile(context, selectedFile!!)
-                                                    } else {
-                                                        val bytes = GhostCryptoVault.getRamShotBytes(selectedRamId!!)
-                                                            ?: throw IllegalStateException("Кадр не найден в ОЗУ")
-                                                        val ext = GhostCryptoVault.detectMediaExtension(bytes, isVideo)
-                                                        GhostCryptoVault.createEphemeralShareBytes(context, bytes, ext)
+                                                    when {
+                                                        selectedFile != null -> GhostCryptoVault.createEphemeralShareFile(context, selectedFile!!)
+                                                        selectedMonoId != null -> {
+                                                            val bytes = decryptedRawBytes ?: throw IllegalStateException("Блок монолита не расшифрован")
+                                                            val ext = GhostCryptoVault.detectMediaExtension(bytes, isVideo = false)
+                                                            GhostCryptoVault.createEphemeralShareBytes(context, bytes, ext)
+                                                        }
+                                                        else -> {
+                                                            val bytes = GhostCryptoVault.getRamShotBytes(selectedRamId!!)
+                                                                ?: throw IllegalStateException("Кадр не найден в ОЗУ")
+                                                            val ext = GhostCryptoVault.detectMediaExtension(bytes, isVideo)
+                                                            GhostCryptoVault.createEphemeralShareBytes(context, bytes, ext)
+                                                        }
                                                     }
                                                 }
                                                 val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", shareTmp)
@@ -588,23 +666,25 @@ fun GhostVaultDialog(
                                     Text("ОТПРАВИТЬ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
                                 }
 
-                                Button(
-                                    onClick = {
-                                        selectedFile?.let { f -> GhostCryptoVault.shredFile(f) }
-                                        selectedRamId?.let { id -> GhostCryptoVault.shredRamShot(id) }
-                                        cleanupPreviewMedia()
-                                        selectedFile = null
-                                        selectedRamId = null
-                                        statusMessage = "ФАЙЛ УНИЧТОЖЕН"
-                                        refreshFiles()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
-                                    shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("СТЕРЕТЬ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
+                                if (selectedMonoId == null) {
+                                    Button(
+                                        onClick = {
+                                            selectedFile?.let { f -> GhostCryptoVault.shredFile(f) }
+                                            selectedRamId?.let { id -> GhostCryptoVault.shredRamShot(id) }
+                                            cleanupPreviewMedia()
+                                            selectedFile = null
+                                            selectedRamId = null
+                                            statusMessage = "ФАЙЛ УНИЧТОЖЕН"
+                                            refreshFiles()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("СТЕРЕТЬ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.White)
+                                    }
                                 }
                             }
 
@@ -714,15 +794,112 @@ fun GhostVaultDialog(
 
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = if (selectedRamId != null) {
-                                    "КОНТУР: ТОЛЬКО ОЗУ // 0 БАЙТ НА ФЛЕШ-ПАМЯТИ"
-                                } else {
-                                    "AES-256-GCM // PBKDF2 // БЕЗ EXIF И ГАЛЕРЕИ"
+                                text = when {
+                                    selectedRamId != null -> "КОНТУР: ТОЛЬКО ОЗУ // 0 БАЙТ НА ФЛЕШ-ПАМЯТИ"
+                                    selectedMonoId != null -> {
+                                        val sigStr = when (selectedMonoSigValid) {
+                                            true -> "ECDSA P-256 ПОДПИСЬ: ВАЛИДНА"
+                                            false -> "ECDSA: ОШИБКА ПОДПИСИ!"
+                                            null -> "МОНОЛИТ AES-256-GCM"
+                                        }
+                                        "МОНОЛИТ // $sigStr // ЗАПИСЬ #$selectedMonoId"
+                                    }
+                                    else -> "AES-256-GCM // PBKDF2 // БЕЗ EXIF И ГАЛЕРЕИ"
                                 },
-                                color = CyberMuted,
+                                color = if (selectedMonoSigValid == false) CyberRed else CyberMuted,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 9.sp
                             )
+                        }
+                    } else if (activeTab == VaultTab.MONOLITH) {
+                        if (monoRecords.isEmpty()) {
+                            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "В МОНОЛИТНОМ КОНТЕЙНЕРЕ ПОКА НЕТ ЗАПИСЕЙ.\nВсе новые снимки автоматически зеркалируются в скрытую зону storage_block.bin с ECDSA-подписью.",
+                                    color = CyberMuted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                                items(monoRecords, key = { it.id }) { rec ->
+                                    val dateStr = remember(rec.timestamp) {
+                                        SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).format(Date(rec.timestamp))
+                                    }
+                                    val kb = rec.sizeBytes / 1024
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 3.dp)
+                                            .background(CyberSurface, RoundedCornerShape(6.dp))
+                                            .border(1.dp, CyberAmber.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                selectedMonoId = rec.id
+                                                selectedMonoSigValid = null
+                                                isDecrypting = true
+                                                scope.launch {
+                                                    try {
+                                                        cleanupPreviewMedia()
+                                                        val vol = if (unlockedProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                                                            MonoVaultEngine.VolumeType.MASTER
+                                                        } else {
+                                                            MonoVaultEngine.VolumeType.DECOY
+                                                        }
+                                                        val (bytes, sigOk) = withContext(Dispatchers.IO) {
+                                                            MonoVaultEngine.readRecord(context, vol, rec.id)
+                                                        }
+                                                        decryptedRawBytes = bytes
+                                                        selectedMonoSigValid = sigOk
+                                                        decryptedBitmap = withContext(Dispatchers.Default) {
+                                                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                                        }
+                                                        statusMessage = if (sigOk) {
+                                                            "МОНОЛИТ: ПОДПИСЬ ECDSA ПОДТВЕРЖДЕНА"
+                                                        } else {
+                                                            "МОНОЛИТ: ВНИМАНИЕ — ПОДПИСЬ НЕ СОВПАЛА"
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        statusMessage = "ОШИБКА МОНОЛИТА: ${e.message}"
+                                                    } finally {
+                                                        isDecrypting = false
+                                                    }
+                                                }
+                                            }
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Default.VerifiedUser, contentDescription = "Monolith Record", tint = CyberAmber, modifier = Modifier.size(18.dp))
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = "🧱 MONO_${rec.id}",
+                                                    color = CyberAmber,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 11.sp
+                                                )
+                                                Text("$dateStr | $kb КБ | AAD+ECDSA", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                            }
+                                        }
+                                        Icon(Icons.Default.Visibility, contentDescription = "Open", tint = CyberAmber, modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Button(
+                            onClick = { showWipeConfirm = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = "Crypto-Shred", tint = Color.White, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("ШРЕДЕР МОНОЛИТА И КЛЮЧЕЙ", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 11.sp)
                         }
                     } else if (activeTab == VaultTab.RAM) {
                         if (ramShots.isEmpty()) {
@@ -1042,6 +1219,30 @@ fun GhostVaultDialog(
                         statusMessage = msg
                         refreshFiles()
                     }
+                )
+            }
+
+            if (showPhotoEditor && decryptedBitmap != null) {
+                VaultPhotoEditorDialog(
+                    sourceBitmap = decryptedBitmap!!,
+                    onDismiss = { showPhotoEditor = false },
+                    onSavedCopyToVault = { msg ->
+                        showPhotoEditor = false
+                        statusMessage = msg
+                        refreshFiles()
+                    }
+                )
+            }
+
+            if (showPcbLab && decryptedBitmap != null) {
+                PcbLabDialog(
+                    initialBitmap = decryptedBitmap!!,
+                    onSavedToVault = { msg ->
+                        showPcbLab = false
+                        statusMessage = msg
+                        refreshFiles()
+                    },
+                    onDismiss = { showPcbLab = false }
                 )
             }
 

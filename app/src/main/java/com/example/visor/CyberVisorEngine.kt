@@ -34,7 +34,9 @@ enum class VisorMode(val title: String, val badgeRu: String, val hintRu: String)
     WIREFRAME_POSE("Скелет", "СКЕЛЕТ", "Рисует палочный каркас человека в темноте или со спины"),
     VEG_CHLOROPHYLL("Детектор зелени", "ХЛОРОФИЛЛ", "Отличает живые растения и траву от зелёного пластика"),
     NIGHT_GAMMA("Ночной буст", "НОЧЬ", "Вытягивает картинку из кромешной тьмы"),
-    IR_BEACON("Поиск ИК-камер", "ПОИСК ИК", "Ищет скрытые камеры и ночную подсветку по ярким точкам")
+    IR_BEACON("Поиск ИК-камер", "ПОИСК ИК", "Ищет скрытые камеры и ночную подсветку по ярким точкам"),
+    EDGE_TRACE("Дорожки ПП (CV)", "ТРАССЫ", "Выделяет контуры SMD-компонентов и медных дорожек (Sobel)"),
+    OCR_CONTRAST("Маркировка OCR", "МАРКИРОВКА", "Усиливает контраст гравировки на чипах и мелкого текста")
 }
 
 data class PosePointNorm(val x: Float, val y: Float)
@@ -169,7 +171,7 @@ class CyberVisorEngine {
         if (pixelBuffer.size != totalDst) {
             pixelBuffer = IntArray(totalDst)
         }
-        if ((mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON) && rawRgbaBuffer.size != totalDst) {
+        if ((mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.EDGE_TRACE) && rawRgbaBuffer.size != totalDst) {
             rawRgbaBuffer = IntArray(totalDst)
         }
         if (mode == VisorMode.IR_BEACON && irMaskBuffer.size != totalDst) {
@@ -317,7 +319,7 @@ class CyberVisorEngine {
                 }
 
                 val dstIdx = dy * dstW + dx
-                if (mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.SKIN_CHROMA) {
+                if (mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.SKIN_CHROMA || mode == VisorMode.EDGE_TRACE) {
                     rawRgbaBuffer[dstIdx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                 }
 
@@ -449,6 +451,38 @@ class CyberVisorEngine {
                             val dim = (r + g + b) / 9
                             (0xFF shl 24) or (dim shl 16) or (dim shl 8) or dim
                         }
+                    }
+
+                    VisorMode.EDGE_TRACE -> (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+
+                    VisorMode.OCR_CONTRAST -> {
+                        val lum = (r * 77 + g * 150 + b * 29) shr 8
+                        val stretched = (((lum - 128) * 24) / 10 + 128).coerceIn(0, 255)
+                        val boostR = min(255, (stretched * 95) / 100)
+                        val boostG = stretched
+                        val boostB = min(255, stretched + 12)
+                        (0xFF shl 24) or (boostR shl 16) or (boostG shl 8) or boostB
+                    }
+                }
+            }
+        }
+
+        if (mode == VisorMode.EDGE_TRACE && dstW >= 4 && dstH >= 4) {
+            for (y in 1 until dstH - 1) {
+                val rowOff = y * dstW
+                val upOff = (y - 1) * dstW
+                val dnOff = (y + 1) * dstW
+                for (x in 1 until dstW - 1) {
+                    val idx = rowOff + x
+                    fun lumAt(c: Int): Int = (((c ushr 16) and 0xFF) * 77 + ((c ushr 8) and 0xFF) * 150 + (c and 0xFF) * 29) shr 8
+                    val gx = abs(lumAt(rawRgbaBuffer[idx + 1]) - lumAt(rawRgbaBuffer[idx - 1]))
+                    val gy = abs(lumAt(rawRgbaBuffer[dnOff + x]) - lumAt(rawRgbaBuffer[upOff + x]))
+                    val edge = min(255, (gx + gy) * 2)
+                    val base = lumAt(rawRgbaBuffer[idx]) / 3
+                    pixelBuffer[idx] = if (edge > 36) {
+                        (0xFF shl 24) or (0 shl 16) or (edge shl 8) or min(255, edge + 40)
+                    } else {
+                        (0xFF shl 24) or (base shl 16) or (base shl 8) or base
                     }
                 }
             }

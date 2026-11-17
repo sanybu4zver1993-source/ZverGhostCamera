@@ -76,7 +76,10 @@ object ExifStripper {
         rotationDegrees: Int,
         applyDehaze: Boolean = false,
         preset: CompressionPreset = CompressionPreset.HIGH_QUALITY,
-        antiPrnu: Boolean = false
+        antiPrnu: Boolean = false,
+        photoIqProfile: PhotoIqEngine.PhotoIqProfile = PhotoIqEngine.PhotoIqProfile.OFF,
+        zoomRatio: Float = 1.0f,
+        useSmartCompression: Boolean = false
     ): ProcessedImage {
         if (rawJpeg.isEmpty() || rawJpeg.size > MAX_JPEG_INPUT_BYTES) {
             throw IOException("Invalid JPEG input size: ${rawJpeg.size} bytes")
@@ -116,12 +119,21 @@ object ExifStripper {
                 rotatedBitmap
             }
 
+            val smartQ = if (useSmartCompression) {
+                MultiFrameStacker.estimateSmartCompressionQuality(uprightBitmap, preset)
+            } else {
+                null
+            }
+
             val result = processBitmapClean(
                 sourceBitmap = uprightBitmap,
                 recycleSource = false,
                 preset = preset,
                 antiPrnu = antiPrnu,
-                applyDehaze = applyDehaze
+                applyDehaze = applyDehaze,
+                photoIqProfile = photoIqProfile,
+                zoomRatio = zoomRatio,
+                qualityOverride = smartQ
             )
 
             return ProcessedImage(
@@ -141,15 +153,18 @@ object ExifStripper {
 
     /**
      * Full clean encoding pipeline from Bitmap:
-     * Scale -> optional Anti-PRNU cascade -> optional Dehaze -> optional Adaptive Document B&W ->
-     * Clean WebP/JPEG compress -> Strip all metadata segments -> Self-Audit.
+     * Scale -> optional Photo IQ -> optional Zoom IQ -> optional Dehaze -> optional Adaptive Document B&W ->
+     * optional Anti-PRNU cascade -> Clean WebP/JPEG compress -> Strip all metadata segments -> Self-Audit.
      */
     fun processBitmapClean(
         sourceBitmap: Bitmap,
         recycleSource: Boolean = false,
         preset: CompressionPreset = CompressionPreset.BALANCED,
         antiPrnu: Boolean = true,
-        applyDehaze: Boolean = false
+        applyDehaze: Boolean = false,
+        photoIqProfile: PhotoIqEngine.PhotoIqProfile = PhotoIqEngine.PhotoIqProfile.OFF,
+        zoomRatio: Float = 1.0f,
+        qualityOverride: Int? = null
     ): CleanBitmapResult {
         var current: Bitmap = sourceBitmap
         var ownsCurrent = false
@@ -174,17 +189,27 @@ object ExifStripper {
                 replaceCurrent(scaled)
             }
 
-            // 2. Optional Dehaze contrast lift
-            if (applyDehaze) {
+            // 2. Optional Photo IQ Engine (skip extra dehaze if TEXT_CRISP already handles it)
+            if (photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF && !preset.documentBw) {
+                replaceCurrent(PhotoIqEngine.enhanceBitmap(current, photoIqProfile, recycleSource = false))
+            }
+
+            // 3. Optional Zoom Intelligence for 2x..10x digital zoom clarity
+            if (zoomRatio >= 1.8f && !preset.documentBw) {
+                replaceCurrent(ZoomIntelligence.enhanceZoomedBitmap(current, zoomRatio, recycleSource = false))
+            }
+
+            // 4. Optional Dehaze contrast lift
+            if (applyDehaze && photoIqProfile != PhotoIqEngine.PhotoIqProfile.TEXT_CRISP) {
                 replaceCurrent(applyContrastDehaze(current))
             }
 
-            // 3. Optional Document Adaptive B&W (Sauvola/Bradley style local thresholding)
+            // 5. Optional Document Adaptive B&W (Sauvola/Bradley style local thresholding)
             if (preset.documentBw) {
                 replaceCurrent(applyAdaptiveDocumentBinarization(current))
             }
 
-            // 4. Optional Anti-PRNU Cascade (skip heavy geometric warp only if tiny; otherwise break sensor alignment)
+            // 6. Optional Anti-PRNU Cascade (skip heavy geometric warp only if tiny; otherwise break sensor alignment)
             if (antiPrnu && current.width >= 64 && current.height >= 64) {
                 replaceCurrent(applyAntiPrnuCascade(current, preserveBinary = preset.documentBw))
             }
@@ -206,7 +231,8 @@ object ExifStripper {
                 Bitmap.CompressFormat.JPEG
             }
 
-            val compressedOk = current.compress(format, preset.quality, baos)
+            val targetQuality = (qualityOverride ?: preset.quality).coerceIn(20, 100)
+            val compressedOk = current.compress(format, targetQuality, baos)
             if (!compressedOk) {
                 throw IOException("Clean image compression failed")
             }

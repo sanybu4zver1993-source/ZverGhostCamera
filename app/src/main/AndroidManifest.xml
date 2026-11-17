@@ -118,6 +118,17 @@
             android:name=".assist.GhostAssistService"
             android:exported="false"
             android:process=":assist" />
+
+        <!-- Privacy Hardening: Disable background ML Kit Clearcut / DataTransport telemetry uploads -->
+        <service
+            android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery"
+            tools:node="remove" />
+        <service
+            android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService"
+            tools:node="remove" />
+        <receiver
+            android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver"
+            tools:node="remove" />
     </application>
 
 </manifest>

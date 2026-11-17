@@ -70,6 +70,14 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         val grid: IntArray
     )
 
+    data class LiveExposureTelemetry(
+        val bins32: FloatArray,
+        val overexposedPct: Int,
+        val underexposedPct: Int,
+        val meanLuma: Int,
+        val zebraHotspots: List<Offset>
+    )
+
     companion object {
         const val MICRO_BLUR_THRESHOLD = 0.075f // rad/s
         const val TRIPOD_THRESHOLD = 0.018f     // rad/s
@@ -312,6 +320,76 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         height: Int,
         rowStride: Int
     ): Int = calculateExposureMetrics(yBuffer, width, height, rowStride).first
+
+    /**
+     * Single-pass 32-bin Y-plane Histogram + Zebra hotspot sampler (<0.5 ms on Helio G85).
+     */
+    fun computeHistogramAndZebra(
+        yBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        rotationDegrees: Int = 90,
+        zebraThreshold: Int = 240,
+        collectZebra: Boolean = true,
+        maxZebraCells: Int = 220
+    ): LiveExposureTelemetry {
+        val bins = IntArray(32)
+        if (width <= 12 || height <= 12) {
+            return LiveExposureTelemetry(FloatArray(32), 0, 0, 128, emptyList())
+        }
+        val limit = yBuffer.limit()
+        var over = 0
+        var under = 0
+        var total = 0
+        var lumaSum = 0L
+        var maxBin = 1
+        val zebras = if (collectZebra) ArrayList<Offset>(96) else emptyList<Offset>()
+
+        val step = 10
+        val rot = ((rotationDegrees % 360) + 360) % 360
+        for (y in 4 until height - 4 step step) {
+            val rowOff = y * rowStride
+            for (x in 4 until width - 4 step step) {
+                val idx = rowOff + x
+                if (idx >= limit) continue
+                val lum = yBuffer.get(idx).toInt() and 0xFF
+                total++
+                lumaSum += lum
+                val bIdx = minOf(31, lum ushr 3)
+                val bc = ++bins[bIdx]
+                if (bc > maxBin) maxBin = bc
+
+                if (lum >= zebraThreshold) {
+                    over++
+                    if (collectZebra && zebras is ArrayList<Offset> && zebras.size < maxZebraCells) {
+                        val nx = x.toFloat() / width.toFloat()
+                        val ny = y.toFloat() / height.toFloat()
+                        val pt = when (rot) {
+                            90 -> Offset(1f - ny, nx)
+                            180 -> Offset(1f - nx, 1f - ny)
+                            270 -> Offset(ny, 1f - nx)
+                            else -> Offset(nx, ny)
+                        }
+                        zebras.add(pt)
+                    }
+                } else if (lum <= 16) {
+                    under++
+                }
+            }
+        }
+        if (total == 0) {
+            return LiveExposureTelemetry(FloatArray(32), 0, 0, 128, emptyList())
+        }
+        val normBins = FloatArray(32) { i -> bins[i].toFloat() / maxBin.toFloat() }
+        return LiveExposureTelemetry(
+            bins32 = normBins,
+            overexposedPct = (over * 100) / total,
+            underexposedPct = (under * 100) / total,
+            meanLuma = (lumaSum / total).toInt().coerceIn(0, 255),
+            zebraHotspots = zebras
+        )
+    }
 
     /**
      * Sentinel v5.0: Lightweight 12x12 Y-plane block motion detector + ambient Day/Night luma sampler.

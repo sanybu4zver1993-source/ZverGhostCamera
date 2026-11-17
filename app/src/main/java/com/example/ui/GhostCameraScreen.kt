@@ -67,9 +67,14 @@ import com.example.assist.ByokManager
 import com.example.assist.GeminiByokClient
 import com.example.assist.GhostAssistService
 import com.example.camera.AntiBlurSensorEngine
+import com.example.camera.AudioWatcherEngine
+import com.example.camera.CameraCapabilityProfiler
 import com.example.camera.CaptureManager
 import com.example.camera.ExifStripper
 import com.example.camera.Mp4Sanitizer
+import com.example.camera.MultiFrameStacker
+import com.example.camera.PhotoIqEngine
+import com.example.camera.ZoomIntelligence
 import com.example.crypto.GhostCryptoVault
 import com.example.security.AntiForensicsGuard
 import com.example.security.CamouflageManager
@@ -124,6 +129,9 @@ fun GhostCameraScreen(
     var peakingPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var overexposedPercent by remember { mutableStateOf(0) }
     var underexposedPercent by remember { mutableStateOf(0) }
+    var liveHistogramBins32 by remember { mutableStateOf(FloatArray(32)) }
+    var liveMeanLuma by remember { mutableStateOf(128) }
+    var liveZebraPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var isProximityLocked by remember { mutableStateOf(false) }
     var isCapturing by remember { mutableStateOf(false) }
     var lastStatusMessage by remember { mutableStateOf<String?>(null) }
@@ -139,6 +147,31 @@ fun GhostCameraScreen(
     var vikaSheetInitialTab by remember { mutableStateOf(VikaSheetTab.TASKS) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
     var previousCameraMode by remember { mutableStateOf("PHOTO") }
+
+    // Pro Camera2 & Photo IQ (P1) States
+    var proProfile by remember { mutableStateOf(CameraCapabilityProfiler.CameraProProfile.fallback(lensFacing)) }
+    LaunchedEffect(lensFacing) {
+        proProfile = withContext(Dispatchers.IO) {
+            CameraCapabilityProfiler.profileCamera(context, lensFacing)
+        }
+    }
+    var isProPanelExpanded by remember { mutableStateOf(false) }
+    var awbPreset by remember { mutableStateOf(CameraCapabilityProfiler.AwbPreset.AUTO) }
+    var manualFocusNorm by remember { mutableStateOf<Float?>(null) }
+    var isoOverride by remember { mutableStateOf<Int?>(null) }
+    var shutterNsOverride by remember { mutableStateOf<Long?>(null) }
+    var isAeLocked by remember { mutableStateOf(false) }
+    var isHistogramEnabled by remember { mutableStateOf(false) }
+    var isZebraEnabled by remember { mutableStateOf(false) }
+    var photoIqProfile by remember { mutableStateOf(ZverPrefs.getPhotoIqProfile(context)) }
+    var isZoomIqEnabled by remember { mutableStateOf(ZverPrefs.isZoomIqEnabled(context)) }
+    var multiFrameMode by remember { mutableStateOf(ZverPrefs.getMultiFrameMode(context)) }
+    var showPcbLabDialog by remember { mutableStateOf(false) }
+
+    // P3 Audio Watcher states
+    var isAudioWatcherActive by remember { mutableStateOf(false) }
+    var audioTelemetry by remember { mutableStateOf(AudioWatcherEngine.AcousticTelemetry()) }
+    var audioThresholdDbfs by remember { mutableStateOf(-26.0) }
 
     // Sentinel v5.0 ("КИБЕР-ДОЗОР") States
     var sentinelArmed by remember { mutableStateOf(SentinelEngine.isArmed()) }
@@ -164,10 +197,12 @@ fun GhostCameraScreen(
         }
     }
 
-    // Lock AE/AWB via Camera2 interop during BIO_RPPG so auto-exposure flicker does not pollute pulse signal
-    DisposableEffect(visorMode, cameraControl) {
+    // Camera2 Interop: BIO_RPPG AE/AWB lock takes priority; otherwise apply Pro Camera2 overrides (WB / MF / AE-L / ISO+S)
+    DisposableEffect(visorMode, cameraControl, awbPreset, manualFocusNorm, isoOverride, shutterNsOverride, isAeLocked, proProfile) {
         val ctrl = cameraControl
-        if (visorMode == VisorMode.BIO_RPPG && ctrl != null) {
+        if (ctrl == null) {
+            onDispose {}
+        } else if (visorMode == VisorMode.BIO_RPPG) {
             try {
                 val c2Ctrl = Camera2CameraControl.from(ctrl)
                 val lockOpts = CaptureRequestOptions.Builder()
@@ -177,12 +212,43 @@ fun GhostCameraScreen(
                 c2Ctrl.setCaptureRequestOptions(lockOpts)
             } catch (_: Exception) {}
             onDispose {
-                try {
-                    Camera2CameraControl.from(ctrl).clearCaptureRequestOptions()
-                } catch (_: Exception) {}
+                try { Camera2CameraControl.from(ctrl).clearCaptureRequestOptions() } catch (_: Exception) {}
             }
         } else {
-            onDispose {}
+            val hasProOverride = (awbPreset != CameraCapabilityProfiler.AwbPreset.AUTO) ||
+                (manualFocusNorm != null && proProfile.isManualFocusSupported) ||
+                isAeLocked ||
+                (proProfile.supportsManualExposure && (isoOverride != null || shutterNsOverride != null))
+            if (hasProOverride) {
+                try {
+                    val builder = CaptureRequestOptions.Builder()
+                    builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbPreset.camera2Mode)
+                    if (isAeLocked && proProfile.supportsAeLock) {
+                        builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+                    }
+                    val mf = manualFocusNorm
+                    if (mf != null && proProfile.isManualFocusSupported) {
+                        builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                        builder.setCaptureRequestOption(
+                            CaptureRequest.LENS_FOCUS_DISTANCE,
+                            (mf.coerceIn(0f, 1f) * proProfile.minFocusDiopters)
+                        )
+                    }
+                    if (proProfile.supportsManualExposure && (isoOverride != null || shutterNsOverride != null)) {
+                        builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                        val targetIso = isoOverride ?: (proProfile.isoRange?.first ?: 200)
+                        val targetNs = shutterNsOverride ?: 16_666_666L
+                        builder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, targetIso)
+                        builder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, targetNs)
+                    }
+                    Camera2CameraControl.from(ctrl).setCaptureRequestOptions(builder.build())
+                } catch (_: Exception) {}
+            } else {
+                try { Camera2CameraControl.from(ctrl).clearCaptureRequestOptions() } catch (_: Exception) {}
+            }
+            onDispose {
+                try { Camera2CameraControl.from(ctrl).clearCaptureRequestOptions() } catch (_: Exception) {}
+            }
         }
     }
 
@@ -513,7 +579,28 @@ fun GhostCameraScreen(
 
             isCapturing = true
             try {
-                if (isFocusBracketingActive) {
+                val activeStackMode = multiFrameMode
+                if (activeStackMode != null && !isFocusBracketingActive) {
+                    lastStatusMessage = "⚡ СТЕК ${activeStackMode.badgeRu} (3 КАДРА)..."
+                    val manager = CaptureManager(
+                        context = context,
+                        imageCapture = cap,
+                        captureExecutor = captureExecutor
+                    )
+                    val stacked = manager.captureMultiFrameStack(
+                        mode = activeStackMode,
+                        frameCount = 3,
+                        applyDehaze = isDcpDehazeActive,
+                        zoomRatio = zoomRatio,
+                        photoIqOverride = photoIqProfile
+                    )
+                    val res = stacked.captureResult
+                    vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                    val kb = res.encryptedSizeBytes / 1024
+                    val contourTag = if (res.isRamOnly) " [ОЗУ]" else ""
+                    val ghostNote = if (stacked.stackStats.rejectedGhostPercent > 0) " G-${stacked.stackStats.rejectedGhostPercent}%" else ""
+                    lastStatusMessage = "📸 ${res.formatLabel} (${kb}КБ, 0 EXIF) [${res.iqLabel}$ghostNote] за ${res.durationMs}мс$contourTag"
+                } else if (isFocusBracketingActive) {
                     lastStatusMessage = "СЕРИЯ БРЕКЕТИНГА: 3 КАДРА..."
                     for (step in 1..3) {
                         val manager = CaptureManager(
@@ -521,7 +608,11 @@ fun GhostCameraScreen(
                             imageCapture = cap,
                             captureExecutor = captureExecutor
                         )
-                        manager.takeSecurePhoto(applyDehaze = isDcpDehazeActive)
+                        manager.takeSecurePhoto(
+                            applyDehaze = isDcpDehazeActive,
+                            zoomRatio = zoomRatio,
+                            photoIqOverride = photoIqProfile
+                        )
                         vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         delay(250)
                     }
@@ -533,12 +624,17 @@ fun GhostCameraScreen(
                             imageCapture = cap,
                             captureExecutor = captureExecutor
                         )
-                        val result = manager.takeSecurePhoto(applyDehaze = isDcpDehazeActive)
+                        val result = manager.takeSecurePhoto(
+                            applyDehaze = isDcpDehazeActive,
+                            zoomRatio = zoomRatio,
+                            photoIqOverride = photoIqProfile
+                        )
                         vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         val kb = result.encryptedSizeBytes / 1024
                         val contourTag = if (result.isRamOnly) " [ОЗУ]" else ""
                         val dehazeTag = if (isDcpDehazeActive) " [АНТИ-ТУМАН]" else ""
-                        lastStatusMessage = "📸 ${result.formatLabel} (${kb}КБ, 0 EXIF) за ${result.durationMs}мс$contourTag$dehazeTag"
+                        val iqTag = if (result.iqLabel.isNotBlank()) " [${result.iqLabel}]" else ""
+                        lastStatusMessage = "📸 ${result.formatLabel} (${kb}КБ, 0 EXIF) за ${result.durationMs}мс$contourTag$dehazeTag$iqTag"
 
                         if (shotIdx < burstCount) {
                             delay(1000)
@@ -644,6 +740,52 @@ fun GhostCameraScreen(
         }
     }
 
+    val audioWatcherEngine = remember {
+        AudioWatcherEngine(
+            context = context,
+            onTelemetry = { telemetry ->
+                scope.launch(Dispatchers.Main) {
+                    audioTelemetry = telemetry
+                }
+            },
+            onAcousticTrigger = { _, reason ->
+                scope.launch(Dispatchers.Main) {
+                    SentinelEngine.logEvent(SentinelEngine.EventKind.INFO, "Акустик: $reason")
+                    sentinelEvents = SentinelEngine.getEvents()
+                    lastStatusMessage = "🔊 АКУСТИК: $reason"
+                    if (SentinelEngine.isArmed()) {
+                        val cfg = SentinelEngine.getConfig()
+                        launchSentinelCapture(
+                            reason = reason,
+                            useNightClahe = cfg.autoNightClaheEnabled && SentinelEngine.isNightProfileActive()
+                        )
+                    }
+                }
+            },
+            onStatusError = { err ->
+                scope.launch(Dispatchers.Main) {
+                    isAudioWatcherActive = false
+                    lastStatusMessage = err
+                }
+            }
+        )
+    }
+
+    LaunchedEffect(audioThresholdDbfs) {
+        audioWatcherEngine.thresholdDbfs = audioThresholdDbfs
+    }
+
+    DisposableEffect(isAudioWatcherActive) {
+        if (isAudioWatcherActive) {
+            audioWatcherEngine.start(scope)
+        } else {
+            audioWatcherEngine.stop()
+        }
+        onDispose {
+            audioWatcherEngine.stop()
+        }
+    }
+
     var pendingAudioAction by remember { mutableStateOf<String?>(null) }
     var hasAskedAudioForVideo by remember { mutableStateOf(false) }
 
@@ -660,11 +802,39 @@ fun GhostCameraScreen(
                     lastStatusMessage = "НЕТ ДОСТУПА К МИКРОФОНУ ДЛЯ ГОЛОСА"
                 }
             }
+            "AUDIO_WATCHER" -> {
+                if (granted) {
+                    isAudioWatcherActive = true
+                    lastStatusMessage = "🔊 АКУСТИК-СТОРОЖ ВКЛ (${audioThresholdDbfs.toInt()} dBFS)"
+                } else {
+                    isAudioWatcherActive = false
+                    lastStatusMessage = "НЕТ ДОСТУПА К МИКРОФОНУ ДЛЯ АКУСТИКА"
+                }
+            }
             "VIDEO" -> {
                 startVideoRecordingInternal()
             }
         }
         pendingAudioAction = null
+    }
+
+    fun requestAudioWatcherToggle() {
+        if (isAudioWatcherActive) {
+            isAudioWatcherActive = false
+            lastStatusMessage = "🔇 АКУСТИК-СТОРОЖ ВЫКЛ"
+            return
+        }
+        val hasAudio = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasAudio) {
+            isAudioWatcherActive = true
+            lastStatusMessage = "🔊 АКУСТИК-СТОРОЖ ВКЛ (${audioThresholdDbfs.toInt()} dBFS)"
+        } else {
+            pendingAudioAction = "AUDIO_WATCHER"
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     fun requestVoiceControlToggle(forceEnable: Boolean? = null) {
@@ -730,9 +900,11 @@ fun GhostCameraScreen(
         }
     }
 
-    // Dynamic zoom ratio controller
-    LaunchedEffect(zoomRatio) {
-        try { cameraControl?.setZoomRatio(zoomRatio) } catch (_: Exception) {}
+    // Dynamic zoom ratio controller (clamped safely to Camera2 HAL maxDigitalZoom)
+    LaunchedEffect(zoomRatio, proProfile) {
+        try {
+            cameraControl?.setZoomRatio(zoomRatio.coerceIn(1.0f, proProfile.maxZoomRatio))
+        } catch (_: Exception) {}
     }
 
     val voiceControlManager = remember {
@@ -870,11 +1042,14 @@ fun GhostCameraScreen(
                         rowStride = plane.rowStride,
                         targetRoiSize = 400
                     )
-                    val (overPct, underPct) = antiBlurEngine.calculateExposureMetrics(
+                    val expoTelemetry = antiBlurEngine.computeHistogramAndZebra(
                         yBuffer = plane.buffer,
                         width = imageProxy.width,
                         height = imageProxy.height,
-                        rowStride = plane.rowStride
+                        rowStride = plane.rowStride,
+                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                        zebraThreshold = ZverPrefs.getZebraThreshold(context),
+                        collectZebra = isZebraEnabled
                     )
                     if (isFocusPeakingEnabled) {
                         peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
@@ -934,8 +1109,17 @@ fun GhostCameraScreen(
                     }
 
                     liveLaplacianVariance = variance
-                    overexposedPercent = overPct
-                    underexposedPercent = underPct
+                    overexposedPercent = expoTelemetry.overexposedPct
+                    underexposedPercent = expoTelemetry.underexposedPct
+                    if (isHistogramEnabled) {
+                        liveHistogramBins32 = expoTelemetry.bins32
+                        liveMeanLuma = expoTelemetry.meanLuma
+                    }
+                    if (isZebraEnabled) {
+                        liveZebraPoints = expoTelemetry.zebraHotspots
+                    } else if (liveZebraPoints.isNotEmpty()) {
+                        liveZebraPoints = emptyList()
+                    }
 
                     if (visorMode != VisorMode.NORMAL && !isStealthBlackoutActive) {
                         val res = cyberVisorEngine.processYuv420Frame(
@@ -995,11 +1179,15 @@ fun GhostCameraScreen(
     }
 
     LaunchedEffect(flashMode) { imageCapture?.flashMode = flashMode }
-    LaunchedEffect(exposureIndex) {
-        try { cameraControl?.setExposureCompensationIndex(exposureIndex) } catch (_: Exception) {}
+    LaunchedEffect(exposureIndex, proProfile) {
+        try {
+            cameraControl?.setExposureCompensationIndex(exposureIndex.coerceIn(proProfile.evRange.first, proProfile.evRange.last))
+        } catch (_: Exception) {}
     }
-    LaunchedEffect(zoomRatio) {
-        try { cameraControl?.setZoomRatio(zoomRatio) } catch (_: Exception) {}
+    LaunchedEffect(zoomRatio, proProfile) {
+        try {
+            cameraControl?.setZoomRatio(zoomRatio.coerceIn(1.0f, proProfile.maxZoomRatio))
+        } catch (_: Exception) {}
     }
 
     // STEALTH BLACKOUT / FODCAM BACKGROUND MODE
@@ -1087,6 +1275,12 @@ fun GhostCameraScreen(
     val activeToolsCount = listOf(
         isFocusPeakingEnabled,
         isFalseColorEnabled,
+        isHistogramEnabled,
+        isZebraEnabled,
+        isProPanelExpanded,
+        photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF,
+        multiFrameMode != null,
+        isAudioWatcherActive,
         isAutoShutterEnabled,
         isDocumentModeActive,
         isFocusBracketingActive,
@@ -1279,6 +1473,30 @@ fun GhostCameraScreen(
                 overexposedPct = overexposedPercent,
                 underexposedPct = underexposedPercent,
                 modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // Zebra Highlights Overlay (P1)
+        if (isZebraEnabled) {
+            ZebraExposureOverlay(
+                zebraHotspots = liveZebraPoints,
+                overexposedPct = overexposedPercent,
+                threshold = ZverPrefs.getZebraThreshold(context),
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // Live Luma Histogram HUD (P1)
+        if (isHistogramEnabled) {
+            LiveHistogramOverlay(
+                bins32 = liveHistogramBins32,
+                overexposedPct = overexposedPercent,
+                underexposedPct = underexposedPercent,
+                meanLuma = liveMeanLuma,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 12.dp, top = 74.dp)
             )
         }
 
@@ -1589,6 +1807,88 @@ fun GhostCameraScreen(
                         }
                     }
 
+                    // Row 4: P1 Pro Camera2, Histogram, Zebra & Photo IQ
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DrawerTileButton(
+                            icon = Icons.Default.Tune,
+                            label = "PRO HAL",
+                            active = isProPanelExpanded,
+                            accent = NeonYellow,
+                            modifier = Modifier.weight(1f).testTag("drawer_pro_toggle")
+                        ) {
+                            isProPanelExpanded = !isProPanelExpanded
+                            isToolsDrawerOpen = false
+                        }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.BarChart,
+                            label = "Гистогр",
+                            active = isHistogramEnabled,
+                            accent = CyberGreen,
+                            modifier = Modifier.weight(1f).testTag("drawer_histogram_toggle")
+                        ) { isHistogramEnabled = !isHistogramEnabled }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.Grain,
+                            label = "Zebra",
+                            active = isZebraEnabled,
+                            accent = NeonYellow,
+                            modifier = Modifier.weight(1f).testTag("drawer_zebra_toggle")
+                        ) { isZebraEnabled = !isZebraEnabled }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.AutoAwesome,
+                            label = "IQ:${photoIqProfile.badgeRu}",
+                            active = photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f).testTag("drawer_iq_cycle")
+                        ) {
+                            val vals = PhotoIqEngine.PhotoIqProfile.values()
+                            val next = vals[(vals.indexOf(photoIqProfile) + 1) % vals.size]
+                            photoIqProfile = next
+                            ZverPrefs.setPhotoIqProfile(context, next)
+                            lastStatusMessage = "PHOTO IQ: ${next.labelRu}"
+                        }
+                    }
+
+                    // Row 5: P2 Multi-Frame Stack + P3 PCB Lab & Audio Watcher
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DrawerTileButton(
+                            icon = Icons.Default.FilterHdr,
+                            label = "Стек:${multiFrameMode?.badgeRu ?: "OFF"}",
+                            active = multiFrameMode != null,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f).testTag("drawer_stack_cycle")
+                        ) {
+                            val options = listOf<MultiFrameStacker.StackMode?>(null) + MultiFrameStacker.StackMode.values().toList()
+                            val next = options[(options.indexOf(multiFrameMode) + 1) % options.size]
+                            multiFrameMode = next
+                            ZverPrefs.setMultiFrameMode(context, next)
+                            lastStatusMessage = if (next == null) "МУЛЬТИ-КАДР: ВЫКЛ" else "МУЛЬТИ-КАДР: ${next.labelRu}"
+                        }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.Memory,
+                            label = "Плата PCB",
+                            active = showPcbLabDialog,
+                            accent = NeonCyan,
+                            modifier = Modifier.weight(1f).testTag("drawer_pcb_lab")
+                        ) {
+                            isToolsDrawerOpen = false
+                            showPcbLabDialog = true
+                        }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.GraphicEq,
+                            label = if (isAudioWatcherActive) "Акуст:${audioThresholdDbfs.toInt()}" else "Акустик",
+                            active = isAudioWatcherActive,
+                            accent = NeonYellow,
+                            modifier = Modifier.weight(1f).testTag("drawer_audio_watcher")
+                        ) {
+                            requestAudioWatcherToggle()
+                        }
+                    }
+
                     // Drawer collapse handle
                     Box(
                         modifier = Modifier
@@ -1667,6 +1967,73 @@ fun GhostCameraScreen(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // P3 Live Audio Watcher Meter Strip (when active)
+            if (isAudioWatcherActive) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(CyberBlack.copy(alpha = 0.85f))
+                        .border(
+                            1.dp,
+                            if (audioTelemetry.isAboveThreshold) CyberRed else NeonYellow.copy(alpha = 0.55f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("audio_watcher_hud"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🔊 ${audioTelemetry.rmsDbfs.toInt()} dBFS (ПИК ${audioTelemetry.peakDbfs.toInt()}) • ПОРОГ ${audioThresholdDbfs.toInt()}",
+                            color = if (audioTelemetry.isAboveThreshold) CyberRed else NeonYellow,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.Bottom,
+                            modifier = Modifier.height(14.dp)
+                        ) {
+                            audioTelemetry.waveformBars.forEach { bar ->
+                                val hDp = (2f + bar * 12f).dp
+                                Box(
+                                    modifier = Modifier
+                                        .width(5.dp)
+                                        .height(hDp)
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(if (audioTelemetry.isAboveThreshold) CyberRed else CyberGreen)
+                                )
+                            }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf(-34.0, -26.0, -18.0).forEach { thr ->
+                            val sel = audioThresholdDbfs == thr
+                            Text(
+                                text = "${thr.toInt()}",
+                                color = if (sel) Color.Black else NeonYellow,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (sel) NeonYellow else CyberSurface)
+                                    .clickable {
+                                        audioThresholdDbfs = thr
+                                        lastStatusMessage = "АКУСТИК ПОРОГ: ${thr.toInt()} dBFS"
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             // APEX SENTINEL v5.0 ("ДОЗОР") Live Control Card (shown only in SENTINEL mode)
             if (selectedCameraMode == "SENTINEL") {
                 SentinelControlCard(
@@ -1775,7 +2142,56 @@ fun GhostCameraScreen(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // Compact Zoom + EV Floating Strip
+            // P1 Collapsible Pro Camera2 Panel
+            AnimatedVisibility(visible = isProPanelExpanded) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    ProCameraControlPanel(
+                        profile = proProfile,
+                        exposureIndex = exposureIndex,
+                        onExposureIndexChange = { exposureIndex = it },
+                        awbPreset = awbPreset,
+                        onAwbPresetChange = { awbPreset = it },
+                        manualFocusNorm = manualFocusNorm,
+                        onManualFocusChange = { manualFocusNorm = it },
+                        isoOverride = isoOverride,
+                        onIsoChange = { isoOverride = it },
+                        shutterNsOverride = shutterNsOverride,
+                        onShutterNsChange = { shutterNsOverride = it },
+                        isAeLocked = isAeLocked,
+                        onAeLockChange = { isAeLocked = it },
+                        photoIqProfile = photoIqProfile,
+                        onPhotoIqChange = { iq ->
+                            photoIqProfile = iq
+                            ZverPrefs.setPhotoIqProfile(context, iq)
+                            lastStatusMessage = "PHOTO IQ: ${iq.labelRu}"
+                        },
+                        isHistogramEnabled = isHistogramEnabled,
+                        onToggleHistogram = { isHistogramEnabled = !isHistogramEnabled },
+                        isZebraEnabled = isZebraEnabled,
+                        onToggleZebra = { isZebraEnabled = !isZebraEnabled }
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+            }
+
+            // Zoom Intelligence Banner when zoomed >= 1.8x
+            if (isZoomIqEnabled && zoomRatio >= 1.8f) {
+                val zoomAdvice = ZoomIntelligence.evaluateZoomTier(zoomRatio)
+                Text(
+                    text = if (zoomAdvice.requiresSteadyHand && !isGyroStable) "${zoomAdvice.badgeText} • ДЕРЖИ РОВНЕЕ!" else zoomAdvice.badgeText,
+                    color = if (zoomAdvice.requiresSteadyHand && !isGyroStable) NeonYellow else NeonCyan,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    modifier = Modifier
+                        .padding(bottom = 4.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(CyberBlack.copy(alpha = 0.7f))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+
+            // Compact Zoom + PRO + EV Floating Strip
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1789,7 +2205,7 @@ fun GhostCameraScreen(
                         .background(CyberBlack.copy(alpha = 0.55f))
                         .border(1.dp, CyberBorder.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
                         .padding(horizontal = 6.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     listOf(1.0f, 2.0f, 4.0f, 6.0f, 10.0f).forEach { z ->
                         val sel = zoomRatio == z
@@ -1800,9 +2216,10 @@ fun GhostCameraScreen(
                                 .background(if (sel) CyberGreen.copy(alpha = 0.25f) else Color.Transparent)
                                 .clickable {
                                     zoomRatio = z
-                                    lastStatusMessage = "ЗУМ: ${z.toInt()}x"
+                                    val advice = ZoomIntelligence.evaluateZoomTier(z)
+                                    lastStatusMessage = if (isZoomIqEnabled && z >= 1.8f) advice.badgeText else "ЗУМ: ${z.toInt()}x"
                                 }
-                                .padding(horizontal = 9.dp),
+                                .padding(horizontal = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -1816,40 +2233,91 @@ fun GhostCameraScreen(
                     }
                 }
 
-                // Compact EV cycle pill (tucks 3 buttons into 1 sleek pill)
-                val evLabel = when (exposureIndex) {
-                    1 -> "EV +1"
-                    -1 -> "EV -1"
-                    else -> "EV 0"
-                }
-                Box(
-                    modifier = Modifier
-                        .height(38.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(CyberBlack.copy(alpha = 0.55f))
-                        .border(1.dp, if (exposureIndex != 0) NeonYellow else CyberBorder, RoundedCornerShape(20.dp))
-                        .clickable {
-                            exposureIndex = when (exposureIndex) {
-                                0 -> 1
-                                1 -> -1
-                                else -> 0
-                            }
-                            lastStatusMessage = when (exposureIndex) {
-                                1 -> "ЯРКОСТЬ: +1 (СВЕТ)"
-                                -1 -> "ЯРКОСТЬ: -1 (ТЕНЬ)"
-                                else -> "ЯРКОСТЬ: АВТО"
-                            }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (multiFrameMode != null) {
+                        Box(
+                            modifier = Modifier
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(NeonCyan.copy(alpha = 0.22f))
+                                .border(1.dp, NeonCyan, RoundedCornerShape(20.dp))
+                                .clickable {
+                                    val options = listOf<MultiFrameStacker.StackMode?>(null) + MultiFrameStacker.StackMode.values().toList()
+                                    val next = options[(options.indexOf(multiFrameMode) + 1) % options.size]
+                                    multiFrameMode = next
+                                    ZverPrefs.setMultiFrameMode(context, next)
+                                    lastStatusMessage = if (next == null) "МУЛЬТИ-КАДР: ВЫКЛ" else "МУЛЬТИ-КАДР: ${next.labelRu}"
+                                }
+                                .padding(horizontal = 8.dp)
+                                .testTag("stack_mode_pill"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${multiFrameMode!!.badgeRu}×3",
+                                color = NeonCyan,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = evLabel,
-                        color = if (exposureIndex != 0) NeonYellow else CyberMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    }
+
+                    // PRO panel quick pill
+                    Box(
+                        modifier = Modifier
+                            .height(38.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (isProPanelExpanded) NeonCyan.copy(alpha = 0.22f) else CyberBlack.copy(alpha = 0.55f))
+                            .border(1.dp, if (isProPanelExpanded) NeonCyan else CyberBorder, RoundedCornerShape(20.dp))
+                            .clickable { isProPanelExpanded = !isProPanelExpanded }
+                            .padding(horizontal = 10.dp)
+                            .testTag("pro_panel_pill"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "PRO",
+                            color = if (isProPanelExpanded) NeonCyan else CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // Compact EV cycle pill
+                    val evLabel = when {
+                        exposureIndex > 0 -> "EV+$exposureIndex"
+                        exposureIndex < 0 -> "EV$exposureIndex"
+                        else -> "EV 0"
+                    }
+                    Box(
+                        modifier = Modifier
+                            .height(38.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(CyberBlack.copy(alpha = 0.55f))
+                            .border(1.dp, if (exposureIndex != 0) NeonYellow else CyberBorder, RoundedCornerShape(20.dp))
+                            .clickable {
+                                exposureIndex = when (exposureIndex) {
+                                    0 -> 1
+                                    1 -> -1
+                                    else -> 0
+                                }
+                                lastStatusMessage = when (exposureIndex) {
+                                    1 -> "ЯРКОСТЬ: +1 (СВЕТ)"
+                                    -1 -> "ЯРКОСТЬ: -1 (ТЕНЬ)"
+                                    else -> "ЯРКОСТЬ: АВТО"
+                                }
+                            }
+                            .padding(horizontal = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = evLabel,
+                            color = if (exposureIndex != 0) NeonYellow else CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 
@@ -2063,7 +2531,11 @@ fun GhostCameraScreen(
         // Settings, Security, AI Prompts & Termux Center Dialog
         if (showSettingsDialog) {
             GhostSettingsDialog(
-                onDismiss = { showSettingsDialog = false },
+                onDismiss = {
+                    showSettingsDialog = false
+                    photoIqProfile = ZverPrefs.getPhotoIqProfile(context)
+                    isZoomIqEnabled = ZverPrefs.isZoomIqEnabled(context)
+                },
                 onStatusMessage = { msg -> lastStatusMessage = msg },
                 onOpenPinSetup = {
                     forcePinSetupFlow = true
@@ -2126,6 +2598,27 @@ fun GhostCameraScreen(
                 },
                 onStatusMessage = { msg -> lastStatusMessage = msg },
                 onDismiss = { showVikaSheet = false }
+            )
+        }
+
+        if (showPcbLabDialog) {
+            PcbLabDialog(
+                initialBitmap = null,
+                onCaptureFromCamera = {
+                    val cap = imageCapture ?: return@PcbLabDialog null
+                    val manager = CaptureManager(
+                        context = context,
+                        imageCapture = cap,
+                        captureExecutor = captureExecutor
+                    )
+                    manager.captureBitmapInRamForOfflineCv()
+                },
+                onSavedToVault = { msg ->
+                    vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                    lastStatusMessage = msg
+                    showPcbLabDialog = false
+                },
+                onDismiss = { showPcbLabDialog = false }
             )
         }
 

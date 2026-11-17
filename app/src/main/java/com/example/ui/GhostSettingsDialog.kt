@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.testTag
 import com.example.assist.ByokManager
 import com.example.camera.CameraDiagnostics
 import com.example.camera.ExifStripper
+import com.example.camera.PhotoIqEngine
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
 import com.example.security.SecureClipboard
@@ -91,6 +92,10 @@ fun GhostSettingsDialog(
     var screenRecBlock by remember { mutableStateOf(ZverPrefs.isScreenRecBlockEnabled(context)) }
     var maxFailWipe by remember { mutableStateOf(ZverPrefs.getMaxFailedPinWipe(context)) }
     var deadManDays by remember { mutableStateOf(ZverPrefs.getDeadManDays(context)) }
+    var photoIqProfile by remember { mutableStateOf(ZverPrefs.getPhotoIqProfile(context)) }
+    var zoomIqEnabled by remember { mutableStateOf(ZverPrefs.isZoomIqEnabled(context)) }
+    var zebraThreshold by remember { mutableStateOf(ZverPrefs.getZebraThreshold(context)) }
+    var smartCompression by remember { mutableStateOf(ZverPrefs.isSmartCompressionEnabled(context)) }
     var currentCamo by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
     val strongBoxCapable = remember { ByokManager.isStrongBoxSupported(context) }
     val cameraDiagReport = remember(boundUseCasesSummary) {
@@ -209,6 +214,74 @@ fun GhostSettingsDialog(
                                                 onStatusMessage("КОДЕК: ${cp.labelRu}")
                                             }
                                             .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("1B. PHOTO IQ, ZOOM IQ И ZEBRA (PRO)", color = NeonCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            Text(
+                                "Локальная доводка кадра в ОЗУ (LUT + резкость без переусиления шума) и теле-улучшение при зуме 2x..10x.",
+                                color = CyberMuted,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(vertical = 3.dp)
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                PhotoIqEngine.PhotoIqProfile.values().forEach { iq ->
+                                    val isSel = photoIqProfile == iq
+                                    Text(
+                                        text = iq.badgeRu,
+                                        color = if (isSel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isSel) NeonCyan else CyberSurface)
+                                            .border(1.dp, if (isSel) NeonCyan else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                photoIqProfile = iq
+                                                ZverPrefs.setPhotoIqProfile(context, iq)
+                                                onStatusMessage("PHOTO IQ: ${iq.labelRu}")
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                            .testTag("settings_iq_${iq.name.lowercase()}")
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            SecurityToggleRow("Zoom Intelligence (2x–10x)", "Авто-чёткость и микроконтраст при цифровом зуме ≥1.8x", zoomIqEnabled) {
+                                zoomIqEnabled = it; ZverPrefs.setZoomIqEnabled(context, it)
+                            }
+                            SecurityToggleRow("Smart WebP/JPEG сжатие", "Адаптивное качество (±8%) по плотности деталей и текста кадра", smartCompression) {
+                                smartCompression = it
+                                ZverPrefs.setSmartCompressionEnabled(context, it)
+                                onStatusMessage(if (it) "SMART СЖАТИЕ: ВКЛ" else "SMART СЖАТИЕ: ФИКС. ПРЕСЕТ")
+                            }
+                            Text("Порог пересвета Zebra (яркость Y): $zebraThreshold", color = CyberMuted, fontSize = 10.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+                                listOf(225, 235, 240, 248).forEach { thr ->
+                                    val sel = zebraThreshold == thr
+                                    Text(
+                                        text = thr.toString(),
+                                        color = if (sel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) NeonYellow else CyberSurface)
+                                            .border(1.dp, if (sel) NeonYellow else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                zebraThreshold = thr
+                                                ZverPrefs.setZebraThreshold(context, thr)
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 }
                             }

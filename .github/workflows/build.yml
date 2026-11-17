@@ -3,7 +3,13 @@ name: Build and Release APK
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Версия релиза (например 1.2; по умолчанию авто из versionName)"
+        required: false
+        default: ""
   release:
     types: [ created, published ]
 
@@ -25,6 +31,25 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Resolve Version and Tag
+        id: meta
+        run: |
+          BASE_VER=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          BASE_VER="${BASE_VER:-1.0}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_version }}" ]; then
+            VER="${{ inputs.release_version }}"
+            TAG="v${VER#v}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VER="${TAG#v}"
+          else
+            VER="${BASE_VER}.${{ github.run_number }}"
+            TAG="v${VER}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=ZverCamera-${TAG}.apk" >> "$GITHUB_OUTPUT"
+
       - name: Prepare environment & Keystore
         run: |
           touch .env
@@ -42,30 +67,50 @@ jobs:
             chmod +x gradlew
           fi
 
-      - name: Build with Gradle
+      - name: Run Unit Tests
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew :app:testDebugUnitTest --no-daemon
+          else
+            gradle :app:testDebugUnitTest --no-daemon
+          fi
+
+      - name: Build Debug APK (Installable Direct APK)
         run: |
           if [ -f "./gradlew" ]; then
             ./gradlew assembleDebug --no-daemon --stacktrace
           else
             gradle assembleDebug --no-daemon --stacktrace
           fi
+          mkdir -p release_apks
+          cp app/build/outputs/apk/debug/app-debug.apk "release_apks/${{ steps.meta.outputs.apk_name }}"
+          ls -lh release_apks/
 
-      - name: Upload Debug APK Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ZverCamera-${{ steps.meta.outputs.tag }}
+          path: release_apks/${{ steps.meta.outputs.apk_name }}
           if-no-files-found: error
 
-      - name: Attach APK to GitHub Release
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+      - name: Publish Versioned GitHub Release (Direct APK)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly
-          name: "Zver Camera (Nightly Build)"
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Zver Camera ${{ steps.meta.outputs.tag }}"
           draft: false
-          prerelease: true
-          files: app/build/outputs/apk/debug/app-debug.apk
+          prerelease: false
+          generate_release_notes: true
+          files: release_apks/${{ steps.meta.outputs.apk_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Attach APK to Manual Release Event
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: release_apks/${{ steps.meta.outputs.apk_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

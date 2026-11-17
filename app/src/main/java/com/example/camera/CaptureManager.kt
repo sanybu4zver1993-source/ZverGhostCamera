@@ -43,14 +43,23 @@ class CaptureManager(
         val durationMs: Long,
         val isRamOnly: Boolean = false,
         val isClean: Boolean = true,
-        val formatLabel: String = "WEBP"
+        val formatLabel: String = "WEBP",
+        val iqLabel: String = ""
+    )
+
+    data class StackCaptureResult(
+        val captureResult: CaptureResult,
+        val stackStats: MultiFrameStacker.StackStats,
+        val appliedQuality: Int
     )
 
     private data class RawShot(val bytes: ByteArray, val rotationDegrees: Int)
 
     suspend fun takeSecurePhoto(
         applyDehaze: Boolean = false,
-        forceDocumentBw: Boolean = false
+        forceDocumentBw: Boolean = false,
+        zoomRatio: Float = 1.0f,
+        photoIqOverride: PhotoIqEngine.PhotoIqProfile? = null
     ): CaptureResult = captureMutex.withLock {
         val startTime = System.currentTimeMillis()
         val rawShot = captureRawJpeg()
@@ -61,6 +70,13 @@ class CaptureManager(
         }
         val antiPrnu = ZverPrefs.isAntiPrnuEnabled(appContext)
         val ramOnly = ZverPrefs.isRamOnlyMode(appContext)
+        val smartCompression = ZverPrefs.isSmartCompressionEnabled(appContext)
+        val effectiveIq = if (forceDocumentBw) {
+            PhotoIqEngine.PhotoIqProfile.OFF
+        } else {
+            photoIqOverride ?: ZverPrefs.getPhotoIqProfile(appContext)
+        }
+        val effectiveZoomIq = if (ZverPrefs.isZoomIqEnabled(appContext) && zoomRatio >= 1.8f) zoomRatio else 1.0f
 
         var cleanBytes: ByteArray? = null
         try {
@@ -71,6 +87,8 @@ class CaptureManager(
                 val useFastBytePath = (preset == ExifStripper.CompressionPreset.HIGH_QUALITY) &&
                     !antiPrnu &&
                     !applyDehaze &&
+                    effectiveIq == PhotoIqEngine.PhotoIqProfile.OFF &&
+                    effectiveZoomIq < 1.8f &&
                     (rawShot.rotationDegrees % 360 == 0)
 
                 if (useFastBytePath) {
@@ -84,65 +102,235 @@ class CaptureManager(
                         rotationDegrees = rawShot.rotationDegrees,
                         applyDehaze = applyDehaze,
                         preset = preset,
-                        antiPrnu = antiPrnu
+                        antiPrnu = antiPrnu,
+                        photoIqProfile = effectiveIq,
+                        zoomRatio = effectiveZoomIq,
+                        useSmartCompression = smartCompression
                     )
                     cleanBytes = processed.cleanJpegBytes
                     audit = processed.audit ?: ExifStripper.auditBytes(cleanBytes!!)
                     strippedCount = 1
                 }
 
-                val payload = cleanBytes!!
+                val iqTag = buildList {
+                    if (effectiveIq != PhotoIqEngine.PhotoIqProfile.OFF) add(effectiveIq.badgeRu)
+                    if (effectiveZoomIq >= 1.8f) add("Z${effectiveZoomIq.toInt()}x")
+                }.joinToString("+")
 
-                if (ramOnly) {
-                    val shot = GhostCryptoVault.addRamShot(payload.clone(), isVideo = false)
-                    CaptureResult(
-                        encryptedFile = null,
-                        encryptedSizeBytes = shot.bytes.size.toLong(),
-                        strippedSegmentsCount = strippedCount,
-                        durationMs = System.currentTimeMillis() - startTime,
-                        isRamOnly = true,
-                        isClean = audit.isClean,
-                        formatLabel = audit.format
-                    )
-                } else {
-                    val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(
-                        appContext,
-                        prefix = GhostCryptoVault.MEDIA_PHOTO
-                    )
-                    try {
-                        cos.use { stream ->
-                            stream.write(payload)
-                            stream.flush()
-                        }
-
-                        // Mirror stripped payload into Monolithic VeraCrypt Container
-                        try {
-                            val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
-                                MonoVaultEngine.VolumeType.MASTER
-                            } else {
-                                MonoVaultEngine.VolumeType.DECOY
-                            }
-                            MonoVaultEngine.appendRecord(appContext, volume, payload)
-                        } catch (_: Exception) {}
-
-                        CaptureResult(
-                            encryptedFile = targetFile,
-                            encryptedSizeBytes = targetFile.length(),
-                            strippedSegmentsCount = strippedCount,
-                            durationMs = System.currentTimeMillis() - startTime,
-                            isRamOnly = false,
-                            isClean = audit.isClean,
-                            formatLabel = audit.format
-                        )
-                    } catch (e: Exception) {
-                        GhostCryptoVault.shredFile(targetFile)
-                        throw IOException("Streaming capture failed", e)
-                    }
-                }
+                persistEncryptedCaptureResult(
+                    payload = cleanBytes!!,
+                    ramOnly = ramOnly,
+                    strippedCount = strippedCount,
+                    startTime = startTime,
+                    audit = audit,
+                    iqTag = iqTag
+                )
             }
         } finally {
             Arrays.fill(rawShot.bytes, 0.toByte())
             cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
+        }
+    }
+
+    /**
+     * P2 Multi-Frame Computational Capture Pipeline:
+     * Captures [frameCount] (2..4) frames under a single captureMutex lock, decodes with RAM-safe
+     * subsampling for 4GB Helio G85 devices, aligns/fuses via MultiFrameStacker, applies Smart
+     * Compression + EXIF/Anti-PRNU sanitization, stores encrypted in Vault/RAM + MonoVault,
+     * and zero-wipes all temporary raw buffers.
+     */
+    suspend fun captureMultiFrameStack(
+        mode: MultiFrameStacker.StackMode,
+        frameCount: Int = 3,
+        applyDehaze: Boolean = false,
+        zoomRatio: Float = 1.0f,
+        photoIqOverride: PhotoIqEngine.PhotoIqProfile? = null,
+        useSmartCompression: Boolean = ZverPrefs.isSmartCompressionEnabled(appContext)
+    ): StackCaptureResult = captureMutex.withLock {
+        val startTime = System.currentTimeMillis()
+        val targetFrames = frameCount.coerceIn(2, 4)
+        val preset = ZverPrefs.getCompressionPreset(appContext)
+        val antiPrnu = ZverPrefs.isAntiPrnuEnabled(appContext)
+        val ramOnly = ZverPrefs.isRamOnlyMode(appContext)
+        val effectiveZoomIq = if (ZverPrefs.isZoomIqEnabled(appContext) && zoomRatio >= 1.8f) zoomRatio else 1.0f
+        val effectiveIq = photoIqOverride ?: ZverPrefs.getPhotoIqProfile(appContext)
+
+        val decodedFrames = ArrayList<android.graphics.Bitmap>(targetFrames)
+        var stackedBitmap: android.graphics.Bitmap? = null
+        var cleanBytes: ByteArray? = null
+
+        try {
+            val maxPixelsPerFrame = (6_000_000L / targetFrames).coerceAtLeast(800_000L)
+            for (idx in 0 until targetFrames) {
+                val shot = captureRawJpeg()
+                try {
+                    val bmp = withContext(Dispatchers.Default) {
+                        decodeBoundedUprightBitmap(shot.bytes, shot.rotationDegrees, maxPixelsPerFrame)
+                    }
+                    if (bmp != null) {
+                        decodedFrames.add(bmp)
+                    }
+                } finally {
+                    Arrays.fill(shot.bytes, 0.toByte())
+                }
+            }
+
+            if (decodedFrames.isEmpty()) {
+                throw IOException("Не удалось декодировать ни одного кадра для Multi-Frame стека")
+            }
+
+            return@withLock withContext(Dispatchers.IO) {
+                val stackOutput = MultiFrameStacker.processBurst(
+                    frames = decodedFrames,
+                    mode = mode,
+                    recycleInputs = true
+                )
+                decodedFrames.clear()
+                stackedBitmap = stackOutput.bitmap
+
+                val smartQuality = if (useSmartCompression) {
+                    MultiFrameStacker.estimateSmartCompressionQuality(stackedBitmap!!, preset)
+                } else {
+                    preset.quality
+                }
+
+                // Avoid double-applying NIGHT_LIFT if mode is already NIGHT_DENOISE
+                val residualIq = if (mode == MultiFrameStacker.StackMode.NIGHT_DENOISE && effectiveIq == PhotoIqEngine.PhotoIqProfile.NIGHT_LIFT) {
+                    PhotoIqEngine.PhotoIqProfile.OFF
+                } else if (effectiveIq == PhotoIqEngine.PhotoIqProfile.TEXT_CRISP) {
+                    effectiveIq
+                } else {
+                    PhotoIqEngine.PhotoIqProfile.OFF
+                }
+
+                val processed = ExifStripper.processBitmapClean(
+                    sourceBitmap = stackedBitmap!!,
+                    recycleSource = true,
+                    preset = preset,
+                    antiPrnu = antiPrnu,
+                    applyDehaze = applyDehaze,
+                    photoIqProfile = residualIq,
+                    zoomRatio = effectiveZoomIq,
+                    qualityOverride = smartQuality
+                )
+                stackedBitmap = null
+                cleanBytes = processed.cleanBytes
+
+                val iqTag = buildList {
+                    add("${mode.badgeRu}×${stackOutput.stats.frameCount}")
+                    if (useSmartCompression) add("Q$smartQuality")
+                    if (effectiveZoomIq >= 1.8f) add("Z${effectiveZoomIq.toInt()}x")
+                }.joinToString("+")
+
+                val capRes = persistEncryptedCaptureResult(
+                    payload = cleanBytes!!,
+                    ramOnly = ramOnly,
+                    strippedCount = targetFrames,
+                    startTime = startTime,
+                    audit = processed.audit,
+                    iqTag = iqTag
+                )
+                StackCaptureResult(
+                    captureResult = capRes,
+                    stackStats = stackOutput.stats,
+                    appliedQuality = smartQuality
+                )
+            }
+        } finally {
+            decodedFrames.forEach { if (!it.isRecycled) it.recycle() }
+            stackedBitmap?.let { if (!it.isRecycled) it.recycle() }
+            cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
+        }
+    }
+
+    private fun decodeBoundedUprightBitmap(
+        rawJpeg: ByteArray,
+        rotationDegrees: Int,
+        maxPixels: Long
+    ): android.graphics.Bitmap? {
+        if (rawJpeg.isEmpty()) return null
+        val boundsOpts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size, boundsOpts)
+        val w = boundsOpts.outWidth
+        val h = boundsOpts.outHeight
+        if (w <= 0 || h <= 0) return null
+
+        var sampleSize = 1
+        while ((w.toLong() / sampleSize) * (h.toLong() / sampleSize) > maxPixels) {
+            sampleSize *= 2
+        }
+        val decodeOpts = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+        }
+        val decoded = android.graphics.BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size, decodeOpts)
+            ?: return null
+        if (rotationDegrees % 360 == 0) {
+            return decoded
+        }
+        val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+        val rotated = android.graphics.Bitmap.createBitmap(
+            decoded, 0, 0, decoded.width, decoded.height, matrix, true
+        )
+        decoded.recycle()
+        return rotated
+    }
+
+    private fun persistEncryptedCaptureResult(
+        payload: ByteArray,
+        ramOnly: Boolean,
+        strippedCount: Int,
+        startTime: Long,
+        audit: ExifStripper.AuditReport,
+        iqTag: String
+    ): CaptureResult {
+        return if (ramOnly) {
+            val shot = GhostCryptoVault.addRamShot(payload.clone(), isVideo = false)
+            CaptureResult(
+                encryptedFile = null,
+                encryptedSizeBytes = shot.bytes.size.toLong(),
+                strippedSegmentsCount = strippedCount,
+                durationMs = System.currentTimeMillis() - startTime,
+                isRamOnly = true,
+                isClean = audit.isClean,
+                formatLabel = audit.format,
+                iqLabel = iqTag
+            )
+        } else {
+            val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(
+                appContext,
+                prefix = GhostCryptoVault.MEDIA_PHOTO
+            )
+            try {
+                cos.use { stream ->
+                    stream.write(payload)
+                    stream.flush()
+                }
+
+                // Mirror stripped payload into Monolithic VeraCrypt Container
+                try {
+                    val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                        MonoVaultEngine.VolumeType.MASTER
+                    } else {
+                        MonoVaultEngine.VolumeType.DECOY
+                    }
+                    MonoVaultEngine.appendRecord(appContext, volume, payload)
+                } catch (_: Exception) {}
+
+                CaptureResult(
+                    encryptedFile = targetFile,
+                    encryptedSizeBytes = targetFile.length(),
+                    strippedSegmentsCount = strippedCount,
+                    durationMs = System.currentTimeMillis() - startTime,
+                    isRamOnly = false,
+                    isClean = audit.isClean,
+                    formatLabel = audit.format,
+                    iqLabel = iqTag
+                )
+            } catch (e: Exception) {
+                GhostCryptoVault.shredFile(targetFile)
+                throw IOException("Streaming capture failed", e)
+            }
         }
     }
 
