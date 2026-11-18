@@ -113,6 +113,7 @@ fun GhostVaultDialog(
     var showPcbLab by remember { mutableStateOf(false) }
     var showVikaAi by remember { mutableStateOf(false) }
     var auditDialogReport by remember { mutableStateOf<ExifStripper.AuditReport?>(null) }
+    var proofVerifyResult by remember { mutableStateOf<GhostCryptoVault.ProofVerificationResult?>(null) }
     var vaultDiagReportText by remember { mutableStateOf<String?>(null) }
     var isRunningVaultDiag by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -1122,8 +1123,46 @@ fun GhostVaultDialog(
                                     modifier = Modifier.weight(1f).height(44.dp).testTag("vault_backup_readonly_btn")
                                 ) {
                                     Text(
-                                        "📦 БЭКАП (КОПИЯ)",
+                                        "📦 БЭКАП",
                                         color = CyberGreen,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            try {
+                                                val manifestJson = withContext(Dispatchers.IO) {
+                                                    GhostCryptoVault.generateVaultChainManifestJson(context, GhostCryptoVault.activeProfile)
+                                                }
+                                                val tmp = withContext(Dispatchers.IO) {
+                                                    GhostCryptoVault.createEphemeralShareBytes(
+                                                        context,
+                                                        manifestJson.toByteArray(Charsets.UTF_8),
+                                                        "chain_manifest.json"
+                                                    )
+                                                }
+                                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", tmp)
+                                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "application/json"
+                                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                }
+                                                context.startActivity(Intent.createChooser(intent, "Экспорт Chain-of-Custody (.json)"))
+                                                statusMessage = "ЦЕПЬ КУРАТОРСТВА (.JSON) СФОРМИРОВАНА (${vaultFiles.size} ФАЙЛОВ)"
+                                            } catch (e: Exception) {
+                                                statusMessage = "ОШИБКА МАНИФЕСТА: ${e.message}"
+                                            }
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).height(44.dp).testTag("vault_export_chain_manifest_btn")
+                                ) {
+                                    Text(
+                                        "⛓️ ЦЕПЬ",
+                                        color = CyberAmber,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 10.sp
@@ -1258,7 +1297,10 @@ fun GhostVaultDialog(
 
             auditDialogReport?.let { rep ->
                 AlertDialog(
-                    onDismissRequest = { auditDialogReport = null },
+                    onDismissRequest = {
+                        auditDialogReport = null
+                        proofVerifyResult = null
+                    },
                     title = {
                         Text(
                             text = if (rep.isClean) "✅ АУДИТ: 0 МЕТАДАННЫХ" else "⚠ АУДИТ: НАЙДЕНЫ ТЕГИ",
@@ -1276,6 +1318,27 @@ fun GhostVaultDialog(
                             rep.notes.forEach { n ->
                                 Text("• $n", color = CyberCyan, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                             }
+                            proofVerifyResult?.let { vr ->
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(CyberBlack, RoundedCornerShape(6.dp))
+                                        .border(1.dp, if (vr.valid) CyberGreen else CyberAmber, RoundedCornerShape(6.dp))
+                                        .padding(8.dp)
+                                ) {
+                                    Text(
+                                        text = if (vr.valid) "🔐 PROOF ВЕРИФИЦИРОВАН (ECDSA + SHA-256)" else "⚠ ПРОВЕРКА PROOF: ${vr.detailRu}",
+                                        color = if (vr.valid) CyberGreen else CyberAmber,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                    Text("SHA-256 совпал: ${if (vr.sha256Matches) "ДА" else "НЕТ"}", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                    Text("ECDSA подпись: ${if (vr.signatureValid) "ВАЛИДНА" else "НЕТ/KEYSTORE"}", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                    Text("Хэш: ${vr.actualSha256.take(24)}...", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                }
+                            }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text("Структура контейнера:", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                             rep.segments.take(18).forEach { seg ->
@@ -1284,40 +1347,66 @@ fun GhostVaultDialog(
                         }
                     },
                     confirmButton = {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    try {
-                                        val raw = decryptedRawBytes ?: selectedVideoOrFileBytes(context, selectedFile, decryptedVideoFile)
-                                        if (raw != null) {
-                                            val proofJson = withContext(Dispatchers.Default) {
-                                                GhostCryptoVault.generateDetachedProofJson(raw, rep)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        try {
+                                            val raw = decryptedRawBytes ?: selectedVideoOrFileBytes(context, selectedFile, decryptedVideoFile)
+                                            if (raw != null) {
+                                                val vr = withContext(Dispatchers.Default) {
+                                                    val proofJson = GhostCryptoVault.generateDetachedProofJson(raw, rep)
+                                                    GhostCryptoVault.verifyDetachedProofJson(raw, proofJson)
+                                                }
+                                                proofVerifyResult = vr
                                             }
-                                            val tmp = GhostCryptoVault.createEphemeralShareBytes(
-                                                context,
-                                                proofJson.toByteArray(Charsets.UTF_8),
-                                                "proof.json"
-                                            )
-                                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", tmp)
-                                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                                type = "application/json"
-                                                putExtra(Intent.EXTRA_STREAM, uri)
-                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                            }
-                                            context.startActivity(Intent.createChooser(intent, "Отправить .proof.json"))
+                                        } catch (e: Exception) {
+                                            statusMessage = "Ошибка проверки proof: ${e.message}"
                                         }
-                                    } catch (e: Exception) {
-                                        statusMessage = "Ошибка proof: ${e.message}"
                                     }
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = CyberGreen)
-                        ) {
-                            Text("ЭКСПОРТ .PROOF", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                },
+                                modifier = Modifier.testTag("vault_verify_proof_btn")
+                            ) {
+                                Text("ПРОВЕРИТЬ", color = CyberCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                            }
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        try {
+                                            val raw = decryptedRawBytes ?: selectedVideoOrFileBytes(context, selectedFile, decryptedVideoFile)
+                                            if (raw != null) {
+                                                val proofJson = withContext(Dispatchers.Default) {
+                                                    GhostCryptoVault.generateDetachedProofJson(raw, rep)
+                                                }
+                                                val tmp = GhostCryptoVault.createEphemeralShareBytes(
+                                                    context,
+                                                    proofJson.toByteArray(Charsets.UTF_8),
+                                                    "proof.json"
+                                                )
+                                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", tmp)
+                                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "application/json"
+                                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                }
+                                                context.startActivity(Intent.createChooser(intent, "Отправить .proof.json"))
+                                            }
+                                        } catch (e: Exception) {
+                                            statusMessage = "Ошибка proof: ${e.message}"
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreen)
+                            ) {
+                                Text("ЭКСПОРТ .PROOF", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                            }
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { auditDialogReport = null }) {
+                        TextButton(onClick = {
+                            auditDialogReport = null
+                            proofVerifyResult = null
+                        }) {
                             Text("ЗАКРЫТЬ", color = CyberMuted, fontFamily = FontFamily.Monospace)
                         }
                     },

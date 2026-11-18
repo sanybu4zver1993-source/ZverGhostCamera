@@ -690,8 +690,8 @@ fun GhostSettingsDialog(
                             Spacer(modifier = Modifier.height(10.dp))
 
                             ModeExplanationCard(
-                                title = "☀️ ФОТО (ОСНОВНОЙ РЕЖИМ)",
-                                desc = "Основная матрица 50МП работает на полной детализации. Фокусировка мгновенная, стабилизация гироскопа и антисмаз включены.",
+                                title = "☀️ ФОТО (ОСНОВНОЙ РЕЖИМ + PRO HAL)",
+                                desc = "Работает по профилю Camera2 HAL (стандартный биннинг CameraX + ручные ISO/выдержка в PRO HAL и профиль Photo IQ / мульти-кадр в шторке). EXIF/GPS вырезаются до шифрования.",
                                 modeKey = "PHOTO",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -700,7 +700,7 @@ fun GhostSettingsDialog(
                             )
                             ModeExplanationCard(
                                 title = "🎥 ВИДЕОСЪЁМКА (СЕЙФ)",
-                                desc = "Запись защищённого видео со звуком. После остановки файл сразу шифруется в сейф по стандарту AES-256 с очисткой кэша.",
+                                desc = "Запись защищённого видео со звуком. После остановки файл сразу шифруется в сейф по стандарту AES-256 с очисткой кэша и удалением udta/meta/stco-таймстампов.",
                                 modeKey = "VIDEO",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -708,8 +708,8 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🌙 НОЧНОЙ РЕЖИМ (СВЕТОСИЛА)",
-                                desc = "Выдержка и экспозиция увеличиваются на +1. Затвор делает снимок только в момент полного замирания рук, чтобы кадр не размазался.",
+                                title = "🌙 НОЧНОЙ РЕЖИМ / МУЛЬТИ-СТЕК",
+                                desc = "Выдержка и экспозиция увеличиваются на +1, антисмаз ждёт фиксации рук. В шторке можно включить стекинг 2–4 кадров (HDR Fusion, Ночь-шумодав, Детали).",
                                 modeKey = "NIGHT",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -717,13 +717,17 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🔬 БИО-ВИЗОР v2.1 (11-в-1)",
-                                desc = "Реальная оптика и ML Kit: Пульс + HRV (блокировка AE/AWB, устойчивость к скачкам яркости и палец на линзе), Кожа YCbCr, Эйлер x20 со стабилизацией сдвига, Веновизор (ln R/G), Дерма-УФ, Термо-LUT Ironbow, Анти-Туман live, Скелет 33 точки, Хлорофилл (ExG), Ночь-гамма и Поиск ИК-маяков.",
+                                title = "🔬 БИО-ВИЗОР v2.2 (13-в-1)",
+                                desc = "Офлайн CV и ML Kit: Пульс rPPG + HRV, Кожа YCbCr, Эйлер x20, Веновизор, Дерма-УФ, Термо-LUT, Анти-Туман, Скелет, Хлорофилл, Ночь-гамма, ИК-маяки, Дорожки ПП (Sobel) и Маркировка OCR.",
                                 modeKey = "VISOR",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
                                     onDismiss()
                                 }
+                            )
+                            ModeExplanationCard(
+                                title = "🛠️ PCB ЛАБ & АКУСТИК-СТОРОЖ",
+                                desc = "Офлайн инспекция печатных плат (мостики/прогар/пайка), декодер SMD/4-полос и OCR маркировки в шторке «Плата PCB» + реальный PCM-16 шумовой сторож «Акустик» (-34..-18 dBFS)."
                             )
                             ModeExplanationCard(
                                 title = "🛡️ ДОЗОР (APEX SENTINEL v5.0)",

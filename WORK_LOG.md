@@ -65,3 +65,46 @@
   - `gradle :app:testDebugUnitTest --rerun-tasks --console=plain` -> **BUILD SUCCESSFUL** (33 executed, **28/28 PASS**: `ExampleUnitTest`: 1, `ExampleRobolectricTest`: 1, `GhostCryptoVaultTest`: 3, `P0DiagnosticsAndFixesTest`: 3, `VaultIntegrityUnitTest`: 4, `ZverSanitizerUnitTest`: 3, `ZverSecurityFeaturesTest`: 13).
   - `compile_applet` -> **Build succeeded - the applet is compiled**.
 
+---
+
+## 2026-11-18 — Реализация и верификация Этапов P1–P4 и исправление CI/API 35
+
+### 1. Этап P1 (Pro Camera2 HAL, Photo IQ, Zoom Intelligence, HUD, Vault Photo Editor)
+- Добавлены `CameraCapabilityProfiler.kt`, `PhotoIqEngine.kt`, `ZoomIntelligence.kt`, расширен `CameraHudOverlays.kt` (Live-гистограмма яркости + Zebra пересветов), добавлен неразрушающий `VaultPhotoEditorDialog.kt` (выгружает отредактированную копию, не перезаписывая оригинал `.gcf`).
+- Интегрировано в `GhostCameraScreen.kt`, `GhostSettingsDialog.kt` (секция `1B`) и `GhostVaultDialog.kt`.
+- Покрыто тестом `P1ProCameraAndIqTest.kt` (**5/5 PASS**).
+
+### 2. Этап P2 (Multi-Frame Stacking, Smart Compression, Приватность и Монолит UI)
+- Создан `MultiFrameStacker.kt` (`NIGHT_DENOISE`, `HDR_FUSION`, `DETAIL_RECOVERY`) с поддержкой стекинга в `CaptureManager.kt`.
+- Реализовано интеллектуальное сжатие и санитация (`ExifStripper.kt`, `ZverPrefs.kt`, сдвиг `co64` в `Mp4Sanitizer.kt`).
+- Закомментированы неиспользуемые зависимости в `app/build.gradle.kts` (Firebase AI/AppCheck, Room, Retrofit, Moshi), добавлены `tools:node="remove"` для Clearcut DataTransport в `AndroidManifest.xml`, выведена вкладка `МОНОЛИТ` (`MonoVaultEngine`) в `GhostVaultDialog.kt`, выровнен честный статус `GhostAssistService.kt`.
+- Покрыто тестом `P2BurstAndPrivacyTest.kt` (**4/4 PASS**).
+
+### 3. Этап P3 (PCB Lab, Audio Watcher, Доп. режимы CV и CI/API 35 Releases)
+- Созданы `PcbInspectorEngine.kt`, `PcbLabDialog.kt` (SMD-декодер, EIA-96, 4-band резисторы, поиск мостиков припоя и зон перегрева/прогара) и `AudioWatcherEngine.kt` (PCM-16 мониторинг тишины/громких всплесков/импульсов).
+- Расширен `CyberVisorEngine.kt` до 13 режимов (`EDGE_TRACE` Sobel, `OCR_CONTRAST`), подключено в `GhostCameraScreen.kt` и `GhostVaultDialog.kt`.
+- По скриншотам падений GitHub Actions выровнен SDK проекта под стабильный runner-стек: `compileSdk = 35`, `targetSdk = 35` (`app/build.gradle.kts`), `coreKtx = "1.15.0"` (`gradle/libs.versions.toml`), а `.github/workflows/build.yml` переведён на JDK 21, `actions/setup-java@v5`, `gradle/actions/setup-gradle@v3`, автотегирование и `softprops/action-gh-release@v2` с прямой выдачей `ZverCamera-<tag>.apk`.
+- Покрыто тестом `P3PcbAndAudioTest.kt` (**4/4 PASS**).
+
+### 4. Этап P4 (ProofMode верификация, Batch Chain-of-Custody и честность документации)
+- В `GhostCryptoVault.kt` добавлены `ProofVerificationResult`, `verifyDetachedProofJson` (SHA-256 + ECDSA с защитой от битого JSON/Base64) и `generateVaultChainManifestJson` (детерминированная хронологическая сортировка, цепочка `chain_hash = SHA256(prevChainHash + fileSha256 + fileName)`, `chain_head_sha256`, подпись `manifest_ecdsa_sig_b64` без модификации исходных `.gcf`).
+- В `GhostVaultDialog.kt` добавлены кнопки `⛓️ ЦЕПЬ` (экспорт `chain_manifest.json` через `FileProvider`) и `ПРОВЕРИТЬ` внутри отчёта аудита доказательств.
+- В `GhostSettingsDialog.kt` (`MODES_GUIDE`) убрано завышенное заявление про 50MP (заменено на честное описание биннинга HAL + Pro HAL + Photo IQ + мульти-кадровый стек), добавлена карточка `PCB ЛАБ & АКУСТИК-СТОРОЖ` и обновлена справка Bio-Visor `v2.2 (13-в-1)`.
+- Покрыто Robolectric-тестом `P4ChainOfCustodyTest.kt` (**2/2 PASS**).
+
+### 5. Финальная сквозная верификация (Stage 0 + P0–P4)
+- **Команда:** `gradle :app:testDebugUnitTest --rerun-tasks --console=plain`
+- **Результат:** `BUILD SUCCESSFUL in 1m 57s` (31 task executed), **43/43 PASS** (`0 failures, 0 errors, 0 skipped`):
+  - `ExampleRobolectricTest`: 1/1 PASS
+  - `ExampleUnitTest`: 1/1 PASS
+  - `GhostCryptoVaultTest`: 3/3 PASS
+  - `P0DiagnosticsAndFixesTest`: 3/3 PASS
+  - `P1ProCameraAndIqTest`: 5/5 PASS
+  - `P2BurstAndPrivacyTest`: 4/4 PASS
+  - `P3PcbAndAudioTest`: 4/4 PASS
+  - `P4ChainOfCustodyTest`: 2/2 PASS
+  - `VaultIntegrityUnitTest`: 4/4 PASS
+  - `ZverSanitizerUnitTest`: 3/3 PASS
+  - `ZverSecurityFeaturesTest`: 13/13 PASS
+
+

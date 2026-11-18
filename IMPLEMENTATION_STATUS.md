@@ -8,29 +8,31 @@
 
 ---
 
-## 1. Общая сводка состояния (после завершения Этапа P0)
+## 1. Общая сводка состояния (Stage 0 + P0 → P4 завершены в коде)
 
-- **Сборка Debug (`compile_applet` + `:app:testDebugUnitTest`):** `BUILD VERIFIED` (актуальный код после всех правок P0)
-- **Локальные тесты (`gradle :app:testDebugUnitTest --rerun-tasks`):** `TEST VERIFIED` — **28/28 PASS** (`0 failures, 0 errors, 0 skipped`)
+- **Сборка Debug (`compile_applet`):** `BUILD VERIFIED` (API 35: `compileSdk = 35`, `targetSdk = 35`, `coreKtx = 1.15.0`)
+- **Локальные тесты (`gradle :app:testDebugUnitTest --rerun-tasks --console=plain`):** `TEST VERIFIED` — **43/43 PASS** (`0 failures, 0 errors, 0 skipped` по 11 тестовым классам)
 - **Документация Stage 0 + журналы:** **7/7 актуальны** (`DOCUMENT_INDEX.md`, `MASTER_SPEC.md`, `REQUIREMENTS_TRACEABILITY.md`, `ARCHITECTURE_DECISIONS.md`, `IMPLEMENTATION_PLAN.md`, `WORK_LOG.md`, `IMPLEMENTATION_STATUS.md`)
-- **Живая проверка на Xiaomi Redmi 13C после исправлений:** `UNVERIFIED` (ожидает прогона Саней по чеклисту Этапа P1)
+- **Живая проверка на Xiaomi Redmi 13C (`23108RN04Y`, HyperOS 2.0.209):** `UNVERIFIED` (аппаратные тесты Camera2 HAL, микрофона Audio Watcher, лаунчера HyperOS, Gemini BYOK HTTP и старых 30 `.gcf` файлов выполняются на живом устройстве)
 
 ---
 
-## 2. Матрица P0-блокеров (текущий статус)
+## 2. Матрица Этапов P0–P4 (текущий статус)
 
-| ID | Область | Суть проблемы | Статус фикса | Верификация |
-|---|---|---|---|---|
-| **P0-A** | Маскировка иконки (`CamouflageManager`) | Неверный пакет в `ComponentName` (`com.aistudio.ghostsuite.vkxpqz.MainActivity*` вместо `com.example.MainActivity*`) | **Исправлено** (`CamouflageManager.kt`) | `BUILD VERIFIED` + `TEST VERIFIED` (`P0DiagnosticsAndFixesTest` 3/3 алиаса); работа лаунчера HyperOS 2.0 — `UNVERIFIED` |
-| **P0-B** | Сейф (30 старых `.gcf`, `AEADBadTagException`) | Смешение PIN-ключа и `Ghost_Vault_MAIN` при `activeMainKey == null`; глушение ошибки закрытия потока | **Безопасная диагностика + бэкап + строгий запрет фолбэка** (`GhostCryptoVault.kt`, `GhostVaultDialog.kt`) | `BUILD VERIFIED` + `TEST VERIFIED` (read-only инспектор, строгий `AEADBadTagException`, бэкап и восстановление на копиях; оригиналы не тронуты); разбор реальных 30 файлов на Redmi 13C — `UNVERIFIED` |
-| **P0-C** | Вика AI / BYOK Gemini | Рассинхрон состояния, отмена запроса при закрытии диалога, лимит 3 стр., нет HTTP-лога, нет превью кадра, заблокирована офлайн-аналитика | **Исправлено** (`ByokManager.kt`, `GeminiByokClient.kt`, `VikaAiSheet.kt`, `GhostSettingsDialog.kt`) | `BUILD VERIFIED` + `TEST VERIFIED` (санитаризация ключей, HTTP-лог, запрет тихой подмены модели); живые ответы Gemini API — `UNVERIFIED` |
-| **P0-D** | CameraX + Паспорт железа | 4 одновременных UseCase + немой фолбэк; неверная метка `MT6768`; нет `CameraCharacteristics` диагностики | **Исправлено** (`CameraDiagnostics.kt`, `GhostCameraScreen.kt`, `AntiBlurSensorEngine.kt`, `README.md`) | `BUILD VERIFIED`; живой `CameraCharacteristics` отчёт и стабильность HAL на Redmi 13C — `UNVERIFIED` |
-| **P0-E** | UI Insets и перекрытия HUD | Отсутствуют insets в `GhostSettingsDialog`; перенос `MacroDroid`; наезд `86.dp` баннера; не сворачивается `CyberVisorControlCard` | **Исправлено** (`GhostSettingsDialog.kt`, `GhostCameraScreen.kt`) | `BUILD VERIFIED`; визуальная проверка на экране Redmi 13C — `UNVERIFIED` |
+| Этап | Область | Реализованные модули | Верификация |
+|---|---|---|---|
+| **P0** | Маскировка иконки (`CamouflageManager`), строгий `.gcf` + read-only диагностика/бэкап, BYOK `Вика AI` логи/модели, разделение CameraX + `CameraDiagnostics` (`MT6769Z`), Edge-to-Edge insets & сворачиваемый HUD | `CamouflageManager.kt`, `GhostCryptoVault.kt`, `GhostVaultDialog.kt`, `ByokManager.kt`, `VikaAiSheet.kt`, `CameraDiagnostics.kt`, `GhostCameraScreen.kt`, `GhostSettingsDialog.kt` | `BUILD VERIFIED` + `TEST VERIFIED` (`P0DiagnosticsAndFixesTest` 3/3 PASS); на Redmi 13C — `UNVERIFIED` |
+| **P1** | Pro Camera2 HAL профайлер (`CameraCapabilityProfiler`), `PhotoIqEngine`, `ZoomIntelligence`, Live Гистограмма и Зебра (`CameraHudOverlays`), неразрушающий редактор Сейфа (`VaultPhotoEditorDialog`), секция `1B` в настройках, Camera2 Interop | `CameraCapabilityProfiler.kt`, `PhotoIqEngine.kt`, `ZoomIntelligence.kt`, `CameraHudOverlays.kt`, `VaultPhotoEditorDialog.kt`, `GhostSettingsDialog.kt`, `GhostCameraScreen.kt` | `BUILD VERIFIED` + `TEST VERIFIED` (`P1ProCameraAndIqTest` 5/5 PASS); реальный Camera2 HAL / FPS — `UNVERIFIED` |
+| **P2** | Multi-Frame Burst (`MultiFrameStacker`: `NIGHT_DENOISE`, `HDR_FUSION`, `DETAIL_RECOVERY`), интеллектуальное сжатие (`ZverPrefs`, `ExifStripper`, `CaptureManager`), удаление неиспользуемых SDK (Firebase/Room/Retrofit/Moshi), блокировка Clearcut (`tools:node="remove"`), честный `GhostAssistService`, UI-вкладка `МОНОЛИТ`, `Mp4Sanitizer.co64` | `MultiFrameStacker.kt`, `ExifStripper.kt`, `Mp4Sanitizer.kt`, `ZverPrefs.kt`, `CaptureManager.kt`, `GhostAssistService.kt`, `GhostVaultDialog.kt`, `app/build.gradle.kts`, `AndroidManifest.xml` | `BUILD VERIFIED` + `TEST VERIFIED` (`P2BurstAndPrivacyTest` 4/4 PASS, `ZverSanitizerUnitTest` 3/3 PASS, `VaultIntegrityUnitTest` 4/4 PASS); живое устройство — `UNVERIFIED` |
+| **P3** | Лаборатория плат PCB (`PcbInspectorEngine`, `PcbLabDialog`: SMD/EIA-96/4-band, мостики припоя, перегрев/прогары), Акустик-сторож (`AudioWatcherEngine`), 2 новых режима Био-Визора (`EDGE_TRACE`, `OCR_CONTRAST` — итого 13), версионированный CI-релиз APK (JDK 21, `setup-java@v5`, `setup-gradle@v3`, API 35, `action-gh-release@v2`) | `PcbInspectorEngine.kt`, `PcbLabDialog.kt`, `AudioWatcherEngine.kt`, `CyberVisorEngine.kt`, `GhostCameraScreen.kt`, `GhostVaultDialog.kt`, `.github/workflows/build.yml` | `BUILD VERIFIED` + `TEST VERIFIED` (`P3PcbAndAudioTest` 4/4 PASS); реальный микрофон/PCB камера и GitHub Actions — `UNVERIFIED` |
+| **P4** | Верификация откреплённых ProofMode-доказательств (`verifyDetachedProofJson` в Сейфе, кнопка `ПРОВЕРИТЬ`), пакетный Chain-of-Custody манифест (`generateVaultChainManifestJson` -> кнопка `⛓️ ЦЕПЬ`, `chain_manifest.json` с SHA-256 цепочкой и ECDSA-подписью без изменения оригиналов `.gcf`), аудит честности справки (`GhostSettingsDialog` — убран миф про 50MP) | `GhostCryptoVault.kt`, `GhostVaultDialog.kt`, `GhostSettingsDialog.kt` | `BUILD VERIFIED` + `TEST VERIFIED` (`P4ChainOfCustodyTest` 2/2 PASS); живые файлы на Redmi 13C — `UNVERIFIED` |
 
 ---
 
-## 3. Следующие этапы (P1–P4)
-- **P1 (Device Verification на Redmi 13C):** Прогон 5 пунктов чеклиста Саней (отчёт `Camera2 HAL`, фото/видео переключение, маскировка иконки, read-only диагностика + бэкап 30 `.gcf` файлов, живой HTTP-лог Gemini).
-- **P2 (Приватность и чистка SDK):** Удаление неиспользуемых зависимостей (`firebase-ai`, `firebase-appcheck-*`, `room-*`, `retrofit`, `moshi`) и решение по `datatransport-cct` / `GhostAssistService` / `MonoVaultEngine` / `Mp4Sanitizer co64`.
-- **P3 (GitHub Releases):** Версионированный релиз APK в `.github/workflows/build.yml` (не только `nightly`).
-- **P4 (Профайлинг MT6769Z и 50MP):** Реальные замеры FPS и проверка `UltraHiRes` по данным из `CameraDiagnostics`.
+## 3. Живой чеклист верификации на Redmi 13C (для Сани)
+1. **GitHub Actions / APK:** После пуша в `main` скачать `ZverCamera-v1.0.<N>.apk` из GitHub Releases и установить на Redmi 13C.
+2. **Camera2 HAL + Pro Режим:** Открыть Настройки → раздел диагностики Camera2 HAL, скопировать реальный отчёт сенсоров и проверить переключение `PHOTO ↔ VIDEO`, Pro HAL / IQ / Гистограмму / Зебру и Multi-Frame стек.
+3. **Сейф (30 старых `.gcf`) + Chain-of-Custody:** Сначала нажать `📦 БЭКАП (КОПИЯ)`, затем `🩺 КЛЮЧИ` на старых файлах (оригиналы не тронутся), проверить `⛓️ ЦЕПЬ` и `ПРОВЕРИТЬ` на новом ProofMode-снимке.
+4. **Маскировка иконки (HyperOS 2.0):** Проверить переключение Default / Calculator / System Tools и возврат по `PIN + =`.
+5. **PCB Лаб + Акустик-сторож + Вика AI:** Проверить микрофонный индикатор `AudioWatcher`, осмотр платы в `PCB ЛАБ` и живой HTTP-лог в `Вика AI` при наличии ключа.
+

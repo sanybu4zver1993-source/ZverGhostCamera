@@ -1062,13 +1062,17 @@ object GhostCryptoVault {
     ): ProofVerificationResult {
         val digest = MessageDigest.getInstance("SHA-256").digest(mediaBytes)
         val actualSha256 = digest.joinToString("") { "%02x".format(it) }
-        val obj = JSONObject(proofJson)
+        val obj = try {
+            JSONObject(proofJson)
+        } catch (_: Exception) {
+            return ProofVerificationResult(false, false, false, "", actualSha256, "Неверный формат proof JSON")
+        }
         val expectedSha256 = obj.optString("sha256", "")
-        val sha256Matches = actualSha256.equals(expectedSha256, ignoreCase = true)
+        val sha256Matches = expectedSha256.isNotEmpty() && actualSha256.equals(expectedSha256, ignoreCase = true)
 
         val sigB64 = obj.optString("ecdsa_sha256_sig_b64", "")
         val sigBytes = try {
-            Base64.decode(sigB64, Base64.DEFAULT)
+            if (sigB64.isBlank()) ByteArray(0) else Base64.decode(sigB64, Base64.DEFAULT)
         } catch (_: Exception) {
             ByteArray(0)
         }
@@ -1094,7 +1098,10 @@ object GhostCryptoVault {
 
     fun generateVaultChainManifestJson(context: Context, profile: VaultProfile = activeProfile): String {
         val dir = profile.getDirectory(context)
-        val files = dir.listFiles()?.filter { it.name.endsWith(".gcf") }?.sortedBy { it.lastModified() } ?: emptyList()
+        val files = dir.listFiles()
+            ?.filter { it.name.endsWith(".gcf") }
+            ?.sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name })
+            ?: emptyList()
 
         var prevChainHash = "0000000000000000000000000000000000000000000000000000000000000000"
         val itemsArray = org.json.JSONArray()
@@ -1135,7 +1142,13 @@ object GhostCryptoVault {
         } catch (_: Exception) {
             ""
         }
+        val pubKeyB64 = try {
+            MonoVaultEngine.getSigningPublicKeyBase64()
+        } catch (_: Exception) {
+            ""
+        }
         manifestObj.put("manifest_ecdsa_sig_b64", sigB64)
+        manifestObj.put("ecdsa_pub_spki_b64", pubKeyB64)
         return manifestObj.toString(2)
     }
 
