@@ -264,6 +264,7 @@ fun GhostCameraScreen(
     // Video Recording States
     var videoCapture by remember { mutableStateOf<androidx.camera.video.VideoCapture<androidx.camera.video.Recorder>?>(null) }
     var activeRecording by remember { mutableStateOf<androidx.camera.video.Recording?>(null) }
+    val visorVideoRecorder = remember { com.example.visor.VisorVideoRecorder() }
     var isRecordingVideo by remember { mutableStateOf(false) }
     var recordingDurationSeconds by remember { mutableStateOf(0) }
     var recordingBytesWritten by remember { mutableStateOf(0L) }
@@ -414,6 +415,11 @@ fun GhostCameraScreen(
             antiBlurEngine.onKnockDetected = null
             antiBlurEngine.stop()
             try { activeRecording?.stop() } catch (_: Exception) {}
+            if (visorVideoRecorder.isRecording) {
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    try { visorVideoRecorder.stopAndFinalize()?.let { GhostCryptoVault.shredFile(it) } } catch (_: Exception) {}
+                }
+            }
             try { activeImageAnalysis?.clearAnalyzer() } catch (_: Exception) {}
             try { activeCameraProvider?.unbindAll() } catch (_: Exception) {}
             cyberVisorEngine.release()
@@ -610,7 +616,9 @@ fun GhostCameraScreen(
                         frameCount = 3,
                         applyDehaze = isDcpDehazeActive,
                         zoomRatio = zoomRatio,
-                        photoIqOverride = photoIqProfile
+                        photoIqOverride = photoIqProfile,
+                        visorMode = visorMode,
+                        visorEngine = cyberVisorEngine
                     )
                     val res = stacked.captureResult
                     vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
@@ -629,7 +637,9 @@ fun GhostCameraScreen(
                         manager.takeSecurePhoto(
                             applyDehaze = isDcpDehazeActive,
                             zoomRatio = zoomRatio,
-                            photoIqOverride = photoIqProfile
+                            photoIqOverride = photoIqProfile,
+                            visorMode = visorMode,
+                            visorEngine = cyberVisorEngine
                         )
                         vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         delay(250)
@@ -645,12 +655,14 @@ fun GhostCameraScreen(
                         val result = manager.takeSecurePhoto(
                             applyDehaze = isDcpDehazeActive,
                             zoomRatio = zoomRatio,
-                            photoIqOverride = photoIqProfile
+                            photoIqOverride = photoIqProfile,
+                            visorMode = visorMode,
+                            visorEngine = cyberVisorEngine
                         )
                         vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         val kb = result.encryptedSizeBytes / 1024
                         val contourTag = if (result.isRamOnly) " [ОЗУ]" else ""
-                        val dehazeTag = if (isDcpDehazeActive) " [АНТИ-ТУМАН]" else ""
+                        val dehazeTag = if (isDcpDehazeActive && visorMode == VisorMode.NORMAL) " [АНТИ-ТУМАН]" else ""
                         val iqTag = if (result.iqLabel.isNotBlank()) " [${result.iqLabel}]" else ""
                         lastStatusMessage = "📸 ${result.formatLabel} (${kb}КБ, 0 EXIF) за ${result.durationMs}мс$contourTag$dehazeTag$iqTag"
 
@@ -771,6 +783,87 @@ fun GhostCameraScreen(
         }
     }
 
+    fun startVisorVideoRecordingInternal() {
+        if (visorVideoRecorder.isRecording) {
+            isRecordingVideo = false
+            triggerHapticFeedback(isStealthBlackoutActive)
+            lastStatusMessage = "⏳ ШИФРОВАНИЕ ВИЗОР-ВИДЕО..."
+            val recordedBadge = visorMode.badgeRu
+            scope.launch(Dispatchers.IO) {
+                val rawMp4 = visorVideoRecorder.stopAndFinalize()
+                recordingBytesWritten = 0L
+                if (rawMp4 != null && rawMp4.exists() && rawMp4.length() > 0L) {
+                    val stageDir = GhostCryptoVault.getVideoStageDir(context)
+                    val cleanMp4 = File(stageDir, "visor_clean_${System.currentTimeMillis()}.mp4")
+                    try {
+                        val sanitized = Mp4Sanitizer.sanitizeMp4File(rawMp4, cleanMp4)
+                        val targetInput = if (sanitized && cleanMp4.exists()) cleanMp4 else rawMp4
+                        if (ZverPrefs.isRamOnlyMode(context)) {
+                            val bytes = targetInput.readBytes()
+                            GhostCryptoVault.addRamShot(bytes, isVideo = true)
+                        } else {
+                            GhostCryptoVault.encryptFileToVault(context, targetInput, prefix = GhostCryptoVault.MEDIA_VIDEO)
+                        }
+                        GhostCryptoVault.shredFile(rawMp4)
+                        GhostCryptoVault.shredFile(cleanMp4)
+                        vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                        withContext(Dispatchers.Main) {
+                            lastStatusMessage = "🎥 ВИЗОР MP4 ($recordedBadge, 0 МЕТА) В СЕЙФЕ [#$vaultCount]"
+                        }
+                    } catch (e: Exception) {
+                        GhostCryptoVault.shredFile(rawMp4)
+                        GhostCryptoVault.shredFile(cleanMp4)
+                        withContext(Dispatchers.Main) {
+                            lastStatusMessage = "ОШИБКА ШИФРОВАНИЯ ВИЗОРА: ${e.message}"
+                        }
+                    }
+                } else {
+                    rawMp4?.let { GhostCryptoVault.shredFile(it) }
+                    withContext(Dispatchers.Main) {
+                        lastStatusMessage = "СБОЙ ВИЗОР-ВИДЕО: нет кадров"
+                    }
+                }
+            }
+            return
+        }
+
+        val sample = visorDisplayState?.first
+        val sampleW = sample?.width ?: 480
+        val sampleH = sample?.height ?: 640
+        val stageDir = GhostCryptoVault.getVideoStageDir(context)
+        val rawMp4 = File(stageDir, "visor_raw_${System.currentTimeMillis()}.mp4")
+        val muteAudio = ZverPrefs.isMuteVideoAudio(context)
+        val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val enableAudioTrack = !muteAudio && !isAudioWatcherActive && hasAudio
+
+        val started = visorVideoRecorder.start(
+            outputFile = rawMp4,
+            sampleWidth = sampleW,
+            sampleHeight = sampleH,
+            enableAudio = enableAudioTrack,
+            hasAudioPermission = hasAudio,
+            onBytesWritten = { bytes -> recordingBytesWritten = bytes },
+            onError = { err ->
+                scope.launch(Dispatchers.Main) {
+                    lastStatusMessage = "ВИДЕО-КОДЕК ВИЗОРА: $err"
+                }
+            }
+        )
+        if (started) {
+            isRecordingVideo = true
+            recordingDurationSeconds = 0
+            recordingBytesWritten = 0L
+            triggerHapticFeedback(isStealthBlackoutActive)
+            lastStatusMessage = "🔴 ЗАПИСЬ ВИЗОРА (${visorMode.badgeRu})..."
+        } else {
+            GhostCryptoVault.shredFile(rawMp4)
+            // Graceful fallback to CameraX VideoCapture without turning off visorMode
+            pendingAutoStartVideo = true
+            selectedCameraMode = "VIDEO"
+            lastStatusMessage = "ПЕРЕХОД НА HAL-ВИДЕО (ВИЗОР СОХРАНЁН)..."
+        }
+    }
+
     val audioWatcherEngine = remember {
         AudioWatcherEngine(
             context = context,
@@ -845,6 +938,9 @@ fun GhostCameraScreen(
             "VIDEO" -> {
                 startVideoRecordingInternal()
             }
+            "VISOR_VIDEO" -> {
+                startVisorVideoRecordingInternal()
+            }
         }
         pendingAudioAction = null
     }
@@ -888,8 +984,31 @@ fun GhostCameraScreen(
     }
 
     fun triggerVideoRecordingToggle() {
+        if (visorVideoRecorder.isRecording) {
+            startVisorVideoRecordingInternal()
+            return
+        }
         if (isRecordingVideo) {
             startVideoRecordingInternal()
+            return
+        }
+        // When Bio-Visor is active with live YUV analysis, record filtered Bio-Visor video directly without resetting mode
+        if (visorMode != VisorMode.NORMAL && activeImageAnalysis != null) {
+            if (ZverPrefs.isMuteVideoAudio(context) || isAudioWatcherActive) {
+                startVisorVideoRecordingInternal()
+                return
+            }
+            val hasAudio = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasAudio || hasAskedAudioForVideo) {
+                startVisorVideoRecordingInternal()
+            } else {
+                hasAskedAudioForVideo = true
+                pendingAudioAction = "VISOR_VIDEO"
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
             return
         }
         if (selectedCameraMode != "VIDEO" || videoCapture == null) {
@@ -993,9 +1112,136 @@ fun GhostCameraScreen(
     }
 
     val isVideoCameraMode = (selectedCameraMode == "VIDEO")
+    val keepVisorStreamInVideo = isVideoCameraMode && (visorMode != VisorMode.NORMAL)
 
-    // Bind CameraX split by mode: VIDEO -> Preview + VideoCapture; PHOTO/OPTIC/VISOR -> Preview + ImageCapture + ImageAnalysis
-    LaunchedEffect(lensFacing, isVideoCameraMode, previewView) {
+    fun createConfiguredImageAnalysis(): ImageAnalysis {
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .build()
+
+        imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+            try {
+                val plane = imageProxy.planes[0]
+                val variance = antiBlurEngine.calculateCenterRoiLaplacianVariance(
+                    yBuffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride,
+                    targetRoiSize = 400
+                )
+                val expoTelemetry = antiBlurEngine.computeHistogramAndZebra(
+                    yBuffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride,
+                    rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                    zebraThreshold = ZverPrefs.getZebraThreshold(context),
+                    collectZebra = isZebraEnabled
+                )
+                if (isFocusPeakingEnabled) {
+                    peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
+                        yBuffer = plane.buffer,
+                        width = imageProxy.width,
+                        height = imageProxy.height,
+                        rowStride = plane.rowStride,
+                        rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                    )
+                } else if (peakingPoints.isNotEmpty()) {
+                    peakingPoints = emptyList()
+                }
+                val motion = antiBlurEngine.computeMotionAndLuma(
+                    yBuffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride,
+                    previousGrid = previousMotionGrid
+                )
+                previousMotionGrid = motion.grid
+                sentinelMotionScore = motion.motionScore
+                sentinelAvgLuma = motion.avgLuma
+                sentinelIsNight = motion.isLowLight
+
+                val sentinelRes = SentinelEngine.evaluateMotionFrame(
+                    nowMs = System.currentTimeMillis(),
+                    motionScore = motion.motionScore,
+                    avgLuma = motion.avgLuma
+                )
+                when (sentinelRes) {
+                    is SentinelEngine.SentinelStepResult.TriggerLingerCapture -> {
+                        scope.launch(Dispatchers.Main) {
+                            sentinelStepLabel = "🚨 ЗАВИСАНИЕ > ${sentinelRes.durationMs / 1000}с!"
+                            sentinelEvents = SentinelEngine.getEvents()
+                            launchSentinelCapture(
+                                reason = "Объект у цели ${sentinelRes.durationMs / 1000}с (движ ${motion.motionScore}%)",
+                                useNightClahe = sentinelRes.nightClahe
+                            )
+                        }
+                    }
+                    is SentinelEngine.SentinelStepResult.NeighborIgnored -> {
+                        scope.launch(Dispatchers.Main) {
+                            sentinelStepLabel = "ПРОХОЖИЙ [ИГНОР]"
+                            sentinelEvents = SentinelEngine.getEvents()
+                        }
+                    }
+                    is SentinelEngine.SentinelStepResult.Tracking -> {
+                        val thr = SentinelEngine.getConfig().lingerThresholdSec
+                        sentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
+                    }
+                    is SentinelEngine.SentinelStepResult.Cooldown -> {
+                        sentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
+                    }
+                    SentinelEngine.SentinelStepResult.Idle -> {
+                        sentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
+                    }
+                }
+
+                liveLaplacianVariance = variance
+                overexposedPercent = expoTelemetry.overexposedPct
+                underexposedPercent = expoTelemetry.underexposedPct
+                if (isHistogramEnabled) {
+                    liveHistogramBins32 = expoTelemetry.bins32
+                    liveMeanLuma = expoTelemetry.meanLuma
+                }
+                if (isZebraEnabled) {
+                    liveZebraPoints = expoTelemetry.zebraHotspots
+                } else if (liveZebraPoints.isNotEmpty()) {
+                    liveZebraPoints = emptyList()
+                }
+
+                if (visorMode != VisorMode.NORMAL && !isStealthBlackoutActive) {
+                    val res = cyberVisorEngine.processYuv420Frame(
+                        imageProxy = imageProxy,
+                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                        isFrontCamera = (lensFacing == CameraSelector.LENS_FACING_FRONT)
+                    )
+                    if (res != null) {
+                        if (visorVideoRecorder.isRecording) {
+                            if (visorMode == VisorMode.WIREFRAME_POSE) {
+                                val snapped = cyberVisorEngine.snapshotLatestBitmapCopy()
+                                if (snapped != null) {
+                                    visorVideoRecorder.enqueueFrame(snapped)
+                                    if (!snapped.isRecycled) snapped.recycle()
+                                } else {
+                                    visorVideoRecorder.enqueueFrame(res.bitmap)
+                                }
+                            } else {
+                                visorVideoRecorder.enqueueFrame(res.bitmap)
+                            }
+                        }
+                        val tick = visorTickCounter.incrementAndGet()
+                        visorDisplayState = Triple(res.bitmap, res.telemetry, tick)
+                    }
+                }
+            } finally {
+                imageProxy.close()
+            }
+        }
+        return imageAnalysis
+    }
+
+    // Bind CameraX split by mode: VIDEO -> Preview + VideoCapture (+ ImageAnalysis if Bio-Visor active); PHOTO/OPTIC/VISOR -> Preview + ImageCapture + ImageAnalysis
+    LaunchedEffect(lensFacing, isVideoCameraMode, keepVisorStreamInVideo, previewView) {
         val pv = previewView ?: return@LaunchedEffect
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
@@ -1033,15 +1279,31 @@ fun GhostCameraScreen(
             val vCapture = androidx.camera.video.VideoCapture.withOutput(recorder)
             try {
                 cameraProvider.unbindAll()
-                val camera = cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    vCapture
-                )
+                val camera = if (keepVisorStreamInVideo) {
+                    val analysis = createConfiguredImageAnalysis()
+                    try {
+                        val cam3 = cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            vCapture,
+                            analysis
+                        )
+                        activeImageAnalysis = analysis
+                        boundUseCasesSummary = "VIDEO+VISOR: Preview + VideoCapture + ImageAnalysis"
+                        cam3
+                    } catch (_: Exception) {
+                        analysis.clearAnalyzer()
+                        cameraProvider.unbindAll()
+                        boundUseCasesSummary = "VIDEO: Preview + VideoCapture (HD/SD)"
+                        cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, vCapture)
+                    }
+                } else {
+                    boundUseCasesSummary = "VIDEO: Preview + VideoCapture (HD/SD fallback)"
+                    cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, vCapture)
+                }
                 cameraControl = camera.cameraControl
                 videoCapture = vCapture
-                boundUseCasesSummary = "VIDEO: Preview + VideoCapture (HD/SD fallback)"
                 if (pendingAutoStartVideo) {
                     pendingAutoStartVideo = false
                     delay(350)
@@ -1077,117 +1339,7 @@ fun GhostCameraScreen(
             )
 
             val capture = captureBuilder.build()
-
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                .build()
-
-            imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                try {
-                    val plane = imageProxy.planes[0]
-                    val variance = antiBlurEngine.calculateCenterRoiLaplacianVariance(
-                        yBuffer = plane.buffer,
-                        width = imageProxy.width,
-                        height = imageProxy.height,
-                        rowStride = plane.rowStride,
-                        targetRoiSize = 400
-                    )
-                    val expoTelemetry = antiBlurEngine.computeHistogramAndZebra(
-                        yBuffer = plane.buffer,
-                        width = imageProxy.width,
-                        height = imageProxy.height,
-                        rowStride = plane.rowStride,
-                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
-                        zebraThreshold = ZverPrefs.getZebraThreshold(context),
-                        collectZebra = isZebraEnabled
-                    )
-                    if (isFocusPeakingEnabled) {
-                        peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
-                            yBuffer = plane.buffer,
-                            width = imageProxy.width,
-                            height = imageProxy.height,
-                            rowStride = plane.rowStride,
-                            rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                        )
-                    } else if (peakingPoints.isNotEmpty()) {
-                        peakingPoints = emptyList()
-                    }
-                    val motion = antiBlurEngine.computeMotionAndLuma(
-                        yBuffer = plane.buffer,
-                        width = imageProxy.width,
-                        height = imageProxy.height,
-                        rowStride = plane.rowStride,
-                        previousGrid = previousMotionGrid
-                    )
-                    previousMotionGrid = motion.grid
-                    sentinelMotionScore = motion.motionScore
-                    sentinelAvgLuma = motion.avgLuma
-                    sentinelIsNight = motion.isLowLight
-
-                    val sentinelRes = SentinelEngine.evaluateMotionFrame(
-                        nowMs = System.currentTimeMillis(),
-                        motionScore = motion.motionScore,
-                        avgLuma = motion.avgLuma
-                    )
-                    when (sentinelRes) {
-                        is SentinelEngine.SentinelStepResult.TriggerLingerCapture -> {
-                            scope.launch(Dispatchers.Main) {
-                                sentinelStepLabel = "🚨 ЗАВИСАНИЕ > ${sentinelRes.durationMs / 1000}с!"
-                                sentinelEvents = SentinelEngine.getEvents()
-                                launchSentinelCapture(
-                                    reason = "Объект у цели ${sentinelRes.durationMs / 1000}с (движ ${motion.motionScore}%)",
-                                    useNightClahe = sentinelRes.nightClahe
-                                )
-                            }
-                        }
-                        is SentinelEngine.SentinelStepResult.NeighborIgnored -> {
-                            scope.launch(Dispatchers.Main) {
-                                sentinelStepLabel = "ПРОХОЖИЙ [ИГНОР]"
-                                sentinelEvents = SentinelEngine.getEvents()
-                            }
-                        }
-                        is SentinelEngine.SentinelStepResult.Tracking -> {
-                            val thr = SentinelEngine.getConfig().lingerThresholdSec
-                            sentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
-                        }
-                        is SentinelEngine.SentinelStepResult.Cooldown -> {
-                            sentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
-                        }
-                        SentinelEngine.SentinelStepResult.Idle -> {
-                            sentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
-                        }
-                    }
-
-                    liveLaplacianVariance = variance
-                    overexposedPercent = expoTelemetry.overexposedPct
-                    underexposedPercent = expoTelemetry.underexposedPct
-                    if (isHistogramEnabled) {
-                        liveHistogramBins32 = expoTelemetry.bins32
-                        liveMeanLuma = expoTelemetry.meanLuma
-                    }
-                    if (isZebraEnabled) {
-                        liveZebraPoints = expoTelemetry.zebraHotspots
-                    } else if (liveZebraPoints.isNotEmpty()) {
-                        liveZebraPoints = emptyList()
-                    }
-
-                    if (visorMode != VisorMode.NORMAL && !isStealthBlackoutActive) {
-                        val res = cyberVisorEngine.processYuv420Frame(
-                            imageProxy = imageProxy,
-                            rotationDegrees = imageProxy.imageInfo.rotationDegrees,
-                            isFrontCamera = (lensFacing == CameraSelector.LENS_FACING_FRONT)
-                        )
-                        if (res != null) {
-                            val tick = visorTickCounter.incrementAndGet()
-                            visorDisplayState = Triple(res.bitmap, res.telemetry, tick)
-                        }
-                    }
-                } finally {
-                    imageProxy.close()
-                }
-            }
-
+            val imageAnalysis = createConfiguredImageAnalysis()
             activeImageAnalysis = imageAnalysis
             try {
                 cameraProvider.unbindAll()
@@ -1282,8 +1434,11 @@ fun GhostCameraScreen(
                 lastStatusMessage = "Режим: Фотосъёмка"
             }
             "VIDEO" -> {
-                visorMode = VisorMode.NORMAL
-                lastStatusMessage = "Режим: Видео в сейф"
+                lastStatusMessage = if (visorMode != VisorMode.NORMAL) {
+                    "Режим: Видео + Визор (${visorMode.title})"
+                } else {
+                    "Режим: Видео в сейф"
+                }
             }
             "NIGHT" -> {
                 val nightIdx = CameraCapabilityProfiler.evIndexForStops(0.5f, proProfile.evStep, proProfile.evRange)
@@ -2326,33 +2481,53 @@ fun GhostCameraScreen(
                     onSaveVisorSnapshot = {
                         val snapBmp = cyberVisorEngine.snapshotLatestBitmapCopy()
                         if (snapBmp != null) {
+                            val savedBadge = visorMode.badgeRu
                             scope.launch {
                                 try {
-                                    val bytes = withContext(Dispatchers.Default) {
-                                        ExifStripper.processBitmapClean(
-                                            sourceBitmap = snapBmp,
-                                            recycleSource = true,
-                                            preset = ZverPrefs.getCompressionPreset(context),
-                                            antiPrnu = false
-                                        ).cleanBytes
-                                    }
                                     val savedRam = withContext(Dispatchers.IO) {
-                                        if (ZverPrefs.isRamOnlyMode(context)) {
-                                            GhostCryptoVault.addRamShot(bytes.clone(), isVideo = false)
-                                            true
+                                        val cap = imageCapture
+                                        if (cap != null) {
+                                            CaptureManager(
+                                                context = context,
+                                                imageCapture = cap,
+                                                captureExecutor = captureExecutor
+                                            ).saveExternalBitmapToVault(
+                                                bitmap = snapBmp,
+                                                recycleBitmap = true,
+                                                iqTag = "ВИЗОР:$savedBadge"
+                                            ).isRamOnly
                                         } else {
-                                            val (file, cos) = GhostCryptoVault.openEncryptedOutputStream(
-                                                context,
-                                                prefix = GhostCryptoVault.MEDIA_PHOTO
-                                            )
-                                            cos.use { it.write(bytes); it.flush() }
-                                            false
+                                            val bytes = ExifStripper.processBitmapClean(
+                                                sourceBitmap = snapBmp,
+                                                recycleSource = true,
+                                                preset = ZverPrefs.getCompressionPreset(context),
+                                                antiPrnu = ZverPrefs.isAntiPrnuEnabled(context)
+                                            ).cleanBytes
+                                            val ram = ZverPrefs.isRamOnlyMode(context)
+                                            if (ram) {
+                                                GhostCryptoVault.addRamShot(bytes.clone(), isVideo = false)
+                                            } else {
+                                                val (_, cos) = GhostCryptoVault.openEncryptedOutputStream(
+                                                    context,
+                                                    prefix = GhostCryptoVault.MEDIA_PHOTO
+                                                )
+                                                cos.use { it.write(bytes); it.flush() }
+                                                try {
+                                                    val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                                                        com.example.crypto.MonoVaultEngine.VolumeType.MASTER
+                                                    } else {
+                                                        com.example.crypto.MonoVaultEngine.VolumeType.DECOY
+                                                    }
+                                                    com.example.crypto.MonoVaultEngine.appendRecord(context, vol, bytes)
+                                                } catch (_: Exception) {}
+                                            }
+                                            Arrays.fill(bytes, 0.toByte())
+                                            ram
                                         }
                                     }
-                                    Arrays.fill(bytes, 0.toByte())
                                     vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                                     triggerHapticFeedback(isStealth = true)
-                                    lastStatusMessage = "🔬 КАДР ВИЗОРА (${visorMode.badgeRu}) СОХРАНЁН В ${if (savedRam) "ОЗУ" else "СЕЙФ"}"
+                                    lastStatusMessage = "🔬 КАДР ВИЗОРА ($savedBadge) СОХРАНЁН В ${if (savedRam) "ОЗУ" else "СЕЙФ"}"
                                 } catch (e: Exception) {
                                     lastStatusMessage = "ОШИБКА ВИЗОРА: ${e.message}"
                                 }
@@ -2642,14 +2817,19 @@ fun GhostCameraScreen(
                                 .size(48.dp)
                                 .testTag("video_record_button")
                                 .clip(CircleShape)
-                                .background(CyberRed.copy(alpha = 0.22f))
+                                .background(if (isRecordingVideo) CyberRed else CyberRed.copy(alpha = 0.22f))
                                 .border(1.5.dp, CyberRed, CircleShape)
                                 .clickable {
                                     triggerVideoRecordingToggle()
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Videocam, contentDescription = "Запись видео", tint = CyberRed, modifier = Modifier.size(22.dp))
+                            Icon(
+                                imageVector = if (isRecordingVideo) Icons.Default.Stop else Icons.Default.Videocam,
+                                contentDescription = if (isRecordingVideo) "Остановить запись" else "Запись видео",
+                                tint = if (isRecordingVideo) Color.White else CyberRed,
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
                     }
                 }
@@ -3230,8 +3410,36 @@ private fun CyberVisorControlCard(
             VisorMode.SKIN_CHROMA -> {
                 val compactPct = (telemetry.skinCompactness * 100f).toInt()
                 Text(
-                    text = "👤 Кожа YCbCr: ${telemetry.skinPercent}% • Сплочён. $compactPct% • Движ. ${telemetry.movingSkinPercent}%",
+                    text = "👤 Тепло-Кожа: ${telemetry.skinPercent}% • Сплочён. $compactPct% • Движ. ${telemetry.movingSkinPercent}%",
                     color = if (telemetry.skinPercent >= 2 && compactPct >= 18) CyberGreen else NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = activeMode.hintRu,
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
+            VisorMode.VEG_CHLOROPHYLL -> {
+                Text(
+                    text = "🌿 Живая зелень: ${telemetry.vegLivePercent}% • Синтетика/пластик: ${telemetry.vegSyntheticPercent}%",
+                    color = if (telemetry.vegLivePercent >= 3) CyberGreen else NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = "Изумрудный = живой хлорофилл; лиловый = пластик/синтетика/ткань",
+                    color = CyberMuted,
+                    fontSize = 9.sp
+                )
+            }
+            VisorMode.EDGE_TRACE -> {
+                Text(
+                    text = "🔌 Sobel-дорожки ПП: ${telemetry.edgeTraceDensityPercent}% кадра (золото = пятаки, бирюза = трассы)",
+                    color = NeonCyan,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 10.sp
@@ -3261,7 +3469,7 @@ private fun CyberVisorControlCard(
                 val count = telemetry.poseWireframe?.visibleCount ?: 0
                 Text(
                     text = if (count >= 3) {
-                        "🦴 Скелет: $count/33 точек в реальном времени"
+                        "🦴 Скелет (сглаж.): $count/33 точек в реальном времени"
                     } else {
                         "🦴 Скелет: поиск опорных точек ($count/33)..."
                     },

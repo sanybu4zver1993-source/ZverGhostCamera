@@ -7,6 +7,8 @@ import androidx.camera.core.ImageProxy
 import com.example.crypto.GhostCryptoVault
 import com.example.crypto.MonoVaultEngine
 import com.example.security.ZverPrefs
+import com.example.visor.CyberVisorEngine
+import com.example.visor.VisorMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -59,10 +61,11 @@ class CaptureManager(
         applyDehaze: Boolean = false,
         forceDocumentBw: Boolean = false,
         zoomRatio: Float = 1.0f,
-        photoIqOverride: PhotoIqEngine.PhotoIqProfile? = null
+        photoIqOverride: PhotoIqEngine.PhotoIqProfile? = null,
+        visorMode: VisorMode = VisorMode.NORMAL,
+        visorEngine: CyberVisorEngine? = null
     ): CaptureResult = captureMutex.withLock {
         val startTime = System.currentTimeMillis()
-        val rawShot = captureRawJpeg()
         val preset = if (forceDocumentBw) {
             ExifStripper.CompressionPreset.DOCUMENT_BW
         } else {
@@ -71,48 +74,108 @@ class CaptureManager(
         val antiPrnu = ZverPrefs.isAntiPrnuEnabled(appContext)
         val ramOnly = ZverPrefs.isRamOnlyMode(appContext)
         val smartCompression = ZverPrefs.isSmartCompressionEnabled(appContext)
-        val effectiveIq = if (forceDocumentBw) {
+        val effectiveIq = if (forceDocumentBw || visorMode != VisorMode.NORMAL) {
             PhotoIqEngine.PhotoIqProfile.OFF
         } else {
             photoIqOverride ?: ZverPrefs.getPhotoIqProfile(appContext)
         }
         val effectiveZoomIq = if (ZverPrefs.isZoomIqEnabled(appContext) && zoomRatio >= 1.8f) zoomRatio else 1.0f
 
+        // Temporal Bio-Visor modes (EULER_AMP, BIO_RPPG) preserve live pulse/motion state from active analyzer frame
+        if (!forceDocumentBw && (visorMode == VisorMode.EULER_AMP || visorMode == VisorMode.BIO_RPPG)) {
+            val liveSnap = visorEngine?.snapshotLatestBitmapCopy()
+            if (liveSnap != null) {
+                var snapClean: ByteArray? = null
+                try {
+                    return@withLock withContext(Dispatchers.IO) {
+                        val proc = ExifStripper.processBitmapClean(
+                            sourceBitmap = liveSnap,
+                            recycleSource = true,
+                            preset = preset,
+                            antiPrnu = antiPrnu,
+                            applyDehaze = false,
+                            photoIqProfile = PhotoIqEngine.PhotoIqProfile.OFF,
+                            zoomRatio = 1.0f
+                        )
+                        snapClean = proc.cleanBytes
+                        persistEncryptedCaptureResult(
+                            payload = snapClean!!,
+                            ramOnly = ramOnly,
+                            strippedCount = 1,
+                            startTime = startTime,
+                            audit = proc.audit,
+                            iqTag = "ВИЗОР:${visorMode.badgeRu}"
+                        )
+                    }
+                } finally {
+                    if (!liveSnap.isRecycled) liveSnap.recycle()
+                    snapClean?.let { Arrays.fill(it, 0.toByte()) }
+                }
+            }
+        }
+
+        val rawShot = captureRawJpeg()
         var cleanBytes: ByteArray? = null
+        var decodedForVisor: android.graphics.Bitmap? = null
+        var renderedVisorBmp: android.graphics.Bitmap? = null
         try {
             withContext(Dispatchers.IO) {
                 var strippedCount = 0
                 val audit: ExifStripper.AuditReport
 
-                val useFastBytePath = (preset == ExifStripper.CompressionPreset.HIGH_QUALITY) &&
-                    !antiPrnu &&
-                    !applyDehaze &&
-                    effectiveIq == PhotoIqEngine.PhotoIqProfile.OFF &&
-                    effectiveZoomIq < 1.8f &&
-                    (rawShot.rotationDegrees % 360 == 0)
+                if (!forceDocumentBw && visorMode != VisorMode.NORMAL) {
+                    decodedForVisor = decodeBoundedUprightBitmap(rawShot.bytes, rawShot.rotationDegrees, maxPixels = 2_400_000L)
+                        ?: throw IOException("Не удалось декодировать кадр для Био-Визора")
+                    val engine = visorEngine ?: CyberVisorEngine()
+                    renderedVisorBmp = engine.applyVisorEffectToBitmap(decodedForVisor!!, visorMode)
+                    decodedForVisor?.let { if (!it.isRecycled) it.recycle() }
+                    decodedForVisor = null
 
-                if (useFastBytePath) {
-                    val baos = ByteArrayOutputStream(rawShot.bytes.size)
-                    strippedCount = streamStrippedJpeg(rawShot.bytes, baos)
-                    cleanBytes = baos.toByteArray()
-                    audit = ExifStripper.auditBytes(cleanBytes!!)
-                } else {
-                    val processed = ExifStripper.processAndPurgeExif(
-                        rawJpeg = rawShot.bytes,
-                        rotationDegrees = rawShot.rotationDegrees,
-                        applyDehaze = applyDehaze,
+                    val proc = ExifStripper.processBitmapClean(
+                        sourceBitmap = renderedVisorBmp!!,
+                        recycleSource = true,
                         preset = preset,
                         antiPrnu = antiPrnu,
-                        photoIqProfile = effectiveIq,
-                        zoomRatio = effectiveZoomIq,
-                        useSmartCompression = smartCompression
+                        applyDehaze = false,
+                        photoIqProfile = PhotoIqEngine.PhotoIqProfile.OFF,
+                        zoomRatio = effectiveZoomIq
                     )
-                    cleanBytes = processed.cleanJpegBytes
-                    audit = processed.audit ?: ExifStripper.auditBytes(cleanBytes!!)
+                    renderedVisorBmp = null
+                    cleanBytes = proc.cleanBytes
+                    audit = proc.audit
                     strippedCount = 1
+                } else {
+                    val useFastBytePath = (preset == ExifStripper.CompressionPreset.HIGH_QUALITY) &&
+                        !antiPrnu &&
+                        !applyDehaze &&
+                        effectiveIq == PhotoIqEngine.PhotoIqProfile.OFF &&
+                        effectiveZoomIq < 1.8f &&
+                        (rawShot.rotationDegrees % 360 == 0)
+
+                    if (useFastBytePath) {
+                        val baos = ByteArrayOutputStream(rawShot.bytes.size)
+                        strippedCount = streamStrippedJpeg(rawShot.bytes, baos)
+                        cleanBytes = baos.toByteArray()
+                        audit = ExifStripper.auditBytes(cleanBytes!!)
+                    } else {
+                        val processed = ExifStripper.processAndPurgeExif(
+                            rawJpeg = rawShot.bytes,
+                            rotationDegrees = rawShot.rotationDegrees,
+                            applyDehaze = applyDehaze,
+                            preset = preset,
+                            antiPrnu = antiPrnu,
+                            photoIqProfile = effectiveIq,
+                            zoomRatio = effectiveZoomIq,
+                            useSmartCompression = smartCompression
+                        )
+                        cleanBytes = processed.cleanJpegBytes
+                        audit = processed.audit ?: ExifStripper.auditBytes(cleanBytes!!)
+                        strippedCount = 1
+                    }
                 }
 
                 val iqTag = buildList {
+                    if (visorMode != VisorMode.NORMAL && !forceDocumentBw) add("ВИЗОР:${visorMode.badgeRu}")
                     if (effectiveIq != PhotoIqEngine.PhotoIqProfile.OFF) add(effectiveIq.badgeRu)
                     if (effectiveZoomIq >= 1.8f) add("Z${effectiveZoomIq.toInt()}x")
                 }.joinToString("+")
@@ -128,6 +191,45 @@ class CaptureManager(
             }
         } finally {
             Arrays.fill(rawShot.bytes, 0.toByte())
+            cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
+            decodedForVisor?.let { if (!it.isRecycled) it.recycle() }
+            renderedVisorBmp?.let { if (!it.isRecycled) it.recycle() }
+        }
+    }
+
+    /**
+     * Persists a pre-rendered Bitmap (e.g. Bio-Visor snapshot button) through ExifStripper + Vault + MonoVault.
+     */
+    suspend fun saveExternalBitmapToVault(
+        bitmap: android.graphics.Bitmap,
+        recycleBitmap: Boolean = true,
+        iqTag: String = ""
+    ): CaptureResult = captureMutex.withLock {
+        val startTime = System.currentTimeMillis()
+        val preset = ZverPrefs.getCompressionPreset(appContext)
+        val antiPrnu = ZverPrefs.isAntiPrnuEnabled(appContext)
+        val ramOnly = ZverPrefs.isRamOnlyMode(appContext)
+        var cleanBytes: ByteArray? = null
+        try {
+            withContext(Dispatchers.IO) {
+                val proc = ExifStripper.processBitmapClean(
+                    sourceBitmap = bitmap,
+                    recycleSource = recycleBitmap,
+                    preset = preset,
+                    antiPrnu = antiPrnu
+                )
+                cleanBytes = proc.cleanBytes
+                persistEncryptedCaptureResult(
+                    payload = cleanBytes!!,
+                    ramOnly = ramOnly,
+                    strippedCount = 1,
+                    startTime = startTime,
+                    audit = proc.audit,
+                    iqTag = iqTag
+                )
+            }
+        } finally {
+            if (recycleBitmap && !bitmap.isRecycled) bitmap.recycle()
             cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
         }
     }
@@ -145,7 +247,9 @@ class CaptureManager(
         applyDehaze: Boolean = false,
         zoomRatio: Float = 1.0f,
         photoIqOverride: PhotoIqEngine.PhotoIqProfile? = null,
-        useSmartCompression: Boolean = ZverPrefs.isSmartCompressionEnabled(appContext)
+        useSmartCompression: Boolean = ZverPrefs.isSmartCompressionEnabled(appContext),
+        visorMode: VisorMode = VisorMode.NORMAL,
+        visorEngine: CyberVisorEngine? = null
     ): StackCaptureResult = captureMutex.withLock {
         val startTime = System.currentTimeMillis()
         val targetFrames = frameCount.coerceIn(2, 4)
@@ -157,6 +261,7 @@ class CaptureManager(
 
         val decodedFrames = ArrayList<android.graphics.Bitmap>(targetFrames)
         var stackedBitmap: android.graphics.Bitmap? = null
+        var visorBitmap: android.graphics.Bitmap? = null
         var cleanBytes: ByteArray? = null
 
         try {
@@ -188,14 +293,27 @@ class CaptureManager(
                 decodedFrames.clear()
                 stackedBitmap = stackOutput.bitmap
 
+                val bitmapForExport = if (visorMode != VisorMode.NORMAL) {
+                    val engine = visorEngine ?: CyberVisorEngine()
+                    val applied = engine.applyVisorEffectToBitmap(stackedBitmap!!, visorMode)
+                    stackedBitmap?.let { if (!it.isRecycled) it.recycle() }
+                    stackedBitmap = null
+                    visorBitmap = applied
+                    applied
+                } else {
+                    stackedBitmap!!
+                }
+
                 val smartQuality = if (useSmartCompression) {
-                    MultiFrameStacker.estimateSmartCompressionQuality(stackedBitmap!!, preset)
+                    MultiFrameStacker.estimateSmartCompressionQuality(bitmapForExport, preset)
                 } else {
                     preset.quality
                 }
 
-                // Avoid double-applying NIGHT_LIFT if mode is already NIGHT_DENOISE
-                val residualIq = if (mode == MultiFrameStacker.StackMode.NIGHT_DENOISE && effectiveIq == PhotoIqEngine.PhotoIqProfile.NIGHT_LIFT) {
+                // Avoid double-applying NIGHT_LIFT if mode is already NIGHT_DENOISE or visor filter is active
+                val residualIq = if (visorMode != VisorMode.NORMAL) {
+                    PhotoIqEngine.PhotoIqProfile.OFF
+                } else if (mode == MultiFrameStacker.StackMode.NIGHT_DENOISE && effectiveIq == PhotoIqEngine.PhotoIqProfile.NIGHT_LIFT) {
                     PhotoIqEngine.PhotoIqProfile.OFF
                 } else if (effectiveIq == PhotoIqEngine.PhotoIqProfile.TEXT_CRISP) {
                     effectiveIq
@@ -204,19 +322,21 @@ class CaptureManager(
                 }
 
                 val processed = ExifStripper.processBitmapClean(
-                    sourceBitmap = stackedBitmap!!,
+                    sourceBitmap = bitmapForExport,
                     recycleSource = true,
                     preset = preset,
                     antiPrnu = antiPrnu,
-                    applyDehaze = applyDehaze,
+                    applyDehaze = if (visorMode == VisorMode.NORMAL) applyDehaze else false,
                     photoIqProfile = residualIq,
                     zoomRatio = effectiveZoomIq,
                     qualityOverride = smartQuality
                 )
                 stackedBitmap = null
+                visorBitmap = null
                 cleanBytes = processed.cleanBytes
 
                 val iqTag = buildList {
+                    if (visorMode != VisorMode.NORMAL) add("ВИЗОР:${visorMode.badgeRu}")
                     add("${mode.badgeRu}×${stackOutput.stats.frameCount}")
                     if (useSmartCompression) add("Q$smartQuality")
                     if (effectiveZoomIq >= 1.8f) add("Z${effectiveZoomIq.toInt()}x")
@@ -239,6 +359,7 @@ class CaptureManager(
         } finally {
             decodedFrames.forEach { if (!it.isRecycled) it.recycle() }
             stackedBitmap?.let { if (!it.isRecycled) it.recycle() }
+            visorBitmap?.let { if (!it.isRecycled) it.recycle() }
             cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
         }
     }

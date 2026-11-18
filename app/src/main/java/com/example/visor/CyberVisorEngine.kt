@@ -60,7 +60,10 @@ data class VisorTelemetry(
     val irPeakDetected: Boolean = false,
     val irHotPixels: Int = 0,
     val irStatusLabel: String = "",
-    val poseWireframe: PoseWireframe? = null
+    val poseWireframe: PoseWireframe? = null,
+    val vegLivePercent: Int = 0,
+    val vegSyntheticPercent: Int = 0,
+    val edgeTraceDensityPercent: Int = 0
 )
 
 /**
@@ -80,7 +83,10 @@ class CyberVisorEngine {
                 field = value
                 if (value == VisorMode.BIO_RPPG) rppgTracker.reset()
                 if (value == VisorMode.EULER_AMP) eulerTracker.reset()
-                if (value != VisorMode.WIREFRAME_POSE) latestPoseWireframe = null
+                if (value != VisorMode.WIREFRAME_POSE) {
+                    latestPoseWireframe = null
+                    poseSmoother.reset()
+                }
                 if (value != VisorMode.IR_BEACON) irPersistFrames = 0
                 if (value != VisorMode.SKIN_CHROMA) {
                     hasPrevSkinLuma = false
@@ -98,15 +104,19 @@ class CyberVisorEngine {
     private var irMaskBuffer: BooleanArray = BooleanArray(0)
     private var skinMaskBuffer: BooleanArray = BooleanArray(0)
     private var skinDenoisedBuffer: BooleanArray = BooleanArray(0)
+    private var skinMotionRawBuffer: BooleanArray = BooleanArray(0)
     private var prevSkinLumaBuffer: ByteArray = ByteArray(0)
     private var curSkinLumaBuffer: ByteArray = ByteArray(0)
+    private var vegClassBuffer: ByteArray = ByteArray(0)
     private var hasPrevSkinLuma = false
     private var skinSceneCbShift = 0
     private var skinSceneCrShift = 0
 
     private val rppgTracker = PosRppgTracker()
     private val eulerTracker = EulerianTemporalAmplifier()
+    private val poseSmoother = PoseTemporalSmoother()
     private var irPersistFrames = 0
+    private var lastPoseIsFront = false
 
     private val poseDetector by lazy {
         PoseDetection.getClient(
@@ -171,16 +181,20 @@ class CyberVisorEngine {
         if (pixelBuffer.size != totalDst) {
             pixelBuffer = IntArray(totalDst)
         }
-        if ((mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.EDGE_TRACE) && rawRgbaBuffer.size != totalDst) {
+        if ((mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.EDGE_TRACE || mode == VisorMode.VEG_CHLOROPHYLL) && rawRgbaBuffer.size != totalDst) {
             rawRgbaBuffer = IntArray(totalDst)
         }
         if (mode == VisorMode.IR_BEACON && irMaskBuffer.size != totalDst) {
             irMaskBuffer = BooleanArray(totalDst)
         }
+        if (mode == VisorMode.VEG_CHLOROPHYLL && vegClassBuffer.size != totalDst) {
+            vegClassBuffer = ByteArray(totalDst)
+        }
         if (mode == VisorMode.SKIN_CHROMA) {
             if (skinMaskBuffer.size != totalDst) {
                 skinMaskBuffer = BooleanArray(totalDst)
                 skinDenoisedBuffer = BooleanArray(totalDst)
+                skinMotionRawBuffer = BooleanArray(totalDst)
                 curSkinLumaBuffer = ByteArray(totalDst)
                 prevSkinLumaBuffer = ByteArray(totalDst)
                 hasPrevSkinLuma = false
@@ -319,7 +333,7 @@ class CyberVisorEngine {
                 }
 
                 val dstIdx = dy * dstW + dx
-                if (mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.SKIN_CHROMA || mode == VisorMode.EDGE_TRACE) {
+                if (mode == VisorMode.EULER_AMP || mode == VisorMode.WIREFRAME_POSE || mode == VisorMode.IR_BEACON || mode == VisorMode.SKIN_CHROMA || mode == VisorMode.EDGE_TRACE || mode == VisorMode.VEG_CHLOROPHYLL) {
                     rawRgbaBuffer[dstIdx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                 }
 
@@ -329,13 +343,15 @@ class CyberVisorEngine {
                         sceneCbSum += uRaw
                         sceneCrSum += vRaw
                         curSkinLumaBuffer[dstIdx] = yVal.toByte()
-                        val matched = YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(
+                        val ycbcrMatch = YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(
                             yVal,
                             uRaw,
                             vRaw,
                             skinSceneCbShift,
                             skinSceneCrShift
                         )
+                        // Combined YCbCr + RGB warmth guard prevents beige/cool walls & green-tinted surfaces
+                        val matched = ycbcrMatch && isWarmHumanSkinRgbGuard(r, g, b)
                         skinMaskBuffer[dstIdx] = matched
                         matched
                     }
@@ -419,16 +435,8 @@ class CyberVisorEngine {
                     }
 
                     VisorMode.VEG_CHLOROPHYLL -> {
-                        val exg = (2 * g) - r - b
-                        val luma = (r * 77 + g * 150 + b * 29) shr 8
-                        if (exg > 22) {
-                            val boost = min(255, luma / 3 + exg * 2)
-                            (0xFF shl 24) or (20 shl 16) or (boost shl 8) or 80
-                        } else {
-                            val dim = luma / 2
-                            val warnR = min(255, dim + (r / 3))
-                            (0xFF shl 24) or (warnR shl 16) or ((dim / 2) shl 8) or (dim + 25).coerceAtMost(255)
-                        }
+                        vegClassBuffer[dstIdx] = classifyChlorophyllPixel(r, g, b)
+                        0 // Finalized after 3x3 organic-texture & anti-plastic coherence pass
                     }
 
                     VisorMode.NIGHT_GAMMA -> {
@@ -467,32 +475,24 @@ class CyberVisorEngine {
             }
         }
 
+        var edgeTracePixels = 0
         if (mode == VisorMode.EDGE_TRACE && dstW >= 4 && dstH >= 4) {
-            for (y in 1 until dstH - 1) {
-                val rowOff = y * dstW
-                val upOff = (y - 1) * dstW
-                val dnOff = (y + 1) * dstW
-                for (x in 1 until dstW - 1) {
-                    val idx = rowOff + x
-                    fun lumAt(c: Int): Int = (((c ushr 16) and 0xFF) * 77 + ((c ushr 8) and 0xFF) * 150 + (c and 0xFF) * 29) shr 8
-                    val gx = abs(lumAt(rawRgbaBuffer[idx + 1]) - lumAt(rawRgbaBuffer[idx - 1]))
-                    val gy = abs(lumAt(rawRgbaBuffer[dnOff + x]) - lumAt(rawRgbaBuffer[upOff + x]))
-                    val edge = min(255, (gx + gy) * 2)
-                    val base = lumAt(rawRgbaBuffer[idx]) / 3
-                    pixelBuffer[idx] = if (edge > 36) {
-                        (0xFF shl 24) or (0 shl 16) or (edge shl 8) or min(255, edge + 40)
-                    } else {
-                        (0xFF shl 24) or (base shl 16) or (base shl 8) or base
-                    }
-                }
-            }
+            edgeTracePixels = renderSobelPcbTracePass(rawRgbaBuffer, pixelBuffer, dstW, dstH)
+        }
+
+        var vegLivePixels = 0
+        var vegSyntheticPixels = 0
+        if (mode == VisorMode.VEG_CHLOROPHYLL && dstW >= 4 && dstH >= 4) {
+            val counts = renderChlorophyllCoherencePass(rawRgbaBuffer, vegClassBuffer, pixelBuffer, dstW, dstH)
+            vegLivePixels = counts.first
+            vegSyntheticPixels = counts.second
         }
 
         if (mode == VisorMode.EULER_AMP) {
             eulerTracker.amplifyInto(rawRgbaBuffer, pixelBuffer, dstW, dstH)
         }
 
-        // 3x3 Morphological despeckle + Y-plane moving-skin intersection for SKIN_CHROMA
+        // 3x3 Morphological despeckle + global-shift compensated moving-skin intersection for SKIN_CHROMA
         var skinTotalCount = 0
         var movingSkinCount = 0
         var skinMinX = dstW
@@ -500,6 +500,26 @@ class CyberVisorEngine {
         var skinMinY = dstH
         var skinMaxY = -1
         if (mode == VisorMode.SKIN_CHROMA && dstW >= 4 && dstH >= 4) {
+            // Estimate median-like global luma drift so handheld shake doesn't trigger whole-face false motion
+            var globalShiftSum = 0L
+            var globalShiftSamples = 0
+            if (hasPrevSkinLuma) {
+                for (sy in 0 until dstH step 6) {
+                    val off = sy * dstW
+                    for (sx in 0 until dstW step 6) {
+                        val idx = off + sx
+                        val cY = curSkinLumaBuffer[idx].toInt() and 0xFF
+                        val pY = prevSkinLumaBuffer[idx].toInt() and 0xFF
+                        val d = cY - pY
+                        if (abs(d) <= 20) {
+                            globalShiftSum += d
+                            globalShiftSamples++
+                        }
+                    }
+                }
+            }
+            val globalLumaShift = if (globalShiftSamples > 12) (globalShiftSum / globalShiftSamples).toInt() else 0
+
             for (y in 0 until dstH) {
                 val rowOff = y * dstW
                 val upOff = max(0, y - 1) * dstW
@@ -518,6 +538,20 @@ class CyberVisorEngine {
                     val clean = if (cur) nCount >= 2 else nCount >= 3
                     skinDenoisedBuffer[idx] = clean
 
+                    val curY = curSkinLumaBuffer[idx].toInt() and 0xFF
+                    val prevY = prevSkinLumaBuffer[idx].toInt() and 0xFF
+                    val compensatedDelta = abs((curY - prevY) - globalLumaShift)
+                    skinMotionRawBuffer[idx] = clean && hasPrevSkinLuma && compensatedDelta >= 13
+                }
+            }
+
+            for (y in 0 until dstH) {
+                val rowOff = y * dstW
+                val upOff = max(0, y - 1) * dstW
+                val dnOff = min(dstH - 1, y + 1) * dstW
+                for (x in 0 until dstW) {
+                    val idx = rowOff + x
+                    val clean = skinDenoisedBuffer[idx]
                     val c = rawRgbaBuffer[idx]
                     val r = (c ushr 16) and 0xFF
                     val g = (c ushr 8) and 0xFF
@@ -530,27 +564,39 @@ class CyberVisorEngine {
                         if (y < skinMinY) skinMinY = y
                         if (y > skinMaxY) skinMaxY = y
 
+                        val xm = max(0, x - 1)
+                        val xp = min(dstW - 1, x + 1)
+                        var motionNeighbors = 0
+                        if (skinMotionRawBuffer[rowOff + xm]) motionNeighbors++
+                        if (skinMotionRawBuffer[rowOff + xp]) motionNeighbors++
+                        if (skinMotionRawBuffer[upOff + x]) motionNeighbors++
+                        if (skinMotionRawBuffer[dnOff + x]) motionNeighbors++
+
                         val curY = curSkinLumaBuffer[idx].toInt() and 0xFF
                         val prevY = prevSkinLumaBuffer[idx].toInt() and 0xFF
-                        val isMoving = hasPrevSkinLuma && abs(curY - prevY) >= 14
+                        val strongDelta = abs((curY - prevY) - globalLumaShift) >= 22
+                        val isMoving = skinMotionRawBuffer[idx] && (motionNeighbors >= 1 || strongDelta)
+
                         if (isMoving) {
                             movingSkinCount++
-                            // Moving skin highlight: bright electric cyan/emerald outline glow
-                            val sr = min(255, r / 2 + 40)
+                            // Moving skin highlight: vivid electric cyan-mint outline glow
+                            val sr = min(255, r / 4 + 36)
                             val sg = 255
-                            val sb = min(255, b / 2 + 120)
+                            val sb = min(255, b / 3 + 175)
                             pixelBuffer[idx] = (0xFF shl 24) or (sr shl 16) or (sg shl 8) or sb
                         } else {
-                            // Static coherent skin: bio-amber contrast
-                            val sr = min(255, (r * 0.88f + 45).toInt())
-                            val sg = min(255, (g * 0.92f + 38).toInt())
-                            val sb = (b * 0.42f).toInt()
+                            // Static coherent skin: warm bio-thermal amber/orange tone mapped by luma
+                            val luma = (r * 77 + g * 150 + b * 29) shr 8
+                            val sr = min(255, 130 + (luma * 125) / 255)
+                            val sg = min(255, 65 + (luma * 115) / 255)
+                            val sb = min(100, 18 + (b / 4))
                             pixelBuffer[idx] = (0xFF shl 24) or (sr shl 16) or (sg shl 8) or sb
                         }
                     } else {
+                        // Cool deep navy background so thermal skin silhouettes pop clearly
                         val dim = ((r * 77 + g * 150 + b * 29) shr 8) / 3
-                        pixelBuffer[idx] = (0xFF shl 24) or ((dim * 0.7f).toInt() shl 16) or
-                            ((dim * 0.85f).toInt() shl 8) or min(255, dim + 16)
+                        pixelBuffer[idx] = (0xFF shl 24) or ((dim * 0.50f).toInt() shl 16) or
+                            ((dim * 0.72f).toInt() shl 8) or min(255, dim + 18)
                     }
                 }
             }
@@ -559,11 +605,11 @@ class CyberVisorEngine {
 
             // Update gentle adaptive scene white-balance offset only when skin isn't dominating frame
             val skinFrac = skinTotalCount.toFloat() / max(1, totalDst).toFloat()
-            if (skinFrac < 0.30f && totalDst > 0) {
+            if (skinFrac < 0.25f && totalDst > 0) {
                 val meanCb = (sceneCbSum / totalDst).toInt()
                 val meanCr = (sceneCrSum / totalDst).toInt()
-                skinSceneCbShift = ((meanCb - 128) / 6).coerceIn(-4, 4)
-                skinSceneCrShift = ((meanCr - 128) / 6).coerceIn(-4, 4)
+                skinSceneCbShift = ((meanCb - 128) / 7).coerceIn(-3, 3)
+                skinSceneCrShift = ((meanCr - 128) / 7).coerceIn(-3, 3)
             } else {
                 skinSceneCbShift = 0
                 skinSceneCrShift = 0
@@ -612,14 +658,19 @@ class CyberVisorEngine {
         }
 
         if (mode == VisorMode.WIREFRAME_POSE) {
+            if (lastPoseIsFront != isFrontCamera) {
+                lastPoseIsFront = isFrontCamera
+                poseSmoother.reset()
+                latestPoseWireframe = null
+            }
             val nowMs = System.currentTimeMillis()
-            if (nowMs - lastPoseInferMs >= 140L && poseBusy.compareAndSet(false, true)) {
+            if (nowMs - lastPoseInferMs >= 110L && poseBusy.compareAndSet(false, true)) {
                 lastPoseInferMs = nowMs
                 val poseBmp = Bitmap.createBitmap(rawRgbaBuffer, dstW, dstH, Bitmap.Config.ARGB_8888)
                 val input = InputImage.fromBitmap(poseBmp, 0)
                 poseDetector.process(input)
                     .addOnSuccessListener { pose ->
-                        latestPoseWireframe = buildWireframe(pose.allPoseLandmarks, pose, dstW.toFloat(), dstH.toFloat())
+                        latestPoseWireframe = buildSmoothedWireframe(pose, dstW.toFloat(), dstH.toFloat())
                     }
                     .addOnCompleteListener {
                         if (!poseBmp.isRecycled) poseBmp.recycle()
@@ -698,6 +749,15 @@ class CyberVisorEngine {
                 irPeakDetected = irConfirmedPeak,
                 irHotPixels = irCandidatePixels,
                 irStatusLabel = irStatus
+            )
+            VisorMode.VEG_CHLOROPHYLL -> VisorTelemetry(
+                mode = mode,
+                vegLivePercent = ((vegLivePixels * 100f) / max(1, totalDst)).roundToInt().coerceIn(0, 100),
+                vegSyntheticPercent = ((vegSyntheticPixels * 100f) / max(1, totalDst)).roundToInt().coerceIn(0, 100)
+            )
+            VisorMode.EDGE_TRACE -> VisorTelemetry(
+                mode = mode,
+                edgeTraceDensityPercent = ((edgeTracePixels * 100f) / max(1, totalDst)).roundToInt().coerceIn(0, 100)
             )
             else -> VisorTelemetry(mode = mode)
         }
@@ -778,6 +838,190 @@ class CyberVisorEngine {
         copy
     }
 
+    /**
+     * Renders [mode] deterministically onto a full/high-res upright ARGB_8888 [src] Bitmap
+     * so saved `.gcf` photos preserve the active Bio-Visor optical/CV filter.
+     */
+    fun applyVisorEffectToBitmap(
+        src: Bitmap,
+        mode: VisorMode,
+        poseOverlay: PoseWireframe? = latestPoseWireframe
+    ): Bitmap {
+        if (mode == VisorMode.NORMAL || src.isRecycled) {
+            return src.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        val w = src.width
+        val h = src.height
+        val total = w * h
+        val pixels = IntArray(total)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+        val out = IntArray(total)
+
+        var airlight = 0
+        var lumaMax = 255
+        if (mode == VisorMode.DEHAZE_LIVE) {
+            var minSum = 0L
+            var minDark = 255
+            var maxL = 1
+            var samples = 0
+            for (i in 0 until total step 16) {
+                val c = pixels[i]
+                val r = (c ushr 16) and 0xFF
+                val g = (c ushr 8) and 0xFF
+                val b = c and 0xFF
+                val yVal = (r * 77 + g * 150 + b * 29) shr 8
+                val dark = min(r, min(g, b))
+                minSum += dark
+                if (dark < minDark) minDark = dark
+                if (yVal > maxL) maxL = yVal
+                samples++
+            }
+            val avgDark = if (samples > 0) (minSum / samples).toInt() else 0
+            airlight = ((minDark * 6 + avgDark * 4) / 10).coerceIn(0, 140)
+            lumaMax = max(64, maxL)
+        }
+
+        when (mode) {
+            VisorMode.EDGE_TRACE -> {
+                if (w >= 4 && h >= 4) {
+                    renderSobelPcbTracePass(pixels, out, w, h)
+                } else {
+                    System.arraycopy(pixels, 0, out, 0, total)
+                }
+            }
+            VisorMode.VEG_CHLOROPHYLL -> {
+                val classes = ByteArray(total)
+                for (i in 0 until total) {
+                    val c = pixels[i]
+                    classes[i] = classifyChlorophyllPixel((c ushr 16) and 0xFF, (c ushr 8) and 0xFF, c and 0xFF)
+                }
+                if (w >= 4 && h >= 4) {
+                    renderChlorophyllCoherencePass(pixels, classes, out, w, h)
+                } else {
+                    System.arraycopy(pixels, 0, out, 0, total)
+                }
+            }
+            VisorMode.SKIN_CHROMA -> {
+                val rawMask = BooleanArray(total)
+                for (i in 0 until total) {
+                    val c = pixels[i]
+                    val r = (c ushr 16) and 0xFF
+                    val g = (c ushr 8) and 0xFF
+                    val b = c and 0xFF
+                    rawMask[i] = YcbcrSkinAnalyzer.isHumanSkinRgb(r, g, b) && isWarmHumanSkinRgbGuard(r, g, b)
+                }
+                for (y in 0 until h) {
+                    val rowOff = y * w
+                    val upOff = max(0, y - 1) * w
+                    val dnOff = min(h - 1, y + 1) * w
+                    for (x in 0 until w) {
+                        val idx = rowOff + x
+                        val cur = rawMask[idx]
+                        var nCount = 0
+                        if (rawMask[rowOff + max(0, x - 1)]) nCount++
+                        if (rawMask[rowOff + min(w - 1, x + 1)]) nCount++
+                        if (rawMask[upOff + x]) nCount++
+                        if (rawMask[dnOff + x]) nCount++
+                        val clean = if (cur) nCount >= 2 else nCount >= 3
+                        val c = pixels[idx]
+                        val r = (c ushr 16) and 0xFF
+                        val g = (c ushr 8) and 0xFF
+                        val b = c and 0xFF
+                        val luma = (r * 77 + g * 150 + b * 29) shr 8
+                        out[idx] = if (clean) {
+                            val sr = min(255, 130 + (luma * 125) / 255)
+                            val sg = min(255, 65 + (luma * 115) / 255)
+                            val sb = min(100, 18 + (b / 4))
+                            (0xFF shl 24) or (sr shl 16) or (sg shl 8) or sb
+                        } else {
+                            val dim = luma / 3
+                            (0xFF shl 24) or ((dim * 0.50f).toInt() shl 16) or
+                                ((dim * 0.72f).toInt() shl 8) or min(255, dim + 18)
+                        }
+                    }
+                }
+            }
+            else -> {
+                val roiX0 = (w * 0.34f).toInt()
+                val roiX1 = (w * 0.66f).toInt()
+                val roiY0 = (h * 0.28f).toInt()
+                val roiY1 = (h * 0.70f).toInt()
+                for (y in 0 until h) {
+                    val rowOff = y * w
+                    val inRoiY = (y in roiY0..roiY1)
+                    for (x in 0 until w) {
+                        val idx = rowOff + x
+                        val c = pixels[idx]
+                        val r = (c ushr 16) and 0xFF
+                        val g = (c ushr 8) and 0xFF
+                        val b = c and 0xFF
+                        out[idx] = when (mode) {
+                            VisorMode.VEIN_HEMO -> {
+                                val rf = max(r, 4).toDouble()
+                                val gf = max(g, 4).toDouble()
+                                val hemoIndex = (ln(rf) - ln(gf)) * 210.0
+                                val baseLuma = (r * 77 + g * 150 + b * 29) shr 8
+                                val veinBoost = (baseLuma - hemoIndex * 2.2).roundToInt().coerceIn(0, 255)
+                                (0xFF shl 24) or ((veinBoost * 0.25f).toInt() shl 16) or
+                                    (veinBoost shl 8) or min(255, (veinBoost * 0.90f + 20).toInt())
+                            }
+                            VisorMode.DERMA_UV_SIM -> {
+                                val uvContrast = ((b * 1.35f) - (r * 0.35f)).roundToInt().coerceIn(0, 255)
+                                (0xFF shl 24) or ((uvContrast * 0.45f).toInt() shl 16) or
+                                    ((uvContrast * 0.65f).toInt() shl 8) or min(255, (uvContrast * 1.25f + 15).toInt())
+                            }
+                            VisorMode.THERMAL_LUT -> {
+                                val luma = (r * 77 + g * 150 + b * 29) shr 8
+                                ironbowLut[luma]
+                            }
+                            VisorMode.DEHAZE_LIVE -> {
+                                val span = max(48, lumaMax - airlight)
+                                val dr = (((r - airlight) * 255) / span).coerceIn(0, 255)
+                                val dg = (((g - airlight) * 255) / span).coerceIn(0, 255)
+                                val db = (((b - airlight) * 255) / span).coerceIn(0, 255)
+                                (0xFF shl 24) or (dr shl 16) or (dg shl 8) or db
+                            }
+                            VisorMode.WIREFRAME_POSE -> {
+                                (0xFF shl 24) or (((r * 45) / 100) shl 16) or (((g * 65) / 100) shl 8) or ((b * 85) / 100)
+                            }
+                            VisorMode.NIGHT_GAMMA -> {
+                                (0xFF shl 24) or (nightLut[r] shl 16) or (nightLut[g] shl 8) or nightLut[b]
+                            }
+                            VisorMode.IR_BEACON -> {
+                                val irScore = (r + b) - (g * 2)
+                                if (irScore > 55 && ((r > 170 && b > 145) || (r > 246 && g > 246 && b > 246))) {
+                                    0xFFFF0055.toInt()
+                                } else {
+                                    val dim = (r + g + b) / 9
+                                    (0xFF shl 24) or (dim shl 16) or (dim shl 8) or dim
+                                }
+                            }
+                            VisorMode.OCR_CONTRAST -> {
+                                val lum = (r * 77 + g * 150 + b * 29) shr 8
+                                val stretched = (((lum - 128) * 24) / 10 + 128).coerceIn(0, 255)
+                                (0xFF shl 24) or (min(255, (stretched * 95) / 100) shl 16) or
+                                    (stretched shl 8) or min(255, stretched + 12)
+                            }
+                            VisorMode.BIO_RPPG -> {
+                                val onBorder = (inRoiY && (x == roiX0 || x == roiX1)) ||
+                                    ((y == roiY0 || y == roiY1) && x in roiX0..roiX1)
+                                if (onBorder) 0xFF00FF88.toInt() else c
+                            }
+                            else -> c
+                        }
+                    }
+                }
+            }
+        }
+
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        result.setPixels(out, 0, w, 0, 0, w, h)
+        if (mode == VisorMode.WIREFRAME_POSE && poseOverlay != null) {
+            drawWireframeOntoBitmap(result, poseOverlay)
+        }
+        return result
+    }
+
     fun release() {
         synchronized(bitmapLock) {
             frontBufferBitmap?.let { if (!it.isRecycled) it.recycle() }
@@ -787,51 +1031,23 @@ class CyberVisorEngine {
         }
         rppgTracker.reset()
         eulerTracker.reset()
+        poseSmoother.reset()
         try { poseDetector.close() } catch (_: Exception) {}
     }
 
-    private fun buildWireframe(
-        all: List<PoseLandmark>,
+    private fun buildSmoothedWireframe(
         pose: com.google.mlkit.vision.pose.Pose,
         w: Float,
         h: Float
     ): PoseWireframe {
-        val visible = all.filter { it.inFrameLikelihood >= 0.45f }
-        if (visible.size < 3) return PoseWireframe(visibleCount = visible.size)
-
-        fun pt(type: Int): PosePointNorm? {
-            val lm = pose.getPoseLandmark(type) ?: return null
-            if (lm.inFrameLikelihood < 0.40f) return null
-            return PosePointNorm((lm.position.x / w).coerceIn(0f, 1f), (lm.position.y / h).coerceIn(0f, 1f))
+        val rawMap = HashMap<Int, Pair<PosePointNorm, Float>>(33)
+        for (lm in pose.allPoseLandmarks) {
+            rawMap[lm.landmarkType] = PosePointNorm(
+                (lm.position.x / w).coerceIn(0f, 1f),
+                (lm.position.y / h).coerceIn(0f, 1f)
+            ) to lm.inFrameLikelihood
         }
-
-        val pairs = listOf(
-            PoseLandmark.LEFT_SHOULDER to PoseLandmark.RIGHT_SHOULDER,
-            PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_ELBOW,
-            PoseLandmark.LEFT_ELBOW to PoseLandmark.LEFT_WRIST,
-            PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_ELBOW,
-            PoseLandmark.RIGHT_ELBOW to PoseLandmark.RIGHT_WRIST,
-            PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_HIP,
-            PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_HIP,
-            PoseLandmark.LEFT_HIP to PoseLandmark.RIGHT_HIP,
-            PoseLandmark.LEFT_HIP to PoseLandmark.LEFT_KNEE,
-            PoseLandmark.LEFT_KNEE to PoseLandmark.LEFT_ANKLE,
-            PoseLandmark.RIGHT_HIP to PoseLandmark.RIGHT_KNEE,
-            PoseLandmark.RIGHT_KNEE to PoseLandmark.RIGHT_ANKLE,
-            PoseLandmark.NOSE to PoseLandmark.LEFT_SHOULDER,
-            PoseLandmark.NOSE to PoseLandmark.RIGHT_SHOULDER
-        )
-
-        val bones = mutableListOf<Pair<PosePointNorm, PosePointNorm>>()
-        for ((a, b) in pairs) {
-            val pa = pt(a)
-            val pb = pt(b)
-            if (pa != null && pb != null) bones.add(pa to pb)
-        }
-        val joints = visible.map {
-            PosePointNorm((it.position.x / w).coerceIn(0f, 1f), (it.position.y / h).coerceIn(0f, 1f))
-        }
-        return PoseWireframe(joints = joints, bones = bones, visibleCount = visible.size)
+        return poseSmoother.update(rawMap)
     }
 
     private fun drawWireframeOntoBitmap(bmp: Bitmap, wf: PoseWireframe) {
@@ -854,6 +1070,277 @@ class CyberVisorEngine {
         for (j in wf.joints) {
             canvas.drawCircle(j.x * w, j.y * h, r, jointPaint)
         }
+    }
+
+    companion object {
+        internal val POSE_BONE_PAIRS = listOf(
+            PoseLandmark.LEFT_SHOULDER to PoseLandmark.RIGHT_SHOULDER,
+            PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_ELBOW,
+            PoseLandmark.LEFT_ELBOW to PoseLandmark.LEFT_WRIST,
+            PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_ELBOW,
+            PoseLandmark.RIGHT_ELBOW to PoseLandmark.RIGHT_WRIST,
+            PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_HIP,
+            PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_HIP,
+            PoseLandmark.LEFT_HIP to PoseLandmark.RIGHT_HIP,
+            PoseLandmark.LEFT_HIP to PoseLandmark.LEFT_KNEE,
+            PoseLandmark.LEFT_KNEE to PoseLandmark.LEFT_ANKLE,
+            PoseLandmark.RIGHT_HIP to PoseLandmark.RIGHT_KNEE,
+            PoseLandmark.RIGHT_KNEE to PoseLandmark.RIGHT_ANKLE,
+            PoseLandmark.NOSE to PoseLandmark.LEFT_SHOULDER,
+            PoseLandmark.NOSE to PoseLandmark.RIGHT_SHOULDER
+        )
+
+        /**
+         * Extra RGB warmth & neutral-wall rejection guard for SKIN_CHROMA.
+         */
+        internal fun isWarmHumanSkinRgbGuard(r: Int, g: Int, b: Int): Boolean {
+            return (r - b) >= 8 && r >= (g - 4) && (r > 32 || g > 20)
+        }
+
+        /**
+         * Spectral Chlorophyll vs Synthetic Green Classifier:
+         * Returns:
+         * - 1: Natural chlorophyll candidate (normalized ExG + ExGR + blue-absorption check, non-neon)
+         * - 2: Artificial/plastic/teal/neon green (high green hue failing biological chlorophyll ratios)
+         * - 0: Non-green background
+         */
+        internal fun classifyChlorophyllPixel(r: Int, g: Int, b: Int): Byte {
+            val luma = (r * 77 + g * 150 + b * 29) shr 8
+            val sum = r + g + b
+            if (luma < 18 || min(r, min(g, b)) > 205) return 0
+            if (g <= r + 4 || g <= b + 6) return 0
+
+            val nExG = ((2 * g - r - b) * 100) / max(48, sum)
+            val blueDropPct = ((g - b) * 100) / max(24, g)
+            val exGr = ((3 * g - (24 * r) / 10 - b) * 100) / max(48, sum)
+            val isNeonDye = (g > 135 && r * 100 < g * 22 && b * 100 < g * 18)
+
+            return if (!isNeonDye && nExG >= 16 && blueDropPct >= 18 && exGr >= 6) {
+                1
+            } else if (nExG >= 8 || (g - r >= 6 && g - b >= 6)) {
+                2
+            } else {
+                0
+            }
+        }
+
+        internal fun renderChlorophyllCoherencePass(
+            srcRgba: IntArray,
+            classBuf: ByteArray,
+            dstRgba: IntArray,
+            w: Int,
+            h: Int
+        ): Pair<Int, Int> {
+            var liveCount = 0
+            var synthCount = 0
+            for (y in 0 until h) {
+                val rowOff = y * w
+                val upOff = max(0, y - 1) * w
+                val dnOff = min(h - 1, y + 1) * w
+                val up2Off = max(0, y - 2) * w
+                val dn2Off = min(h - 1, y + 2) * w
+                for (x in 0 until w) {
+                    val idx = rowOff + x
+                    val c = srcRgba[idx]
+                    val r = (c ushr 16) and 0xFF
+                    val g = (c ushr 8) and 0xFF
+                    val b = c and 0xFF
+                    val luma = (r * 77 + g * 150 + b * 29) shr 8
+                    val cls = classBuf[idx].toInt()
+
+                    if (cls == 1) {
+                        val xm = max(0, x - 1)
+                        val xp = min(w - 1, x + 1)
+                        var nLive = 0
+                        if (classBuf[rowOff + xm].toInt() == 1) nLive++
+                        if (classBuf[rowOff + xp].toInt() == 1) nLive++
+                        if (classBuf[upOff + x].toInt() == 1) nLive++
+                        if (classBuf[dnOff + x].toInt() == 1) nLive++
+
+                        // Organic texture check across 5x5 step-2 neighborhood (flat glossy molded plastic stays smooth)
+                        val gL = (srcRgba[rowOff + max(0, x - 2)] ushr 8) and 0xFF
+                        val gR = (srcRgba[rowOff + min(w - 1, x + 2)] ushr 8) and 0xFF
+                        val gU = (srcRgba[up2Off + x] ushr 8) and 0xFF
+                        val gD = (srcRgba[dn2Off + x] ushr 8) and 0xFF
+                        val localOrganicVar = abs(gL - g) + abs(gR - g) + abs(gU - g) + abs(gD - g)
+
+                        val confirmedLive = (nLive >= 2 && localOrganicVar >= 6) || (nLive >= 3 && (g - b) >= 24 && localOrganicVar >= 3)
+                        if (confirmedLive) {
+                            liveCount++
+                            val exg = (2 * g) - r - b
+                            val boost = min(255, luma / 3 + exg * 2 + 24)
+                            dstRgba[idx] = (0xFF shl 24) or (22 shl 16) or (boost shl 8) or 70
+                        } else {
+                            // Downgrade ultra-smooth uniform green plastic/fabric to synthetic warning tint
+                            synthCount++
+                            val dim = luma / 2
+                            dstRgba[idx] = (0xFF shl 24) or (min(255, dim + 65) shl 16) or
+                                (min(255, dim / 2 + 20) shl 8) or min(255, dim + 75)
+                        }
+                    } else if (cls == 2) {
+                        synthCount++
+                        val dim = luma / 2
+                        dstRgba[idx] = (0xFF shl 24) or (min(255, dim + 72) shl 16) or
+                            (min(255, dim / 2 + 18) shl 8) or min(255, dim + 82)
+                    } else {
+                        val dim = (luma * 42) / 100
+                        dstRgba[idx] = (0xFF shl 24) or (dim shl 16) or (dim shl 8) or min(255, dim + 18)
+                    }
+                }
+            }
+            return liveCount to synthCount
+        }
+
+        /**
+         * True 3x3 Sobel edge extractor over green-weighted luminance for PCB copper traces & solder pads.
+         */
+        internal fun renderSobelPcbTracePass(
+            srcRgba: IntArray,
+            dstRgba: IntArray,
+            w: Int,
+            h: Int
+        ): Int {
+            fun gLum(c: Int): Int =
+                (((c ushr 16) and 0xFF) * 3 + ((c ushr 8) and 0xFF) * 10 + (c and 0xFF) * 3) shr 4
+
+            var traceCount = 0
+            for (y in 0 until h) {
+                val ym = max(0, y - 1)
+                val yp = min(h - 1, y + 1)
+                val upRow = ym * w
+                val midRow = y * w
+                val dnRow = yp * w
+                for (x in 0 until w) {
+                    val idx = midRow + x
+                    if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+                        val base = gLum(srcRgba[idx]) / 4
+                        dstRgba[idx] = (0xFF shl 24) or (base shl 16) or (base shl 8) or min(255, base + 10)
+                        continue
+                    }
+                    val xm = x - 1
+                    val xp = x + 1
+
+                    val tl = gLum(srcRgba[upRow + xm])
+                    val tc = gLum(srcRgba[upRow + x])
+                    val tr = gLum(srcRgba[upRow + xp])
+                    val ml = gLum(srcRgba[midRow + xm])
+                    val mc = gLum(srcRgba[idx])
+                    val mr = gLum(srcRgba[midRow + xp])
+                    val bl = gLum(srcRgba[dnRow + xm])
+                    val bc = gLum(srcRgba[dnRow + x])
+                    val br = gLum(srcRgba[dnRow + xp])
+
+                    val gx = (tr + (mr shl 1) + br) - (tl + (ml shl 1) + bl)
+                    val gy = (bl + (bc shl 1) + br) - (tl + (tc shl 1) + tr)
+                    val grad = min(255, (abs(gx) + abs(gy)) / 2)
+
+                    val c = srcRgba[idx]
+                    val r = (c ushr 16) and 0xFF
+                    val g = (c ushr 8) and 0xFF
+                    val b = c and 0xFF
+                    val chromaSpread = max(r, max(g, b)) - min(r, min(g, b))
+
+                    if (grad > 40) {
+                        traceCount++
+                        val isSolderPadOrPin = grad > 76 && mc > 125 && chromaSpread < 52
+                        dstRgba[idx] = if (isSolderPadOrPin) {
+                            // Metallic solder pads / IC leads: warm gold-amber
+                            val pr = min(255, 195 + grad / 4)
+                            val pg = min(255, 155 + grad / 3)
+                            (0xFF shl 24) or (pr shl 16) or (pg shl 8) or 52
+                        } else {
+                            // Fine copper traces / SMD boundaries: crisp neon cyan-emerald
+                            val tg = min(255, grad + 55)
+                            val tb = min(255, grad + 85)
+                            (0xFF shl 24) or (0 shl 16) or (tg shl 8) or tb
+                        }
+                    } else {
+                        val base = mc / 4
+                        dstRgba[idx] = (0xFF shl 24) or (base shl 16) or (min(255, base + 4) shl 8) or min(255, base + 12)
+                    }
+                }
+            }
+            return traceCount
+        }
+    }
+}
+
+/**
+ * Hysteresis + Velocity-Adaptive One-Euro-style EMA smoother for ML Kit Pose landmarks.
+ * Prevents close-hand jitter, rapid limb-swap spikes, and flickering bone dropout.
+ */
+internal class PoseTemporalSmoother {
+    private data class TrackedJoint(
+        var x: Float,
+        var y: Float,
+        var likelihood: Float,
+        var missedFrames: Int = 0
+    )
+
+    private val joints = HashMap<Int, TrackedJoint>(33)
+
+    fun reset() {
+        joints.clear()
+    }
+
+    fun update(rawLandmarks: Map<Int, Pair<PosePointNorm, Float>>): PoseWireframe {
+        val nextIds = HashSet<Int>(33)
+        for ((type, pair) in rawLandmarks) {
+            val (pt, likelihood) = pair
+            val existing = joints[type]
+            if (existing == null) {
+                if (likelihood >= 0.50f) {
+                    joints[type] = TrackedJoint(pt.x, pt.y, likelihood, 0)
+                    nextIds.add(type)
+                }
+            } else {
+                if (likelihood >= 0.32f) {
+                    val dx = pt.x - existing.x
+                    val dy = pt.y - existing.y
+                    val dist = sqrt(dx * dx + dy * dy)
+                    // Outlier spike / close-hand swap clamp + adaptive deadband EMA
+                    val alpha = when {
+                        dist > 0.20f && likelihood < 0.78f -> 0.14f
+                        dist < 0.008f -> 0.10f
+                        dist < 0.05f -> 0.24f + ((dist - 0.008f) / 0.042f) * 0.26f
+                        else -> 0.56f
+                    }
+                    existing.x = (existing.x + dx * alpha).coerceIn(0f, 1f)
+                    existing.y = (existing.y + dy * alpha).coerceIn(0f, 1f)
+                    existing.likelihood = likelihood
+                    existing.missedFrames = 0
+                    nextIds.add(type)
+                }
+            }
+        }
+
+        // Coast briefly lost joints (up to 3 frames) so close-hand occlusions don't cause flickering bones
+        val iter = joints.entries.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            if (!nextIds.contains(entry.key)) {
+                entry.value.missedFrames++
+                entry.value.likelihood *= 0.85f
+                if (entry.value.missedFrames > 3) {
+                    iter.remove()
+                }
+            }
+        }
+
+        if (joints.size < 3) {
+            return PoseWireframe(visibleCount = joints.size)
+        }
+
+        val bones = mutableListOf<Pair<PosePointNorm, PosePointNorm>>()
+        for ((a, b) in CyberVisorEngine.POSE_BONE_PAIRS) {
+            val pa = joints[a]
+            val pb = joints[b]
+            if (pa != null && pb != null) {
+                bones.add(PosePointNorm(pa.x, pa.y) to PosePointNorm(pb.x, pb.y))
+            }
+        }
+        val pts = joints.values.map { PosePointNorm(it.x, it.y) }
+        return PoseWireframe(joints = pts, bones = bones, visibleCount = joints.size)
     }
 }
 

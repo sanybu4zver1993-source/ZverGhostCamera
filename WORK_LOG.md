@@ -156,3 +156,30 @@
 - **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
 - **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15 / HyperOS 2):** визуальная чистота HUD, меню `⋮`, полупрозрачность PRO-панели, совпадение стопов `EV` между пилюлей и PRO-слайдером, доступность кнопки `"ЗАКРЫТЬ НАСТРОЙКИ"` над 3-кнопочной панелью навигации и однострочное сворачивание Bio-Visor — `UNVERIFIED` до проверки на устройстве.
 
+---
+
+## 2026-11-18 — Поэтапные исправления по логам Redmi 13C и видеотесту: Часть 3 (Био-Визор: запись с фильтром, фото .gcf, Хлорофилл, Скелет, Тепло-Кожа, Дорожки ПП)
+
+### 1. Реализованные изменения (Часть 3)
+- **`VisorVideoRecorder.kt` (новый файл):**
+  - Создан аппаратный H.264/AAC рекордер (`MediaCodec` + `MediaMuxer`) с конвертером `VisorYuvPacker` (`NV12` `YUV420SemiPlanar`, `I420` `YUV420Planar` и fallback `COLOR_FormatYUV420Flexible` через `writeArgbToCodecImage` с учётом произвольных `rowStride`/`pixelStride`), выравниванием сторон до кратности 16 (макс. 640px), защищённой инициализацией опциональной AAC-дорожки с graceful degradation в видео-без-звука и неблокирующей однослотовой очередью `enqueueFrame`.
+- **`CyberVisorEngine.kt`:**
+  - В `VisorTelemetry` добавлены поля `vegLivePercent`, `vegSyntheticPercent`, `edgeTraceDensityPercent`.
+  - Добавлен метод `applyVisorEffectToBitmap(src, mode, poseOverlay)` для детерминированного наложения активного фильтра Био-Визора на полноразмерные фото и кадры мульти-стека.
+  - **`VEG_CHLOROPHYLL` (`Хлорофилл`):** `classifyChlorophyllPixel` + `renderChlorophyllCoherencePass` (нормализованный ExG/ExGR + поглощение синего канала + фильтр неоновых красителей + 5x5 проверка органической микротекстуры листа) разделяют живую листву (изумруд) и гладкий зелёный пластик / бирюзу / синтетику (пурпурно-янтарная отметка).
+  - **`WIREFRAME_POSE` (`Скелет`):** добавлен сглаживатель `PoseTemporalSmoother` (гистерезис захвата `>= 0.50f` и удержания `>= 0.32f`, 3-кадровый coasting при кратковременной окклюзии, подавление выбросов `dist > 0.20f` и адаптивный по скорости EMA `0.10f..0.56f` против дрожи кистей вблизи).
+  - **`SKIN_CHROMA` (`Тепло-Кожа`):** добавлен RGB-фильтр тёплого тона кожи `isWarmHumanSkinRgbGuard` (отсев серых/холодных/зелёных стен), оценка глобального сдвига яркости `globalLumaShift` и 4-соседская проверка движения против ложных срабатываний при дрожи рук; усилен тепловой контраст статики (янтарь/оранжевый) и движения (циан-мята).
+  - **`EDGE_TRACE` (`Дорожки ПП`):** добавлен честный 3x3 Sobel по взвешенной зелёной яркости (`renderSobelPcbTracePass`), выделяющий яркие контактные площадки/выводы золотым и тонкие медные дорожки циан-изумрудом на приглушённой подложке.
+- **`CaptureManager.kt`:**
+  - В `takeSecurePhoto` и `captureMultiFrameStack` добавлены `visorMode` и `visorEngine`: темпоральные режимы (`EULER_AMP`, `BIO_RPPG`) забирают обработанный кадр из `snapshotLatestBitmapCopy()`, пространственные фильтры накладываются через `applyVisorEffectToBitmap` на выпрямленный кадр (с ограничением `2_400_000L` пикселей) до `ExifStripper`, шифрования в `.gcf` и зеркалирования в `MonoVaultEngine` (`iqTag = "ВИЗОР:${visorMode.badgeRu}"`).
+  - Добавлен `saveExternalBitmapToVault(...)` для прогона снимков кнопки `"В сейф"` через `ExifStripper`, Сейф и `MonoVaultEngine`.
+- **`GhostCameraScreen.kt`:**
+  - Убран принудительный сброс `visorMode = VisorMode.NORMAL` при выборе режима `"Видео"`; добавлено удержание конвейера `Preview + VideoCapture + ImageAnalysis` при активном Био-Визоре в видеорежиме (с безопасным fallback) и отправка кадров (включая нарисованные кости `WIREFRAME_POSE`) в `VisorVideoRecorder`.
+  - Финализация видео Био-Визора прогоняется через `Mp4Sanitizer.sanitizeMp4File`, `GhostCryptoVault.encryptFileToVault` / `addRamShot` и шредер временных файлов; кнопка `video_record_button` отображает стоп-иконку при записи; `CyberVisorControlCard` выводит живую телеметрию по режимам `Хлорофилл`, `Дорожки ПП`, `Тепло-Кожа` и `Скелет`.
+- **`P3VisorRefinementsTest.kt` (новый файл):**
+  - Добавлено 5 JVM/Robolectric-тестов (сохранение эффекта на `Bitmap`, отличие живой листвы от пластика и бирюзы, подавление дрожи/выбросов `PoseTemporalSmoother`, 3x3 Sobel на дорожках и площадках ПП, `isWarmHumanSkinRgbGuard` + `VisorYuvPacker`).
+
+### 2. Верификация Части 3
+- **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL**, **49/49 PASS** (`0 failures, 0 errors, 0 skipped`, включая `P3VisorRefinementsTest`: 5/5 PASS).
+- **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** аппаратное кодирование H.264/AAC в `VisorVideoRecorder` (`c2.mtk.avc.encoder`), реальная калибровка живой листвы против зелёного пластика, стабильность ML Kit Pose на близкой дистанции и контраст Sobel-дорожек на плате — `UNVERIFIED` до проверки пользователем на устройстве.
