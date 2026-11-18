@@ -18,11 +18,11 @@ import java.util.Locale
 object CameraCapabilityProfiler {
 
     enum class AwbPreset(val labelRu: String, val camera2Mode: Int) {
-        AUTO("АВТО", CameraMetadata.CONTROL_AWB_MODE_AUTO),
-        DAYLIGHT("СОЛНЦЕ", CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT),
-        CLOUDY("ОБЛАКА", CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT),
-        INCANDESCENT("ЛАМПА", CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT),
-        FLUORESCENT("ЛЮМИН", CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT)
+        AUTO("Авто", CameraMetadata.CONTROL_AWB_MODE_AUTO),
+        DAYLIGHT("Солнце", CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT),
+        CLOUDY("Облака", CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT),
+        INCANDESCENT("Лампа", CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT),
+        FLUORESCENT("Люминесц.", CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT)
     }
 
     data class CameraProProfile(
@@ -181,7 +181,19 @@ object CameraCapabilityProfiler {
             ns >= 1_000_000_000L -> String.format(Locale.US, "%.1fs", ns / 1_000_000_000.0)
             ns >= 100_000_000L -> String.format(Locale.US, "1/%.0f", 1_000_000_000.0 / ns)
             ns > 0L -> "1/${(1_000_000_000.0 / ns).toInt().coerceAtLeast(1)}"
-            else -> "AUTO"
+            else -> "Авто"
         }
+    }
+
+    fun formatEvStops(exposureIndex: Int, evStep: Float): String {
+        if (exposureIndex == 0) return "EV 0.0"
+        val stops = exposureIndex * evStep
+        return String.format(Locale.US, "EV %+.1f", stops)
+    }
+
+    fun evIndexForStops(targetStops: Float, evStep: Float, evRange: IntRange): Int {
+        if (evStep <= 0f) return 0
+        val idx = kotlin.math.round(targetStops / evStep).toInt()
+        return idx.coerceIn(evRange.first, evRange.last)
     }
 }

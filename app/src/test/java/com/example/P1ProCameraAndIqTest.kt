@@ -169,4 +169,18 @@ class P1ProCameraAndIqTest {
             assertTrue("Audit must report clean output (0 EXIF)", res.audit.isClean)
         }
     }
+
+    @Test
+    fun testEvStopsFormattingAndSteppingSynced() {
+        val mtkStep = 1f / 6f
+        val range = -12..12
+        assertEquals("EV 0.0", CameraCapabilityProfiler.formatEvStops(0, mtkStep))
+        assertEquals("EV +0.5", CameraCapabilityProfiler.formatEvStops(3, mtkStep))
+        assertEquals("EV -1.0", CameraCapabilityProfiler.formatEvStops(-6, mtkStep))
+        assertEquals(3, CameraCapabilityProfiler.evIndexForStops(0.5f, mtkStep, range))
+        assertEquals(6, CameraCapabilityProfiler.evIndexForStops(1.0f, mtkStep, range))
+        assertEquals(-6, CameraCapabilityProfiler.evIndexForStops(-1.0f, mtkStep, range))
+        assertEquals(12, CameraCapabilityProfiler.evIndexForStops(5.0f, mtkStep, range))
+        assertEquals(-12, CameraCapabilityProfiler.evIndexForStops(-5.0f, mtkStep, range))
+    }
 }

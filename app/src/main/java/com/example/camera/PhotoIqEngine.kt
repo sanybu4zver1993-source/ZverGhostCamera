@@ -17,10 +17,10 @@ import kotlin.math.pow
 object PhotoIqEngine {
 
     enum class PhotoIqProfile(val labelRu: String, val badgeRu: String) {
-        OFF("ВЫКЛ (Чистый кадр)", "RAW"),
-        AUTO_IQ("Photo IQ Авто (Баланс + Резкость)", "IQ"),
-        TEXT_CRISP("Документ / Знаки (Чёткость + Антиблик)", "CRISP"),
-        NIGHT_LIFT("Ночной буст (Тени + Шумодав)", "NIGHT+")
+        OFF("ВЫКЛ (Чистый кадр)", "Обычный"),
+        AUTO_IQ("Photo IQ Авто (Баланс + Резкость)", "Авто IQ"),
+        TEXT_CRISP("Документ / Знаки (Чёткость + Антиблик)", "Текст+"),
+        NIGHT_LIFT("Ночной буст (Тени + Шумодав)", "Ночь+")
     }
 
     data class PhotoAdjustments(

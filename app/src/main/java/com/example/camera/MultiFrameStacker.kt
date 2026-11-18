@@ -16,9 +16,9 @@ import kotlin.math.min
 object MultiFrameStacker {
 
     enum class StackMode(val labelRu: String, val badgeRu: String) {
-        NIGHT_DENOISE("Ночной стек (Шумодав + Детали)", "N-STACK"),
-        HDR_FUSION("HDR Бёрст (Тени + Света)", "HDR+"),
-        DETAIL_RECOVERY("Супер-детализация (Анти-смаз)", "DETAIL+")
+        NIGHT_DENOISE("Ночной стек (Шумодав + Детали)", "Ночь-стек"),
+        HDR_FUSION("HDR Бёрст (Тени + Света)", "HDR-стек"),
+        DETAIL_RECOVERY("Супер-детализация (Анти-смаз)", "Детали+")
     }
 
     data class StackStats(

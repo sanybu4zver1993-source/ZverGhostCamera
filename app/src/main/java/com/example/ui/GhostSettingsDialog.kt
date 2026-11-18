@@ -104,7 +104,10 @@ fun GhostSettingsDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Box(
             modifier = Modifier
@@ -113,7 +116,7 @@ fun GhostSettingsDialog(
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(14.dp)
+                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 20.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -690,8 +693,8 @@ fun GhostSettingsDialog(
                             Spacer(modifier = Modifier.height(10.dp))
 
                             ModeExplanationCard(
-                                title = "☀️ ФОТО (ОСНОВНОЙ РЕЖИМ + PRO HAL)",
-                                desc = "Работает по профилю Camera2 HAL (стандартный биннинг CameraX + ручные ISO/выдержка в PRO HAL и профиль Photo IQ / мульти-кадр в шторке). EXIF/GPS вырезаются до шифрования.",
+                                title = "☀️ ФОТО (+ PRO И МАКРО-ЗУМ)",
+                                desc = "Работает по профилю Camera2 HAL (стандартный биннинг + ручные ISO/выдержка в PRO-панели, профили качества, стекинг и зум 2x–10x для макросъёмки пломб/номеров). EXIF/GPS вырезаются до шифрования.",
                                 modeKey = "PHOTO",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -700,7 +703,7 @@ fun GhostSettingsDialog(
                             )
                             ModeExplanationCard(
                                 title = "🎥 ВИДЕОСЪЁМКА (СЕЙФ)",
-                                desc = "Запись защищённого видео со звуком. После остановки файл сразу шифруется в сейф по стандарту AES-256 с очисткой кэша и удалением udta/meta/stco-таймстампов.",
+                                desc = "Запись защищённого видео со звуком или без звука. После остановки файл очищается от метаданных (udta/meta/stco) и шифруется по AES-256.",
                                 modeKey = "VIDEO",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -708,8 +711,8 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🌙 НОЧНОЙ РЕЖИМ / МУЛЬТИ-СТЕК",
-                                desc = "Выдержка и экспозиция увеличиваются на +1, антисмаз ждёт фиксации рук. В шторке можно включить стекинг 2–4 кадров (HDR Fusion, Ночь-шумодав, Детали).",
+                                title = "🌙 НОЧНОЙ РЕЖИМ И МУЛЬТИ-СТЕК",
+                                desc = "Автоматически поднимает экспозицию на +0.5 EV, антисмаз ждёт фиксации рук. В шторке можно включить стекинг кадров (HDR-стек, Ночь-стек, Детали+).",
                                 modeKey = "NIGHT",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -718,7 +721,7 @@ fun GhostSettingsDialog(
                             )
                             ModeExplanationCard(
                                 title = "🔬 БИО-ВИЗОР v2.2 (13-в-1)",
-                                desc = "Офлайн CV и ML Kit: Пульс rPPG + HRV, Кожа YCbCr, Эйлер x20, Веновизор, Дерма-УФ, Термо-LUT, Анти-Туман, Скелет, Хлорофилл, Ночь-гамма, ИК-маяки, Дорожки ПП (Sobel) и Маркировка OCR.",
+                                desc = "Офлайн CV и ML Kit: Пульс rPPG + HRV, Тепло-Кожа, Эйлер x20, Веновизор, Рентген кожи, Тепловизор, Анти-Туман, Скелет, Хлорофилл, Ночь, Поиск ИК, Дорожки ПП (Sobel) и Маркировка OCR.",
                                 modeKey = "VISOR",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -726,12 +729,13 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🛠️ PCB ЛАБ & АКУСТИК-СТОРОЖ",
-                                desc = "Офлайн инспекция печатных плат (мостики/прогар/пайка), декодер SMD/4-полос и OCR маркировки в шторке «Плата PCB» + реальный PCM-16 шумовой сторож «Акустик» (-34..-18 dBFS)."
+                                title = "🛠️ ПЛАТА PCB И АКУСТИК-СТОРОЖ",
+                                desc = "Офлайн инспекция печатных плат (мостики/прогар/пайка), декодер SMD/4-полос и OCR маркировки в «Плата PCB» + реальный PCM-16 шумовой сторож «Акустик-сторож» (-34..-18 дБ).",
+                                modeKey = null
                             )
                             ModeExplanationCard(
                                 title = "🛡️ ДОЗОР (APEX SENTINEL v5.0)",
-                                desc = "Автономная охрана порога/комнаты: 12x12 детектор движения с отсечкой соседа (2/4/6 сек), датчик удара/стука по акселерометру, авто-CLAHE анти-блик в темноте, 2-Stage кроп лица через ML Kit и опциональный триаж в Вику AI.",
+                                desc = "Автономная охрана: 12x12 детектор движения с фильтром прохожих (2/4/6 сек), датчик удара/стука, авто-CLAHE в темноте, 2-Stage кроп лица и опциональный триаж в Вику AI.",
                                 modeKey = "SENTINEL",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -740,7 +744,7 @@ fun GhostSettingsDialog(
                             )
                             ModeExplanationCard(
                                 title = "📄 ДОКУМЕНТЫ (ЛАЗЕРНЫЙ УРОВЕНЬ)",
-                                desc = "Включает прицел параллельности. Когда телефон лежит строго параллельно столу, круг загорается зелёным. Текст получается без трапеций и искажений.",
+                                desc = "Включает прицел параллельности к столу/листу (зелёный круг при ровном телефоне) — текст фиксируется без трапеций и перекосов.",
                                 modeKey = "DOCUMENTS",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -748,17 +752,8 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🔍 МАКРО (УЛИКИ И МЕЛКИЙ ТЕКСТ)",
-                                desc = "Оптика Redmi 13C фокусируется от 10 см. Включает зум для фиксации номеров, пломб, замков и печатей.",
-                                modeKey = "MACRO",
-                                onSelectMode = { key ->
-                                    onSelectMode(key)
-                                    onDismiss()
-                                }
-                            )
-                            ModeExplanationCard(
-                                title = "🎙️ ГОЛОСОВОЙ РЕЖИМ (БЕЗ РУК)",
-                                desc = "Командуй голосом: скажи «Снять», «Приблизь к лицу», «Сброс», «Фонарик». Работает без интернета через локальный микрофон!",
+                                title = "🎙️ ГОЛОСОВОЕ УПРАВЛЕНИЕ (ИНСТРУМЕНТ)",
+                                desc = "Запускается из шторки инструментов: «Снять», «Приблизь к лицу», «Сброс», «Фонарик». Работает через локальный микрофон.",
                                 modeKey = "VOICE",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -766,8 +761,8 @@ fun GhostSettingsDialog(
                                 }
                             )
                             ModeExplanationCard(
-                                title = "🕶️ СТЕЛС / FODCam (БЕЗ ПАЛЕВА)",
-                                desc = "Яркость экрана падает в 0%. Можно включить фон часов (как на заблокированном телефоне) или браузера. Снимок делается по кнопкам громкости или тапу!",
+                                title = "🕶️ СТЕЛС-ЭКРАН (ИНСТРУМЕНТ / МЕНЮ ⋮)",
+                                desc = "Маскирует экран под чёрный экран, часы блокировки или браузер. Снимок делается кнопками громкости или тапом. Доступен из шторки и меню ⋮.",
                                 modeKey = "STEALTH",
                                 onSelectMode = { key ->
                                     onSelectMode(key)
@@ -883,10 +878,13 @@ fun GhostSettingsDialog(
                     onClick = onDismiss,
                     colors = ButtonDefaults.buttonColors(containerColor = CyberBorder),
                     shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
                 ) {
                     Text("ЗАКРЫТЬ НАСТРОЙКИ", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
+                Spacer(modifier = Modifier.height(4.dp))
             }
         }
     }

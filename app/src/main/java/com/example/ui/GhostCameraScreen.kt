@@ -58,6 +58,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -145,6 +146,7 @@ fun GhostCameraScreen(
     var showCamouflageDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var isToolsDrawerOpen by remember { mutableStateOf(false) }
+    var isTopOverflowMenuOpen by remember { mutableStateOf(false) }
     var showVikaSheet by remember { mutableStateOf(false) }
     var vikaSheetInitialTab by remember { mutableStateOf(VikaSheetTab.TASKS) }
     var isVoiceControlActive by remember { mutableStateOf(false) }
@@ -1253,14 +1255,12 @@ fun GhostCameraScreen(
 
     val cameraModes = remember {
         listOf(
-            "СТЕЛС" to "STEALTH",
-            "ВИДЕО" to "VIDEO",
-            "ФОТО" to "PHOTO",
-            "НОЧЬ" to "NIGHT",
-            "ВИЗОР" to "VISOR",
-            "ДОЗОР" to "SENTINEL",
-            "ДОК" to "DOCUMENTS",
-            "ГОЛОС" to "VOICE"
+            "Видео" to "VIDEO",
+            "Фото" to "PHOTO",
+            "Ночь" to "NIGHT",
+            "Визор" to "VISOR",
+            "Дозор" to "SENTINEL",
+            "Документы" to "DOCUMENTS"
         )
     }
 
@@ -1279,30 +1279,32 @@ fun GhostCameraScreen(
                 isDocumentModeActive = false
                 isVoiceControlActive = false
                 visorMode = VisorMode.NORMAL
-                lastStatusMessage = "РЕЖИМ: ФОТОСЪЁМКА"
+                lastStatusMessage = "Режим: Фотосъёмка"
             }
             "VIDEO" -> {
                 visorMode = VisorMode.NORMAL
-                lastStatusMessage = "РЕЖИМ: ВИДЕО В СЕЙФ"
+                lastStatusMessage = "Режим: Видео в сейф"
             }
             "NIGHT" -> {
-                exposureIndex = 1
-                lastStatusMessage = "РЕЖИМ: НОЧЬ (+1 СВЕТОСИЛА)"
+                val nightIdx = CameraCapabilityProfiler.evIndexForStops(0.5f, proProfile.evStep, proProfile.evRange)
+                exposureIndex = nightIdx
+                val evTxt = CameraCapabilityProfiler.formatEvStops(nightIdx, proProfile.evStep)
+                lastStatusMessage = "Режим: Ночь ($evTxt)"
             }
             "VISOR" -> {
                 if (visorMode == VisorMode.NORMAL) {
                     visorMode = VisorMode.VEIN_HEMO
                 }
-                lastStatusMessage = "РЕЖИМ: БИО-ВИЗОР (${visorMode.title})"
+                lastStatusMessage = "Режим: Био-Визор (${visorMode.title})"
             }
             "SENTINEL" -> {
                 isDocumentModeActive = false
-                lastStatusMessage = "РЕЖИМ: КИБЕР-ДОЗОР (SENTINEL v5)"
+                lastStatusMessage = "Режим: Кибер-Дозор"
             }
             "DOCUMENTS" -> {
                 isDocumentModeActive = true
                 visorMode = VisorMode.NORMAL
-                lastStatusMessage = "РЕЖИМ: ДОКУМЕНТЫ (УРОВЕНЬ)"
+                lastStatusMessage = "Режим: Документы (уровень)"
             }
             "VOICE" -> {
                 requestVoiceControlToggle(forceEnable = true)
@@ -1441,11 +1443,11 @@ fun GhostCameraScreen(
                             val threshold = 105f
                             if (abs(totalDx) > threshold && abs(totalDx) > abs(totalDy) * 1.3f) {
                                 handled = true
-                                val curIdx = cameraModes.indexOfFirst { it.second == selectedCameraMode }.coerceAtLeast(2)
+                                val curIdx = cameraModes.indexOfFirst { it.second == selectedCameraMode }.let { if (it >= 0) it else 1 }
                                 val nextIdx = if (totalDx < 0f) {
                                     (curIdx + 1).coerceAtMost(cameraModes.lastIndex)
                                 } else {
-                                    (curIdx - 1).coerceAtLeast(1) // avoid accidental swipe straight into blackout
+                                    (curIdx - 1).coerceAtLeast(0)
                                 }
                                 if (nextIdx != curIdx) {
                                     triggerHapticFeedback(isStealth = true)
@@ -1496,45 +1498,34 @@ fun GhostCameraScreen(
             }
         }
 
-        // Focus Peaking Live Sharpness Overlay
+        // Focus Peaking Live Sharpness Overlay (badge rendered cleanly in Top HUD telemetry flow)
         if (isFocusPeakingEnabled) {
             FocusPeakingOverlay(
                 peakingPoints = peakingPoints,
                 sharpnessVariance = liveLaplacianVariance,
+                showBadge = false,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
-        // False-Color Exposure Overlay
+        // False-Color Exposure Overlay (badge rendered cleanly in Top HUD telemetry flow)
         if (isFalseColorEnabled) {
             FalseColorExposureOverlay(
                 overexposedPct = overexposedPercent,
                 underexposedPct = underexposedPercent,
+                showBadge = false,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
-        // Zebra Highlights Overlay (P1)
+        // Zebra Highlights Overlay (badge rendered cleanly in Top HUD telemetry flow)
         if (isZebraEnabled) {
             ZebraExposureOverlay(
                 zebraHotspots = liveZebraPoints,
                 overexposedPct = overexposedPercent,
                 threshold = ZverPrefs.getZebraThreshold(context),
+                showBadge = false,
                 modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        // Live Luma Histogram HUD (P1)
-        if (isHistogramEnabled) {
-            LiveHistogramOverlay(
-                bins32 = liveHistogramBins32,
-                overexposedPct = overexposedPercent,
-                underexposedPct = underexposedPercent,
-                meanLuma = liveMeanLuma,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .statusBarsPadding()
-                    .padding(start = 12.dp, top = 74.dp)
             )
         }
 
@@ -1628,46 +1619,48 @@ fun GhostCameraScreen(
                         )
                     }
                     Spacer(modifier = Modifier.height(2.dp))
-                    val stabilityText = if (isTripodMode) "ШТАТИВ" else if (isGyroStable) "СТАБИЛЬНО" else "ТРЯСКА!"
+                    val stabilityText = if (isTripodMode) "Штатив" else if (isGyroStable) "Стабильно" else "Тряска!"
                     Text(
-                        text = "$stabilityText • РЕЗК:${liveLaplacianVariance.toInt()} • ↓ИНСТР / ↑ВИКА",
+                        text = "$stabilityText • Резкость ${liveLaplacianVariance.toInt()}",
                         color = if (isGyroStable) CyberMuted else CyberRed,
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 9.sp
+                        fontSize = 9.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                // Clean 3-button Top Cluster (44dp+ targets)
+                // Clean Top Action Cluster (Torch, Drawer, Flip, Overflow Menu)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { isTorchActive = !isTorchActive },
-                        modifier = Modifier.size(44.dp).testTag("torch_button")
+                        modifier = Modifier.size(40.dp).testTag("torch_button")
                     ) {
                         Icon(
                             imageVector = if (isTorchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
                             contentDescription = "Фонарик",
                             tint = if (isTorchActive) NeonYellow else Color.White,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(19.dp)
                         )
                     }
 
                     Box(contentAlignment = Alignment.TopEnd) {
                         IconButton(
                             onClick = { isToolsDrawerOpen = !isToolsDrawerOpen },
-                            modifier = Modifier.size(44.dp).testTag("tools_drawer_button")
+                            modifier = Modifier.size(40.dp).testTag("tools_drawer_button")
                         ) {
                             Icon(
                                 imageVector = if (isToolsDrawerOpen) Icons.Default.KeyboardArrowUp else Icons.Default.Tune,
                                 contentDescription = "Шторка инструментов",
                                 tint = if (isToolsDrawerOpen || activeToolsCount > 0) CyberGreen else Color.White,
-                                modifier = Modifier.size(22.dp)
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                         if (activeToolsCount > 0 && !isToolsDrawerOpen) {
                             Box(
                                 modifier = Modifier
-                                    .padding(top = 6.dp, end = 6.dp)
-                                    .size(15.dp)
+                                    .padding(top = 4.dp, end = 4.dp)
+                                    .size(14.dp)
                                     .clip(CircleShape)
                                     .background(CyberGreen),
                                 contentAlignment = Alignment.Center
@@ -1677,7 +1670,7 @@ fun GhostCameraScreen(
                                     color = Color.Black,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 9.sp
+                                    fontSize = 8.sp
                                 )
                             }
                         }
@@ -1691,19 +1684,123 @@ fun GhostCameraScreen(
                                 CameraSelector.LENS_FACING_BACK
                             }
                         },
-                        modifier = Modifier.size(44.dp).testTag("flip_camera_button")
+                        modifier = Modifier.size(40.dp).testTag("flip_camera_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.FlipCameraAndroid,
-                            contentDescription = "Перевернуть камеру",
+                            contentDescription = "Сменить камеру",
                             tint = CyberGreen,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(19.dp)
                         )
+                    }
+
+                    Box {
+                        IconButton(
+                            onClick = { isTopOverflowMenuOpen = true },
+                            modifier = Modifier.size(40.dp).testTag("top_overflow_menu_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Меню",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = isTopOverflowMenuOpen,
+                            onDismissRequest = { isTopOverflowMenuOpen = false },
+                            modifier = Modifier
+                                .background(CyberSurface)
+                                .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Настройки ZVER", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    isToolsDrawerOpen = false
+                                    showSettingsDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (isProPanelExpanded) "Скрыть PRO-панель" else "Открыть PRO-панель",
+                                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    isProPanelExpanded = !isProPanelExpanded
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (isHistogramEnabled) "Гистограмма: Вкл" else "Гистограмма: Выкл",
+                                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    isHistogramEnabled = !isHistogramEnabled
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (isZebraEnabled) "Зебра пересветов: Вкл" else "Зебра пересветов: Выкл",
+                                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Grain, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    isZebraEnabled = !isZebraEnabled
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Лаборатория плат PCB", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.Memory, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    showPcbLabDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Маскировка иконки", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.VisibilityOff, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    showCamouflageDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Стелс-экран", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.DarkMode, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    if (selectedCameraMode != "STEALTH") previousCameraMode = selectedCameraMode
+                                    isStealthBlackoutActive = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Вика AI и аналитика", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.Psychology, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    isTopOverflowMenuOpen = false
+                                    vikaSheetInitialTab = VikaSheetTab.TASKS
+                                    showVikaSheet = true
+                                }
+                            )
+                        }
                     }
                 }
             }
 
-            // PULL-DOWN HIDDEN TACTICAL TOOLS DRAWER (12 buttons tucked neatly out of the way!)
+            // PULL-DOWN HIDDEN TACTICAL TOOLS DRAWER (20 clear non-truncated tiles)
             AnimatedVisibility(
                 visible = isToolsDrawerOpen,
                 enter = expandVertically(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
@@ -1727,7 +1824,7 @@ fun GhostCameraScreen(
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         DrawerTileButton(
                             icon = Icons.Default.CenterFocusStrong,
-                            label = "Фокус-пик",
+                            label = "Фокус-\nпикинг",
                             active = isFocusPeakingEnabled,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f)
@@ -1735,7 +1832,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.Exposure,
-                            label = "Экспо-карта",
+                            label = "Карта\nэкспозиции",
                             active = isFalseColorEnabled,
                             accent = NeonYellow,
                             modifier = Modifier.weight(1f)
@@ -1743,7 +1840,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.CropFree,
-                            label = "Уровень док",
+                            label = "Уровень\nлиста",
                             active = isDocumentModeActive,
                             accent = CyberGreen,
                             modifier = Modifier.weight(1f)
@@ -1751,7 +1848,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.AutoFixHigh,
-                            label = "Анти-туман",
+                            label = "Анти-\nтуман",
                             active = isDcpDehazeActive,
                             accent = CyberGreen,
                             modifier = Modifier.weight(1f)
@@ -1762,7 +1859,7 @@ fun GhostCameraScreen(
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         DrawerTileButton(
                             icon = Icons.Default.ShutterSpeed,
-                            label = "Автоспуск",
+                            label = "Авто-\nспуск",
                             active = isAutoShutterEnabled,
                             accent = CyberGreen,
                             modifier = Modifier.weight(1f)
@@ -1770,7 +1867,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.BurstMode,
-                            label = "Брекетинг",
+                            label = "Серия\nфокуса",
                             active = isFocusBracketingActive,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f)
@@ -1778,7 +1875,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.Timer,
-                            label = if (timerSeconds == 0) "Таймер" else "Тайм ${timerSeconds}с",
+                            label = if (timerSeconds == 0) "Таймер" else "Таймер\n${timerSeconds} сек",
                             active = timerSeconds > 0,
                             accent = NeonYellow,
                             modifier = Modifier.weight(1f)
@@ -1793,7 +1890,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.Mic,
-                            label = "Голос",
+                            label = "Голос-\nкоманды",
                             active = isVoiceControlActive,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f)
@@ -1804,7 +1901,7 @@ fun GhostCameraScreen(
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         DrawerTileButton(
                             icon = Icons.Default.DarkMode,
-                            label = "Стелс",
+                            label = "Стелс-\nэкран",
                             active = false,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f).testTag("stealth_button")
@@ -1816,7 +1913,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.VisibilityOff,
-                            label = "Камуфляж",
+                            label = "Маски-\nровка",
                             active = false,
                             accent = CyberGreen,
                             modifier = Modifier.weight(1f).testTag("camouflage_button")
@@ -1827,7 +1924,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.Shield,
-                            label = "Ассист :AI",
+                            label = "Ассистент\n:AI",
                             active = isAssistModeActive,
                             accent = CyberRed,
                             modifier = Modifier.weight(1f).testTag("assist_toggle_button")
@@ -1835,7 +1932,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.Settings,
-                            label = "Настройки",
+                            label = "Наст-\nройки",
                             active = false,
                             accent = CyberGreen,
                             modifier = Modifier.weight(1f).testTag("settings_button")
@@ -1849,7 +1946,7 @@ fun GhostCameraScreen(
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         DrawerTileButton(
                             icon = Icons.Default.Tune,
-                            label = "PRO HAL",
+                            label = "PRO-\nпанель",
                             active = isProPanelExpanded,
                             accent = NeonYellow,
                             modifier = Modifier.weight(1f).testTag("drawer_pro_toggle")
@@ -1860,7 +1957,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.BarChart,
-                            label = "Гистогр",
+                            label = "Гисто-\nграмма",
                             active = isHistogramEnabled,
                             accent = CyberGreen,
                             modifier = Modifier.weight(1f).testTag("drawer_histogram_toggle")
@@ -1868,7 +1965,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.Grain,
-                            label = "Zebra",
+                            label = "Зебра\nсвета",
                             active = isZebraEnabled,
                             accent = NeonYellow,
                             modifier = Modifier.weight(1f).testTag("drawer_zebra_toggle")
@@ -1876,7 +1973,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.AutoAwesome,
-                            label = "IQ:${photoIqProfile.badgeRu}",
+                            label = "Качество\n${photoIqProfile.badgeRu}",
                             active = photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f).testTag("drawer_iq_cycle")
@@ -1885,15 +1982,15 @@ fun GhostCameraScreen(
                             val next = vals[(vals.indexOf(photoIqProfile) + 1) % vals.size]
                             photoIqProfile = next
                             ZverPrefs.setPhotoIqProfile(context, next)
-                            lastStatusMessage = "PHOTO IQ: ${next.labelRu}"
+                            lastStatusMessage = "Улучшение фото: ${next.labelRu}"
                         }
                     }
 
-                    // Row 5: P2 Multi-Frame Stack + P3 PCB Lab & Audio Watcher
+                    // Row 5: P2 Multi-Frame Stack + P3 PCB Lab & Audio Watcher + Safe Shredder
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         DrawerTileButton(
                             icon = Icons.Default.FilterHdr,
-                            label = "Стек:${multiFrameMode?.badgeRu ?: "OFF"}",
+                            label = "Стекинг\n${multiFrameMode?.badgeRu ?: "Выкл"}",
                             active = multiFrameMode != null,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f).testTag("drawer_stack_cycle")
@@ -1902,12 +1999,12 @@ fun GhostCameraScreen(
                             val next = options[(options.indexOf(multiFrameMode) + 1) % options.size]
                             multiFrameMode = next
                             ZverPrefs.setMultiFrameMode(context, next)
-                            lastStatusMessage = if (next == null) "МУЛЬТИ-КАДР: ВЫКЛ" else "МУЛЬТИ-КАДР: ${next.labelRu}"
+                            lastStatusMessage = if (next == null) "Мульти-кадр: Выкл" else "Мульти-кадр: ${next.labelRu}"
                         }
 
                         DrawerTileButton(
                             icon = Icons.Default.Memory,
-                            label = "Плата PCB",
+                            label = "Плата\nPCB",
                             active = showPcbLabDialog,
                             accent = NeonCyan,
                             modifier = Modifier.weight(1f).testTag("drawer_pcb_lab")
@@ -1918,7 +2015,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.GraphicEq,
-                            label = if (isAudioWatcherActive) "Акуст:${audioThresholdDbfs.toInt()}" else "Акустик",
+                            label = if (isAudioWatcherActive) "Акустик\n${audioThresholdDbfs.toInt()} дБ" else "Акустик-\nсторож",
                             active = isAudioWatcherActive,
                             accent = NeonYellow,
                             modifier = Modifier.weight(1f).testTag("drawer_audio_watcher")
@@ -1928,7 +2025,7 @@ fun GhostCameraScreen(
 
                         DrawerTileButton(
                             icon = Icons.Default.DeleteForever,
-                            label = "Шредер",
+                            label = "Шредер\nсейфа",
                             active = false,
                             accent = CyberRed,
                             modifier = Modifier.weight(1f).testTag("panic_shred_button")
@@ -1948,11 +2045,11 @@ fun GhostCameraScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "▲ СПРЯТАТЬ ПАНЕЛЬ",
+                            text = "▲ Свернуть панель",
                             color = CyberMuted,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 9.sp
+                            fontSize = 10.sp
                         )
                     }
                 }
@@ -1972,7 +2069,7 @@ fun GhostCameraScreen(
                         .clip(RoundedCornerShape(16.dp))
                         .background(CyberBlack.copy(alpha = 0.85f))
                         .border(1.5.dp, if (isRecordingVideo) CyberRed else if (isCapturing) CyberGreen else CyberGreenDark, RoundedCornerShape(16.dp))
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (isRecordingVideo) {
@@ -1996,6 +2093,73 @@ fun GhostCameraScreen(
                             Text("ШИФРОВАНИЕ...", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                         } else {
                             Text(lastStatusMessage ?: "", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+
+            // Flow-positioned Non-Overlapping Telemetry Row (Histogram + Focus Peaking + Zebra + Exposure)
+            if (!isToolsDrawerOpen && (isHistogramEnabled || isFocusPeakingEnabled || isFalseColorEnabled || (isZebraEnabled && overexposedPercent > 0))) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (isHistogramEnabled) {
+                            LiveHistogramOverlay(
+                                bins32 = liveHistogramBins32,
+                                overexposedPct = overexposedPercent,
+                                underexposedPct = underexposedPercent,
+                                meanLuma = liveMeanLuma
+                            )
+                        }
+                        if (isFocusPeakingEnabled) {
+                            val isSharp = liveLaplacianVariance >= 110.0
+                            Text(
+                                text = if (isSharp) "Фокус-пикинг: резко (${liveLaplacianVariance.toInt()})" else "Фокус-пикинг: ${peakingPoints.size} конт.",
+                                color = if (isSharp) CyberGreen else NeonCyan,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CyberBlack.copy(alpha = 0.60f))
+                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (isZebraEnabled && overexposedPercent > 0) {
+                            Text(
+                                text = "Зебра ≥${ZverPrefs.getZebraThreshold(context)}: $overexposedPercent%",
+                                color = if (overexposedPercent > 10) CyberRed else NeonYellow,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CyberBlack.copy(alpha = 0.60f))
+                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                            )
+                        }
+                        if (isFalseColorEnabled) {
+                            Text(
+                                text = "Свет $overexposedPercent% • Тени $underexposedPercent%",
+                                color = if (overexposedPercent > 12) CyberRed else NeonYellow,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CyberBlack.copy(alpha = 0.60f))
+                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                            )
                         }
                     }
                 }
@@ -2220,12 +2384,13 @@ fun GhostCameraScreen(
                         onPhotoIqChange = { iq ->
                             photoIqProfile = iq
                             ZverPrefs.setPhotoIqProfile(context, iq)
-                            lastStatusMessage = "PHOTO IQ: ${iq.labelRu}"
+                            lastStatusMessage = "Улучшение фото: ${iq.labelRu}"
                         },
                         isHistogramEnabled = isHistogramEnabled,
                         onToggleHistogram = { isHistogramEnabled = !isHistogramEnabled },
                         isZebraEnabled = isZebraEnabled,
-                        onToggleZebra = { isZebraEnabled = !isZebraEnabled }
+                        onToggleZebra = { isZebraEnabled = !isZebraEnabled },
+                        onClose = { isProPanelExpanded = false }
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                 }
@@ -2340,12 +2505,8 @@ fun GhostCameraScreen(
                         )
                     }
 
-                    // Compact EV cycle pill
-                    val evLabel = when {
-                        exposureIndex > 0 -> "EV+$exposureIndex"
-                        exposureIndex < 0 -> "EV$exposureIndex"
-                        else -> "EV 0"
-                    }
+                    // Compact EV cycle pill (strictly synced in real EV stops with ProCameraControlPanel)
+                    val evLabel = CameraCapabilityProfiler.formatEvStops(exposureIndex, proProfile.evStep)
                     Box(
                         modifier = Modifier
                             .height(38.dp)
@@ -2353,15 +2514,18 @@ fun GhostCameraScreen(
                             .background(CyberBlack.copy(alpha = 0.55f))
                             .border(1.dp, if (exposureIndex != 0) NeonYellow else CyberBorder, RoundedCornerShape(20.dp))
                             .clickable {
-                                exposureIndex = when (exposureIndex) {
-                                    0 -> 1
-                                    1 -> -1
-                                    else -> 0
+                                val currentStops = exposureIndex * proProfile.evStep
+                                val nextStops = when {
+                                    kotlin.math.abs(currentStops) < 0.1f -> 1.0f
+                                    currentStops > 0.1f -> -1.0f
+                                    else -> 0.0f
                                 }
-                                lastStatusMessage = when (exposureIndex) {
-                                    1 -> "ЯРКОСТЬ: +1 (СВЕТ)"
-                                    -1 -> "ЯРКОСТЬ: -1 (ТЕНЬ)"
-                                    else -> "ЯРКОСТЬ: АВТО"
+                                exposureIndex = CameraCapabilityProfiler.evIndexForStops(nextStops, proProfile.evStep, proProfile.evRange)
+                                val syncedLabel = CameraCapabilityProfiler.formatEvStops(exposureIndex, proProfile.evStep)
+                                lastStatusMessage = when {
+                                    exposureIndex > 0 -> "Экспозиция: $syncedLabel (светлее)"
+                                    exposureIndex < 0 -> "Экспозиция: $syncedLabel (темнее)"
+                                    else -> "Экспозиция: Авто ($syncedLabel)"
                                 }
                             }
                             .padding(horizontal = 10.dp),
@@ -2371,7 +2535,7 @@ fun GhostCameraScreen(
                             text = evLabel,
                             color = if (exposureIndex != 0) NeonYellow else CyberMuted,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -2873,29 +3037,31 @@ private fun DrawerTileButton(
 ) {
     Column(
         modifier = modifier
-            .height(54.dp)
+            .height(58.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(if (active) accent.copy(alpha = 0.22f) else CyberBlack.copy(alpha = 0.55f))
             .border(1.dp, if (active) accent else CyberBorder, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 6.dp),
+            .padding(horizontal = 3.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = label,
+            contentDescription = label.replace("\n", " "),
             tint = if (active) accent else Color.White,
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier.size(17.dp)
         )
-        Spacer(modifier = Modifier.height(3.dp))
+        Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = label,
             color = if (active) accent else CyberMuted,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             fontSize = 8.sp,
-            maxLines = 1
+            lineHeight = 9.5.sp,
+            textAlign = TextAlign.Center,
+            maxLines = 2
         )
     }
 }
@@ -2914,23 +3080,30 @@ private fun CyberVisorControlCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(CyberBlack.copy(alpha = 0.86f))
-            .border(1.dp, NeonCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+            .clip(RoundedCornerShape(if (isCollapsed) 12.dp else 16.dp))
+            .background(CyberBlack.copy(alpha = if (isCollapsed) 0.68f else 0.84f))
+            .border(1.dp, NeonCyan.copy(alpha = 0.5f), RoundedCornerShape(if (isCollapsed) 12.dp else 16.dp))
+            .padding(horizontal = 10.dp, vertical = if (isCollapsed) 5.dp else 9.dp),
+        verticalArrangement = Arrangement.spacedBy(if (isCollapsed) 0.dp else 6.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val collapsedMetric = when {
+                activeMode == VisorMode.BIO_RPPG && telemetry.estimatedBpm != null -> " • ${telemetry.estimatedBpm} BPM"
+                activeMode == VisorMode.IR_BEACON && telemetry.irPeakDetected -> " • ИК!"
+                else -> ""
+            }
             Text(
-                text = "🔬 БИО-ВИЗОР // ${activeMode.badgeRu}",
+                text = "🔬 Био-Визор: ${activeMode.title}$collapsedMetric",
                 color = NeonCyan,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
-                fontSize = 11.sp,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
             Row(
@@ -2939,32 +3112,32 @@ private fun CyberVisorControlCard(
             ) {
                 if (activeMode != VisorMode.NORMAL && hasVisorFrame) {
                     Text(
-                        text = "📸 В СЕЙФ",
+                        text = "В сейф",
                         color = Color.Black,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 9.sp,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(7.dp))
                             .background(CyberGreen)
                             .clickable { onSaveVisorSnapshot() }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
                             .testTag("visor_snapshot_button")
                     )
                 }
                 Box(
                     modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
-                        .clip(RoundedCornerShape(8.dp))
+                        .defaultMinSize(minWidth = 44.dp, minHeight = 30.dp)
+                        .clip(RoundedCornerShape(7.dp))
                         .background(CyberSurface)
-                        .border(1.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .border(1.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
                         .clickable { isCollapsed = !isCollapsed }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
                         .testTag("visor_card_toggle_button"),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (isCollapsed) "▲ РАЗВЕРНУТЬ" else "▼ СВЕРНУТЬ",
+                        text = if (isCollapsed) "▲ Развернуть" else "▼ Свернуть",
                         color = NeonCyan,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
