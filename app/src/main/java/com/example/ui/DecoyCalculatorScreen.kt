@@ -19,6 +19,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.crypto.GhostCryptoVault
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 import java.math.MathContext
 import java.math.RoundingMode
@@ -33,7 +36,8 @@ private val CalcTextMuted = Color(0xFF9AA3AE)
 /**
  * Genuine working dark-mode Calculator camouflage gate.
  * - Performs real arithmetic (+, -, ×, ÷, %, +/-, decimals) with expression history.
- * - Entering Main/Decoy/Duress PIN + '=' silently unlocks Zver Camera into the matched profile.
+ * - Entering Main/Decoy/Duress PIN + '=' asynchronously verifies PIN on Dispatchers.Default
+ *   so 600k PBKDF2 iterations never block the UI thread or trigger ANR.
  * - If vault PIN is not configured yet, '1337' + '=' unlocks Zver Camera.
  */
 @Composable
@@ -41,12 +45,14 @@ fun DecoyCalculatorScreen(
     onUnlocked: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var display by remember { mutableStateOf("0") }
     var historyLine by remember { mutableStateOf("") }
     var pendingOp by remember { mutableStateOf<String?>(null) }
     var firstOperand by remember { mutableStateOf<BigDecimal?>(null) }
     var resetOnNextDigit by remember { mutableStateOf(false) }
+    var isUnlocking by remember { mutableStateOf(false) }
 
     fun formatDecimal(v: BigDecimal): String {
         val normalized = v.stripTrailingZeros()
@@ -73,6 +79,7 @@ fun DecoyCalculatorScreen(
     }
 
     fun pressDigit(d: String) {
+        if (isUnlocking) return
         if (display == "Ошибка" || resetOnNextDigit) {
             display = if (d == ".") "0." else d
             resetOnNextDigit = false
@@ -83,6 +90,7 @@ fun DecoyCalculatorScreen(
     }
 
     fun pressOp(op: String) {
+        if (isUnlocking) return
         val current = display.toBigDecimalOrNull() ?: BigDecimal.ZERO
         if (firstOperand != null && pendingOp != null && !resetOnNextDigit) {
             val res = evaluate(firstOperand!!, pendingOp!!, current)
@@ -97,22 +105,32 @@ fun DecoyCalculatorScreen(
     }
 
     fun pressEquals() {
+        if (isUnlocking) return
         // Check stealth PIN trigger ONLY when user hasn't started an arithmetic expression
         if (pendingOp == null && firstOperand == null && display.all { it.isDigit() } && display.length in 4..8) {
-            val configured = GhostCryptoVault.isConfigured(context)
-            if (!configured && display == "1337") {
-                display = "0"
-                onUnlocked()
-                return
-            }
-            if (configured) {
-                val outcome = GhostCryptoVault.unlockWithPinOutcome(context, display.toCharArray())
-                if (outcome != GhostCryptoVault.UnlockOutcome.INVALID) {
+            val candidate = display
+            isUnlocking = true
+            historyLine = "Проверка..."
+            scope.launch {
+                val unlocked = withContext(Dispatchers.Default) {
+                    val configured = GhostCryptoVault.isConfigured(context)
+                    if (!configured && candidate == "1337") {
+                        true
+                    } else if (configured) {
+                        val outcome = GhostCryptoVault.unlockWithPinOutcome(context, candidate.toCharArray())
+                        outcome != GhostCryptoVault.UnlockOutcome.INVALID
+                    } else {
+                        false
+                    }
+                }
+                isUnlocking = false
+                historyLine = ""
+                if (unlocked) {
                     display = "0"
                     onUnlocked()
-                    return
                 }
             }
+            return
         }
 
         val a = firstOperand ?: return

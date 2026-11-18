@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.example.assist.ByokManager
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
@@ -40,6 +41,7 @@ import com.example.security.ZverPrefs
 import com.example.ui.DecoyCalculatorScreen
 import com.example.ui.GhostCameraScreen
 import com.example.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.launch
 import java.util.function.Consumer
 
 private val CyberBlack = Color(0xFF090D10)
@@ -133,8 +135,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         applyScreenCapturePolicy()
-        GhostCryptoVault.shredEphemeralShareFiles(this)
-        GhostCryptoVault.shredOrphanedVideoTemps(this, minAgeMs = 15_000L)
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            GhostCryptoVault.shredEphemeralShareFiles(this@MainActivity)
+            GhostCryptoVault.shredOrphanedVideoTemps(this@MainActivity, minAgeMs = 15_000L)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

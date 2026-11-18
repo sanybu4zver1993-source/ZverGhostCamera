@@ -120,6 +120,8 @@ fun GhostCameraScreen(
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
+    var activeCameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var activeImageAnalysis by remember { mutableStateOf<ImageAnalysis?>(null) }
 
     val captureExecutor = remember { Executors.newSingleThreadExecutor() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -136,7 +138,7 @@ fun GhostCameraScreen(
     var isCapturing by remember { mutableStateOf(false) }
     var lastStatusMessage by remember { mutableStateOf<String?>(null) }
     var showShutterFlash by remember { mutableStateOf(false) }
-    var vaultCount by remember { mutableStateOf(GhostCryptoVault.totalVaultItemsCount(context)) }
+    var vaultCount by remember { mutableStateOf(0) }
     var showVaultDialog by remember { mutableStateOf(false) }
     var forcePinSetupFlow by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
@@ -262,6 +264,7 @@ fun GhostCameraScreen(
     var activeRecording by remember { mutableStateOf<androidx.camera.video.Recording?>(null) }
     var isRecordingVideo by remember { mutableStateOf(false) }
     var recordingDurationSeconds by remember { mutableStateOf(0) }
+    var recordingBytesWritten by remember { mutableStateOf(0L) }
 
     LaunchedEffect(isRecordingVideo) {
         if (isRecordingVideo) {
@@ -273,7 +276,17 @@ fun GhostCameraScreen(
         }
     }
 
-    val securityStatus = remember { AntiForensicsGuard.assessDeviceSecurity(context) }
+    var securityStatus by remember { mutableStateOf<AntiForensicsGuard.SecurityStatus?>(null) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val count = GhostCryptoVault.totalVaultItemsCount(context)
+            val sec = AntiForensicsGuard.assessDeviceSecurity(context)
+            withContext(Dispatchers.Main) {
+                vaultCount = count
+                securityStatus = sec
+            }
+        }
+    }
     var currentProfile by remember { mutableStateOf(GhostCryptoVault.activeProfile) }
     var currentCamouflage by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
 
@@ -398,6 +411,9 @@ fun GhostCameraScreen(
             antiBlurEngine.onFaceDownDetected = null
             antiBlurEngine.onKnockDetected = null
             antiBlurEngine.stop()
+            try { activeRecording?.stop() } catch (_: Exception) {}
+            try { activeImageAnalysis?.clearAnalyzer() } catch (_: Exception) {}
+            try { activeCameraProvider?.unbindAll() } catch (_: Exception) {}
             cyberVisorEngine.release()
             captureExecutor.shutdown()
             analysisExecutor.shutdown()
@@ -694,12 +710,21 @@ fun GhostCameraScreen(
                         is androidx.camera.video.VideoRecordEvent.Start -> {
                             isRecordingVideo = true
                             recordingDurationSeconds = 0
+                            recordingBytesWritten = 0L
                             triggerHapticFeedback(isStealthBlackoutActive)
                             lastStatusMessage = if (hasAudio) "🔴 ИДЁТ ЗАПИСЬ ВИДЕО..." else "🔴 ЗАПИСЬ ВИДЕО (БЕЗ ЗВУКА)"
                         }
+                        is androidx.camera.video.VideoRecordEvent.Status -> {
+                            recordingBytesWritten = event.recordingStats.numBytesRecorded
+                        }
                         is androidx.camera.video.VideoRecordEvent.Finalize -> {
+                            val finalBytes = event.recordingStats.numBytesRecorded
                             isRecordingVideo = false
-                            if (!event.hasError()) {
+                            activeRecording = null
+                            recordingBytesWritten = 0L
+                            val savedEvenWithLimit = event.error == androidx.camera.video.VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED ||
+                                event.error == androidx.camera.video.VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
+                            if ((!event.hasError() || savedEvenWithLimit) && tempVideoFile.exists() && tempVideoFile.length() > 0L) {
                                 scope.launch(Dispatchers.IO) {
                                     val cleanVideoFile = File(videoStageDir, "clean_video_${System.currentTimeMillis()}.mp4")
                                     try {
@@ -728,13 +753,17 @@ fun GhostCameraScreen(
                                 }
                             } else {
                                 GhostCryptoVault.shredFile(tempVideoFile)
-                                lastStatusMessage = "ОШИБКА: ${event.cause?.message ?: "Сбой"}"
+                                lastStatusMessage = "СБОЙ ЗАПИСИ HAL (код ${event.error}, ${finalBytes}B): ${event.cause?.message ?: "нет кадров от кодека"}"
                             }
                         }
                     }
                 }
                 activeRecording = rec
             } catch (e: Exception) {
+                isRecordingVideo = false
+                activeRecording = null
+                recordingBytesWritten = 0L
+                GhostCryptoVault.shredFile(tempVideoFile)
                 lastStatusMessage = "ОШИБКА СТАРТА: ${e.message}"
             }
         }
@@ -964,19 +993,40 @@ fun GhostCameraScreen(
     val isVideoCameraMode = (selectedCameraMode == "VIDEO")
 
     // Bind CameraX split by mode: VIDEO -> Preview + VideoCapture; PHOTO/OPTIC/VISOR -> Preview + ImageCapture + ImageAnalysis
-    LaunchedEffect(lensFacing, isVideoCameraMode) {
+    LaunchedEffect(lensFacing, isVideoCameraMode, previewView) {
+        val pv = previewView ?: return@LaunchedEffect
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
+        activeCameraProvider = cameraProvider
 
-        val preview = Preview.Builder().build()
+        val preview = Preview.Builder().build().apply {
+            setSurfaceProvider(pv.surfaceProvider)
+        }
         val cameraSelector = CameraSelector.Builder()
             .requireLensFacing(lensFacing)
             .build()
 
+        if (isRecordingVideo && activeRecording != null) {
+            try {
+                activeRecording?.stop()
+            } catch (_: Exception) {}
+            activeRecording = null
+            isRecordingVideo = false
+        }
+
+        try {
+            activeImageAnalysis?.clearAnalyzer()
+        } catch (_: Exception) {}
+        activeImageAnalysis = null
+
         if (isVideoCameraMode) {
             imageCapture = null
+            val qualitySelector = androidx.camera.video.QualitySelector.from(
+                androidx.camera.video.Quality.HD,
+                androidx.camera.video.FallbackStrategy.higherQualityOrLowerThan(androidx.camera.video.Quality.SD)
+            )
             val recorder = androidx.camera.video.Recorder.Builder()
-                .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD))
+                .setQualitySelector(qualitySelector)
                 .build()
             val vCapture = androidx.camera.video.VideoCapture.withOutput(recorder)
             try {
@@ -989,10 +1039,10 @@ fun GhostCameraScreen(
                 )
                 cameraControl = camera.cameraControl
                 videoCapture = vCapture
-                boundUseCasesSummary = "VIDEO: Preview + VideoCapture (HD)"
-                previewView?.let { pv -> preview.setSurfaceProvider(pv.surfaceProvider) }
+                boundUseCasesSummary = "VIDEO: Preview + VideoCapture (HD/SD fallback)"
                 if (pendingAutoStartVideo) {
                     pendingAutoStartVideo = false
+                    delay(350)
                     triggerVideoRecordingToggle()
                 }
             } catch (e: Exception) {
@@ -1004,7 +1054,6 @@ fun GhostCameraScreen(
                     cameraProvider.unbindAll()
                     val camera = cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
                     cameraControl = camera.cameraControl
-                    previewView?.let { pv -> preview.setSurfaceProvider(pv.surfaceProvider) }
                 } catch (_: Exception) {}
             }
         } else {
@@ -1137,6 +1186,7 @@ fun GhostCameraScreen(
                 }
             }
 
+            activeImageAnalysis = imageAnalysis
             try {
                 cameraProvider.unbindAll()
                 val camera = cameraProvider.bindToLifecycle(
@@ -1149,12 +1199,9 @@ fun GhostCameraScreen(
                 cameraControl = camera.cameraControl
                 imageCapture = capture
                 boundUseCasesSummary = "PHOTO/OPTIC: Preview + ImageCapture + ImageAnalysis (YUV)"
-
-                previewView?.let { pv ->
-                    preview.setSurfaceProvider(pv.surfaceProvider)
-                }
             } catch (eAnalysis: Exception) {
                 try {
+                    activeImageAnalysis = null
                     cameraProvider.unbindAll()
                     val camera = cameraProvider.bindToLifecycle(
                         lifecycleOwner,
@@ -1166,10 +1213,6 @@ fun GhostCameraScreen(
                     imageCapture = capture
                     boundUseCasesSummary = "FALLBACK (без ImageAnalysis): Preview + ImageCapture (${eAnalysis.javaClass.simpleName})"
                     lastStatusMessage = "ВНИМАНИЕ HAL: ImageAnalysis отключён (только Фото)"
-
-                    previewView?.let { pv ->
-                        preview.setSurfaceProvider(pv.surfaceProvider)
-                    }
                 } catch (e: Exception) {
                     boundUseCasesSummary = "CAMERA BIND ERROR: ${e.javaClass.simpleName}"
                     lastStatusMessage = "Ошибка камеры: ${e.localizedMessage}"
@@ -1182,11 +1225,6 @@ fun GhostCameraScreen(
     LaunchedEffect(exposureIndex, proProfile) {
         try {
             cameraControl?.setExposureCompensationIndex(exposureIndex.coerceIn(proProfile.evRange.first, proProfile.evRange.last))
-        } catch (_: Exception) {}
-    }
-    LaunchedEffect(zoomRatio, proProfile) {
-        try {
-            cameraControl?.setZoomRatio(zoomRatio.coerceIn(1.0f, proProfile.maxZoomRatio))
         } catch (_: Exception) {}
     }
 
@@ -1311,7 +1349,7 @@ fun GhostCameraScreen(
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                     scaleType = PreviewView.ScaleType.FILL_CENTER
-                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    implementationMode = PreviewView.ImplementationMode.PERFORMANCE
                     previewView = this
                 }
             },
@@ -1887,6 +1925,17 @@ fun GhostCameraScreen(
                         ) {
                             requestAudioWatcherToggle()
                         }
+
+                        DrawerTileButton(
+                            icon = Icons.Default.DeleteForever,
+                            label = "Шредер",
+                            active = false,
+                            accent = CyberRed,
+                            modifier = Modifier.weight(1f).testTag("panic_shred_button")
+                        ) {
+                            isToolsDrawerOpen = false
+                            showPanicConfirm = true
+                        }
                     }
 
                     // Drawer collapse handle
@@ -1930,9 +1979,17 @@ fun GhostCameraScreen(
                             val m = recordingDurationSeconds / 60
                             val s = recordingDurationSeconds % 60
                             val timerStr = String.format(Locale.ROOT, "%02d:%02d", m, s)
+                            val mb = recordingBytesWritten / (1024f * 1024f)
+                            val statusText = if (recordingDurationSeconds >= 2 && recordingBytesWritten == 0L) {
+                                "🔴 ОЖИДАНИЕ КАДРОВ HAL: $timerStr"
+                            } else if (recordingBytesWritten > 0L) {
+                                String.format(Locale.US, "🔴 ЗАПИСЬ: %s • %.1f МБ", timerStr, mb)
+                            } else {
+                                "🔴 ЗАПИСЬ В СЕЙФ: $timerStr"
+                            }
                             Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(CyberRed))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("🔴 ЗАПИСЬ В СЕЙФ: $timerStr", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            Text(statusText, color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                         } else if (isCapturing) {
                             CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -2433,39 +2490,25 @@ fun GhostCameraScreen(
                     }
                 }
 
-                // Right Cluster: Vika AI Sheet + Panic Shred (48dp each)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = {
-                            vikaSheetInitialTab = VikaSheetTab.TASKS
-                            showVikaSheet = true
-                        },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("vika_ai_button")
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(if (hasByokKey) NeonCyan.copy(alpha = 0.2f) else CyberSurface)
-                            .border(1.dp, if (hasByokKey) NeonCyan else CyberBorder, RoundedCornerShape(14.dp))
-                    ) {
-                        Icon(
-                            Icons.Default.Psychology,
-                            contentDescription = "Вика AI и Аналитика",
-                            tint = if (hasByokKey) NeonCyan else CyberMuted,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { showPanicConfirm = true },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("panic_shred_button")
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(CyberRed.copy(alpha = 0.22f))
-                            .border(1.dp, CyberRed.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
-                    ) {
-                        Icon(Icons.Default.DeleteForever, contentDescription = "Шредер", tint = CyberRed, modifier = Modifier.size(22.dp))
-                    }
+                // Right Cluster: Vika AI Sheet (Shredder moved safely into Tools Drawer)
+                IconButton(
+                    onClick = {
+                        vikaSheetInitialTab = VikaSheetTab.TASKS
+                        showVikaSheet = true
+                    },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("vika_ai_button")
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (hasByokKey) NeonCyan.copy(alpha = 0.2f) else CyberSurface)
+                        .border(1.dp, if (hasByokKey) NeonCyan else CyberBorder, RoundedCornerShape(14.dp))
+                ) {
+                    Icon(
+                        Icons.Default.Psychology,
+                        contentDescription = "Вика AI и Аналитика",
+                        tint = if (hasByokKey) NeonCyan else CyberMuted,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
         }
@@ -2622,12 +2665,38 @@ fun GhostCameraScreen(
             )
         }
 
-        // Emergency Crypto-Shred Confirmation
+        // Emergency Crypto-Shred Confirmation (requires typing 999)
         if (showPanicConfirm) {
+            var shredConfirmCode by remember { mutableStateOf("") }
+            val canShred = shredConfirmCode.trim() == "999"
             AlertDialog(
-                onDismissRequest = { showPanicConfirm = false },
+                onDismissRequest = {
+                    shredConfirmCode = ""
+                    showPanicConfirm = false
+                },
                 title = { Text("ЭКСТРЕННЫЙ ШРЕДЕР СХРОНА", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
-                text = { Text("Мгновенно затирает весь контейнер случайным шумом и навсегда уничтожает аппаратные ключи процессора. Восстановление невозможно.", color = Color.White, fontSize = 12.sp) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Мгновенно затирает весь контейнер случайным шумом и навсегда уничтожает аппаратные ключи процессора. Восстановление невозможно.",
+                            color = Color.White,
+                            fontSize = 12.sp
+                        )
+                        OutlinedTextField(
+                            value = shredConfirmCode,
+                            onValueChange = { if (it.length <= 6) shredConfirmCode = it },
+                            label = { Text("Введи 999 для подтверждения", fontSize = 11.sp) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("shred_confirm_input"),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CyberRed,
+                                unfocusedBorderColor = CyberBorder,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White
+                            )
+                        )
+                    }
+                },
                 confirmButton = {
                     Button(
                         onClick = {
@@ -2639,15 +2708,30 @@ fun GhostCameraScreen(
                             sentinelArmed = false
                             sentinelEvents = emptyList()
                             vaultCount = 0
+                            shredConfirmCode = ""
                             showPanicConfirm = false
                             lastStatusMessage = "СХРОН И КЛЮЧИ ПОЛНОСТЬЮ УНИЧТОЖЕНЫ"
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
+                        enabled = canShred,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CyberRed,
+                            disabledContainerColor = CyberRed.copy(alpha = 0.25f)
+                        ),
+                        modifier = Modifier.testTag("shred_confirm_execute_button")
                     ) {
                         Text("СТЕРЕТЬ СЕЙЧАС", color = Color.White)
                     }
                 },
-                dismissButton = { TextButton(onClick = { showPanicConfirm = false }) { Text("ОТМЕНА", color = CyberMuted) } },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            shredConfirmCode = ""
+                            showPanicConfirm = false
+                        }
+                    ) {
+                        Text("ОТМЕНА", color = CyberMuted)
+                    }
+                },
                 containerColor = CyberSurface
             )
         }

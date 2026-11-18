@@ -107,4 +107,21 @@
   - `ZverSanitizerUnitTest`: 3/3 PASS
   - `ZverSecurityFeaturesTest`: 13/13 PASS
 
+---
 
+## 2026-11-18 — Поэтапные исправления по логам Redmi 13C и видеотесту: Часть 1
+
+### 1. Реализованные изменения (Часть 1)
+- **`DecoyCalculatorScreen.kt`:** Вынесены `GhostCryptoVault.isConfigured(context)` и `GhostCryptoVault.unlockWithPinOutcome(...)` (600 000 итераций PBKDF2) из Main-потока в `withContext(Dispatchers.Default)` внутри `pressEquals()` с защитой `isUnlocking` и индикацией `"Проверка..."` (устранение ANR при вводе ПИН `939393`).
+- **`MainActivity.kt`:** Вынесен вызов `shredEphemeralShareFiles` / `shredOrphanedVideoTemps` в `onResume()` на `lifecycleScope.launch(Dispatchers.IO)`.
+- **`VikaAiTabs.kt` (новый файл) и `VikaAiSheet.kt`:** Вынесены UI-вкладки (`VikaTasksTabContent`, `VikaAnalyticsTabContent`, `VikaKeysModelsTabContent` и вспомогательные компоненты), чтобы метод `VikaAiSheet` не превышал порог ART compiler (`24552` инструкций); операции `ByokManager.syncFromPrefs`, `VaultAnalytics.captureSnapshot`, `ByokManager.isStrongBoxSupported`, `decryptKey`/`deleteKey`, `VideoKeyframeExtractor.extractForAi` и `LocalSymbiosisCvEngine` переведены в `Dispatchers.IO` / `Dispatchers.Default`.
+- **`GhostCameraScreen.kt`:**
+  - Начальные `GhostCryptoVault.totalVaultItemsCount` и `AntiForensicsGuard.assessDeviceSecurity` (RootBeer/su-проверки) переведены в `LaunchedEffect(Unit) { withContext(Dispatchers.IO) { ... } }`; удалён дубликат `LaunchedEffect(zoomRatio, proProfile)`.
+  - Режим `PreviewView` переключён на `PreviewView.ImplementationMode.PERFORMANCE` (аппаратный `SurfaceView` без лишнего копирования на MT6769).
+  - Перестроен конвейер `VideoCapture`: `LaunchedEffect(lensFacing, isVideoCameraMode, previewView)`, корректная остановка активной записи, `activeImageAnalysis?.clearAnalyzer()` и `unbindAll()`, привязка `preview.setSurfaceProvider(pv.surfaceProvider)` до `bindToLifecycle(...)`, `QualitySelector.from(Quality.HD, FallbackStrategy.higherQualityOrLowerThan(Quality.SD))`, задержка `delay(350)` перед `pendingAutoStartVideo`, трекинг записанных байт через `VideoRecordEvent.Status` (индикатор `🔴 ЗАПИСЬ: MM:SS • X.X МБ` / `🔴 ОЖИДАНИЕ КАДРОВ HAL`), а также очистка в `onDispose`.
+  - Кнопка Шредера (`panic_shred_button`) убрана из нижней панели затвора и перенесена в шторку инструментов (`Tools Drawer`), а в диалог `showPanicConfirm` добавлено обязательное текстовое подтверждение `"999"`.
+
+### 2. Верификация Части 1
+- **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL in 1m 40s**, **43/43 PASS** (`0 failures, 0 errors, 0 skipped`).
+- **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** поведение после правок (скорость разблокировки `939393`, фактическая запись кадров через `c2.mtk.avc.encoder`, открытие `VikaAiSheet` без фризов) — `UNVERIFIED` до проверки пользователем на устройстве.
