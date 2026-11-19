@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Pure GPU shader routing & aspect-ratio math for [GlVisorDualRenderer].
@@ -94,6 +95,150 @@ internal object GlVisorMath {
     }
 }
 
+/**
+ * Aligns heterogeneous HAL SurfaceTexture timestamps (MONOTONIC, BOOTTIME, or 0) onto a strictly
+ * monotonic relative timeline anchored at [sessionStartMonoNs] so video PTS matches AAC audio PTS.
+ */
+internal class GlVisorPtsNormalizer {
+    private var sessionStartMonoNs: Long = 0L
+    private var firstSensorNs: Long = -1L
+    private var anchorOffsetNs: Long = 0L
+    private var lastEmittedNs: Long = -1L
+
+    fun reset(sessionStartNs: Long = System.nanoTime()) {
+        sessionStartMonoNs = sessionStartNs
+        firstSensorNs = -1L
+        anchorOffsetNs = 0L
+        lastEmittedNs = -1L
+    }
+
+    fun nextRelativePtsNs(rawSensorNs: Long, nowMonoNs: Long = System.nanoTime()): Long {
+        if (sessionStartMonoNs == 0L) {
+            sessionStartMonoNs = nowMonoNs
+        }
+        val wallRelNs = (nowMonoNs - sessionStartMonoNs).coerceAtLeast(0L)
+        val candidateNs = if (rawSensorNs > 0L) {
+            if (firstSensorNs < 0L) {
+                firstSensorNs = rawSensorNs
+                anchorOffsetNs = wallRelNs
+                wallRelNs
+            } else {
+                val deltaFromFirst = rawSensorNs - firstSensorNs
+                val anchored = anchorOffsetNs + deltaFromFirst
+                // Reject huge clock-domain jumps (>2s mismatch against wall clock)
+                if (deltaFromFirst >= 0L && abs(anchored - wallRelNs) < 2_000_000_000L) {
+                    anchored
+                } else {
+                    wallRelNs
+                }
+            }
+        } else {
+            wallRelNs
+        }
+
+        val monotonicNs = if (lastEmittedNs >= 0L) {
+            max(lastEmittedNs + 1_000_000L, candidateNs)
+        } else {
+            candidateNs
+        }
+        lastEmittedNs = monotonicNs
+        return monotonicNs
+    }
+}
+
+/**
+ * Computes a compact 4x4 tile-histogram CLAHE lookup table (256 bins x 16 tiles = 4096 bytes)
+ * on CPU from a low-res Y plane for Mali-G52-friendly GPU interpolation (zero compute shaders).
+ */
+internal object ClaheLutBuilder {
+    const val GRID_X = 4
+    const val GRID_Y = 4
+    const val TILE_COUNT = GRID_X * GRID_Y
+    const val BINS = 256
+    const val LUT_BYTE_SIZE = BINS * TILE_COUNT
+
+    fun build4x4TileLuts(
+        yBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        clipLimit: Float = 2.4f,
+        outLut: ByteArray = ByteArray(LUT_BYTE_SIZE)
+    ): ByteArray {
+        if (width < 16 || height < 16 || outLut.size < LUT_BYTE_SIZE) {
+            // Identity ramp fallback
+            for (t in 0 until TILE_COUNT) {
+                val off = t * BINS
+                for (i in 0 until BINS) outLut[off + i] = i.toByte()
+            }
+            return outLut
+        }
+
+        val dup = yBuffer.duplicate()
+        val limit = dup.limit()
+        val step = max(1, min(width, height) / 96)
+        val hist = IntArray(BINS)
+        val tilesY = height / GRID_Y
+        val tilesX = width / GRID_X
+
+        for (ty in 0 until GRID_Y) {
+            val yStart = ty * tilesY
+            val yEnd = if (ty == GRID_Y - 1) height else (ty + 1) * tilesY
+            for (tx in 0 until GRID_X) {
+                val xStart = tx * tilesX
+                val xEnd = if (tx == GRID_X - 1) width else (tx + 1) * tilesX
+                java.util.Arrays.fill(hist, 0)
+                var count = 0
+                var y = yStart
+                while (y < yEnd) {
+                    val rowBase = y * rowStride
+                    var x = xStart
+                    while (x < xEnd) {
+                        val pos = rowBase + x
+                        if (pos < limit) {
+                            val luma = dup.get(pos).toInt() and 0xFF
+                            hist[luma]++
+                            count++
+                        }
+                        x += step
+                    }
+                    y += step
+                }
+                val tileOff = (ty * GRID_X + tx) * BINS
+                if (count <= 0) {
+                    for (i in 0 until BINS) outLut[tileOff + i] = i.toByte()
+                    continue
+                }
+
+                // Clip excess counts & redistribute evenly
+                val clipCount = max(1, ((clipLimit * count) / BINS.toFloat()).toInt())
+                var excess = 0
+                for (i in 0 until BINS) {
+                    if (hist[i] > clipCount) {
+                        excess += hist[i] - clipCount
+                        hist[i] = clipCount
+                    }
+                }
+                val avgInc = excess / BINS
+                val rem = excess % BINS
+                for (i in 0 until BINS) {
+                    hist[i] += avgInc + if (i < rem) 1 else 0
+                }
+
+                // Normalized CDF -> 0..255
+                var cdf = 0
+                val total = count.toFloat()
+                for (i in 0 until BINS) {
+                    cdf += hist[i]
+                    val mapped = ((cdf / total) * 255f).toInt().coerceIn(0, 255)
+                    outLut[tileOff + i] = mapped.toByte()
+                }
+            }
+        }
+        return outLut
+    }
+}
+
 internal object GlVisorShaders {
 
     const val VERTEX_300 = """#version 300 es
@@ -112,6 +257,8 @@ void main() {
 #extension GL_OES_EGL_image_external_essl3 : require
 precision highp float;
 uniform samplerExternalOES sTexture;
+uniform sampler2D uDehazeLut;
+uniform int uHasDehazeLut;
 uniform int uMode;
 uniform vec2 uTexelStep;
 in vec2 vTexCoord;
@@ -123,6 +270,12 @@ float calcLuma(vec3 c) {
 
 float calcGreenLuma(vec3 c) {
     return (c.r * 3.0 + c.g * 10.0 + c.b * 3.0) * 0.0625;
+}
+
+float sampleTileCdf(int tileIdx, float luma) {
+    float rowCoord = (float(tileIdx) + 0.5) / 16.0;
+    float colCoord = (clamp(luma, 0.0, 1.0) * 255.0 + 0.5) / 256.0;
+    return texture(uDehazeLut, vec2(colCoord, rowCoord)).r;
 }
 
 bool isWarmSkin(vec3 c) {
@@ -181,20 +334,40 @@ void main() {
         float s = clamp((lum - 0.5) * 2.4 + 0.5, 0.0, 1.0);
         outRgb = vec3(s * 0.95, s, clamp(s + 0.047, 0.0, 1.0));
     } else if (uMode == 6) {
-        // DEHAZE_LIVE (Dark-channel veil estimation via 4 neighbors)
-        vec2 d = uTexelStep * 4.0;
-        float darkC = min(rgb.r, min(rgb.g, rgb.b));
-        vec3 s1 = texture(sTexture, vTexCoord + vec2(d.x, 0.0)).rgb;
-        vec3 s2 = texture(sTexture, vTexCoord - vec2(d.x, 0.0)).rgb;
-        vec3 s3 = texture(sTexture, vTexCoord + vec2(0.0, d.y)).rgb;
-        vec3 s4 = texture(sTexture, vTexCoord - vec2(0.0, d.y)).rgb;
-        float veil = min(
-            min(darkC, min(min(s1.r, min(s1.g, s1.b)), min(s2.r, min(s2.g, s2.b)))),
-            min(min(s3.r, min(s3.g, s3.b)), min(s4.r, min(s4.g, s4.b)))
-        ) * 0.72;
-        float denom = max(0.32, 1.0 - veil);
-        vec3 dehazed = clamp((rgb - vec3(veil)) / denom, 0.0, 1.0);
-        outRgb = pow(dehazed, vec3(0.86));
+        // DEHAZE_LIVE: bilinear 4x4 CLAHE LUT interpolation when available, dark-channel fallback otherwise
+        if (uHasDehazeLut == 1) {
+            float lum = calcLuma(rgb);
+            vec2 g = clamp(vTexCoord, 0.0, 0.999) * 4.0 - 0.5;
+            vec2 gClamp = clamp(g, 0.0, 3.0);
+            int x0 = int(floor(gClamp.x));
+            int y0 = int(floor(gClamp.y));
+            int x1 = min(3, x0 + 1);
+            int y1 = min(3, y0 + 1);
+            float fx = fract(gClamp.x);
+            float fy = fract(gClamp.y);
+            float c00 = sampleTileCdf(y0 * 4 + x0, lum);
+            float c10 = sampleTileCdf(y0 * 4 + x1, lum);
+            float c01 = sampleTileCdf(y1 * 4 + x0, lum);
+            float c11 = sampleTileCdf(y1 * 4 + x1, lum);
+            float eqLum = mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+            float gain = clamp(eqLum / max(0.035, lum), 0.65, 2.35);
+            vec3 claheRgb = clamp(rgb * gain, 0.0, 1.0);
+            outRgb = mix(rgb, claheRgb, 0.85);
+        } else {
+            vec2 d = uTexelStep * 4.0;
+            float darkC = min(rgb.r, min(rgb.g, rgb.b));
+            vec3 s1 = texture(sTexture, vTexCoord + vec2(d.x, 0.0)).rgb;
+            vec3 s2 = texture(sTexture, vTexCoord - vec2(d.x, 0.0)).rgb;
+            vec3 s3 = texture(sTexture, vTexCoord + vec2(0.0, d.y)).rgb;
+            vec3 s4 = texture(sTexture, vTexCoord - vec2(0.0, d.y)).rgb;
+            float veil = min(
+                min(darkC, min(min(s1.r, min(s1.g, s1.b)), min(s2.r, min(s2.g, s2.b)))),
+                min(min(s3.r, min(s3.g, s3.b)), min(s4.r, min(s4.g, s4.b)))
+            ) * 0.72;
+            float denom = max(0.32, 1.0 - veil);
+            vec3 dehazed = clamp((rgb - vec3(veil)) / denom, 0.0, 1.0);
+            outRgb = pow(dehazed, vec3(0.86));
+        }
     } else if (uMode == 7) {
         // EDGE_TRACE (3x3 Sobel for copper traces & metallic solder pads)
         vec2 dx = vec2(uTexelStep.x, 0.0);
@@ -426,13 +599,24 @@ class GlVisorDualRenderer(
     private var uMvpMatrixLoc = -1
     private var uTexMatrixLoc = -1
     private var uTexLoc = -1
+    private var uDehazeLutLoc = -1
+    private var uHasDehazeLutLoc = -1
     private var uModeLoc = -1
     private var uTexelStepLoc = -1
+
+    private var dehazeLutTexId = 0
+    private var hasDehazeLut = false
+    private val dehazeLutBuf: ByteBuffer = ByteBuffer.allocateDirect(ClaheLutBuilder.LUT_BYTE_SIZE)
+    private val ptsNormalizer = GlVisorPtsNormalizer()
 
     private var poseProgramId = 0
     private var posePosLoc = -1
     private var poseColorLoc = -1
     private var posePointSizeLoc = -1
+    private var poseBoneFloatBuf: FloatBuffer? = null
+    private var poseBoneCapFloats = 0
+    private var poseJointFloatBuf: FloatBuffer? = null
+    private var poseJointCapFloats = 0
 
     private val stMatrix = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     private val mvpMatrix = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
@@ -515,11 +699,45 @@ class GlVisorDualRenderer(
         }
     }
 
-    fun attachEncoderSurface(surface: Surface?, width: Int, height: Int, onFramePushed: (() -> Unit)? = null) {
+    fun updateDehazeClaheLut(lutBytes: ByteArray) {
+        if (released.get() || !initialized.get() || lutBytes.size < ClaheLutBuilder.LUT_BYTE_SIZE) return
+        val copy = lutBytes.copyOf(ClaheLutBuilder.LUT_BYTE_SIZE)
+        glHandler.post {
+            if (released.get() || !initialized.get() || dehazeLutTexId == 0) return@post
+            if (pbufferSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
+            }
+            dehazeLutBuf.clear()
+            dehazeLutBuf.put(copy)
+            dehazeLutBuf.position(0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dehazeLutTexId)
+            GLES20.glTexSubImage2D(
+                GLES20.GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                ClaheLutBuilder.BINS,
+                ClaheLutBuilder.TILE_COUNT,
+                GLES20.GL_LUMINANCE,
+                GLES20.GL_UNSIGNED_BYTE,
+                dehazeLutBuf
+            )
+            hasDehazeLut = true
+        }
+    }
+
+    fun attachEncoderSurface(
+        surface: Surface?,
+        width: Int,
+        height: Int,
+        sessionStartNanoTime: Long = System.nanoTime(),
+        onFramePushed: (() -> Unit)? = null
+    ) {
         if (released.get()) return
         glHandler.post {
             if (released.get() || eglDisplay == EGL14.EGL_NO_DISPLAY) return@post
             destroyEncoderSurfaceOnly()
+            ptsNormalizer.reset(sessionStartNanoTime)
             onEncoderFramePushed = onFramePushed
             if (surface != null && surface.isValid && width > 0 && height > 0) {
                 val cfg = eglConfig ?: return@post
@@ -635,6 +853,7 @@ class GlVisorDualRenderer(
                     if (programId != 0) GLES20.glDeleteProgram(programId)
                     if (poseProgramId != 0) GLES20.glDeleteProgram(poseProgramId)
                     if (cameraTexId != 0) GLES20.glDeleteTextures(1, intArrayOf(cameraTexId), 0)
+                    if (dehazeLutTexId != 0) GLES20.glDeleteTextures(1, intArrayOf(dehazeLutTexId), 0)
                     if (pbufferSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, pbufferSurface)
                     if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext)
                     EGL14.eglTerminate(eglDisplay)
@@ -694,6 +913,8 @@ class GlVisorDualRenderer(
             uMvpMatrixLoc = GLES20.glGetUniformLocation(prog, "uMvpMatrix")
             uTexMatrixLoc = GLES20.glGetUniformLocation(prog, "uTexMatrix")
             uTexLoc = GLES20.glGetUniformLocation(prog, "sTexture")
+            uDehazeLutLoc = GLES20.glGetUniformLocation(prog, "uDehazeLut")
+            uHasDehazeLutLoc = GLES20.glGetUniformLocation(prog, "uHasDehazeLut")
             uModeLoc = GLES20.glGetUniformLocation(prog, "uMode")
             uTexelStepLoc = GLES20.glGetUniformLocation(prog, "uTexelStep")
 
@@ -705,14 +926,32 @@ class GlVisorDualRenderer(
                 posePointSizeLoc = GLES20.glGetUniformLocation(pProg, "uPointSize")
             }
 
-            val texIds = IntArray(1)
-            GLES20.glGenTextures(1, texIds, 0)
+            val texIds = IntArray(2)
+            GLES20.glGenTextures(2, texIds, 0)
             cameraTexId = texIds[0]
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+            dehazeLutTexId = texIds[1]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dehazeLutTexId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D,
+                0,
+                GLES20.GL_LUMINANCE,
+                ClaheLutBuilder.BINS,
+                ClaheLutBuilder.TILE_COUNT,
+                0,
+                GLES20.GL_LUMINANCE,
+                GLES20.GL_UNSIGNED_BYTE,
+                null
+            )
 
             val st = SurfaceTexture(cameraTexId)
             st.setOnFrameAvailableListener({ renderCurrentFrame() }, glHandler)
@@ -796,10 +1035,11 @@ class GlVisorDualRenderer(
         if (encoderSurface != EGL14.EGL_NO_SURFACE && encoderWidth > 0 && encoderHeight > 0) {
             if (EGL14.eglMakeCurrent(eglDisplay, encoderSurface, encoderSurface, eglContext)) {
                 drawQuadAndPose(encoderWidth, encoderHeight, flipVertical = false)
+                val normalizedPtsNs = ptsNormalizer.nextRelativePtsNs(ptsNs, System.nanoTime())
                 EGLExt.eglPresentationTimeANDROID(
                     eglDisplay,
                     encoderSurface,
-                    if (ptsNs > 0L) ptsNs else System.nanoTime()
+                    normalizedPtsNs
                 )
                 EGL14.eglSwapBuffers(eglDisplay, encoderSurface)
                 onEncoderFramePushed?.invoke()
@@ -826,6 +1066,14 @@ class GlVisorDualRenderer(
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
         GLES20.glUniform1i(uTexLoc, 0)
+        if (uDehazeLutLoc >= 0 && dehazeLutTexId != 0) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dehazeLutTexId)
+            GLES20.glUniform1i(uDehazeLutLoc, 1)
+        }
+        if (uHasDehazeLutLoc >= 0) {
+            GLES20.glUniform1i(uHasDehazeLutLoc, if (hasDehazeLut) 1 else 0)
+        }
         val activeMode = shaderModeId.coerceAtLeast(0)
         GLES20.glUniform1i(uModeLoc, activeMode)
         GLES20.glUniformMatrix4fv(uMvpMatrixLoc, 1, false, mvpMatrix, 0)
@@ -857,19 +1105,39 @@ class GlVisorDualRenderer(
         }
     }
 
+    private fun ensurePoseBoneBuffer(neededFloats: Int): FloatBuffer {
+        val existing = poseBoneFloatBuf
+        if (existing != null && poseBoneCapFloats >= neededFloats) return existing
+        val cap = max(neededFloats, 128)
+        return ByteBuffer.allocateDirect(cap * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().also {
+            poseBoneFloatBuf = it
+            poseBoneCapFloats = cap
+        }
+    }
+
+    private fun ensurePoseJointBuffer(neededFloats: Int): FloatBuffer {
+        val existing = poseJointFloatBuf
+        if (existing != null && poseJointCapFloats >= neededFloats) return existing
+        val cap = max(neededFloats, 96)
+        return ByteBuffer.allocateDirect(cap * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().also {
+            poseJointFloatBuf = it
+            poseJointCapFloats = cap
+        }
+    }
+
     private fun drawPoseWireframePass(wf: PoseWireframe, targetW: Int, flipVertical: Boolean) {
         GLES20.glUseProgram(poseProgramId)
         if (wf.bones.isNotEmpty()) {
-            val pts = FloatArray(wf.bones.size * 4)
-            var idx = 0
+            val needed = wf.bones.size * 4
+            val buf = ensurePoseBoneBuffer(needed)
+            buf.clear()
             for ((a, b) in wf.bones) {
-                pts[idx++] = a.x
-                pts[idx++] = if (flipVertical) 1f - a.y else a.y
-                pts[idx++] = b.x
-                pts[idx++] = if (flipVertical) 1f - b.y else b.y
+                buf.put(a.x)
+                buf.put(if (flipVertical) 1f - a.y else a.y)
+                buf.put(b.x)
+                buf.put(if (flipVertical) 1f - b.y else b.y)
             }
-            val buf = ByteBuffer.allocateDirect(pts.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            buf.put(pts).position(0)
+            buf.position(0)
             GLES20.glLineWidth(max(3f, targetW * 0.006f))
             GLES20.glUniform4f(poseColorLoc, 0f, 0.90f, 1f, 1f)
             GLES20.glUniform1f(posePointSizeLoc, 6f)
@@ -879,14 +1147,14 @@ class GlVisorDualRenderer(
             GLES20.glDisableVertexAttribArray(posePosLoc)
         }
         if (wf.joints.isNotEmpty()) {
-            val pts = FloatArray(wf.joints.size * 2)
-            var idx = 0
+            val needed = wf.joints.size * 2
+            val buf = ensurePoseJointBuffer(needed)
+            buf.clear()
             for (j in wf.joints) {
-                pts[idx++] = j.x
-                pts[idx++] = if (flipVertical) 1f - j.y else j.y
+                buf.put(j.x)
+                buf.put(if (flipVertical) 1f - j.y else j.y)
             }
-            val buf = ByteBuffer.allocateDirect(pts.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            buf.put(pts).position(0)
+            buf.position(0)
             GLES20.glUniform4f(poseColorLoc, 0f, 1f, 0.4f, 1f)
             GLES20.glUniform1f(posePointSizeLoc, max(8f, targetW * 0.015f))
             GLES20.glEnableVertexAttribArray(posePosLoc)

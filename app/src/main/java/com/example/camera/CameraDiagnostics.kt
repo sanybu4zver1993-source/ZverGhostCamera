@@ -138,4 +138,44 @@ object CameraDiagnostics {
             }
         }.trim()
     }
+
+    fun buildDiagnosticJson(context: Context, boundUseCasesSummary: String = "N/A"): String {
+        val r = inspect(context, boundUseCasesSummary)
+        val lensesArr = org.json.JSONArray()
+        for (l in r.lenses) {
+            lensesArr.put(org.json.JSONObject().apply {
+                put("camera_id", l.cameraId)
+                put("facing", l.lensFacing)
+                put("hw_level", l.hardwareLevel)
+                put("pixel_array", l.pixelArray)
+                put("active_array", l.activeArray)
+                put("max_jpeg", l.maxJpegSize)
+                put("max_yuv", l.maxYuvSize)
+                put("ae_awb_lock", l.aeAwbLock)
+                put("flash", l.flashAvailable)
+                put("ultra_hi_res", l.ultraHighResSupported)
+            })
+        }
+        val root = org.json.JSONObject().apply {
+            put("schema", "zver-diag-v1")
+            put("manufacturer", r.manufacturer)
+            put("model", r.model)
+            put("device", r.device)
+            put("soc", r.socModel)
+            put("android_release", r.androidRelease)
+            put("sdk_int", r.sdkInt)
+            put("bound_use_cases", r.boundUseCasesSummary)
+            put("lenses", lensesArr)
+            CaptureManager.lastCaptureStageTimings?.let { st ->
+                put("last_capture_stages_ms", org.json.JSONObject().apply {
+                    put("capture_raw", st.captureRawMs)
+                    put("process_encode", st.processEncodeMs)
+                    put("vault_encrypt", st.vaultEncryptMs)
+                    put("mono_vault", st.monoVaultMs)
+                    put("total", st.totalMs)
+                })
+            }
+        }
+        return root.toString(2)
+    }
 }

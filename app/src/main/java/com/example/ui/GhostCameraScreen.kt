@@ -83,6 +83,7 @@ import com.example.security.CamouflageManager
 import com.example.security.SecureClipboard
 import com.example.security.SentinelEngine
 import com.example.security.ZverPrefs
+import com.example.visor.ClaheLutBuilder
 import com.example.visor.CyberVisorEngine
 import com.example.visor.GlVisorDualRenderer
 import com.example.visor.VisorMode
@@ -733,7 +734,8 @@ fun GhostCameraScreen(
                         val contourTag = if (result.isRamOnly) " [ОЗУ]" else ""
                         val dehazeTag = if (isDcpDehazeActive && visorMode == VisorMode.NORMAL) " [АНТИ-ТУМАН]" else ""
                         val iqTag = if (result.iqLabel.isNotBlank()) " [${result.iqLabel}]" else ""
-                        lastStatusMessage = "📸 ${result.formatLabel} (${kb}КБ, 0 EXIF) за ${result.durationMs}мс$contourTag$dehazeTag$iqTag"
+                        val stageTag = if (result.durationMs >= 500L) " (${result.stageTimings.formatCompactRu()})" else ""
+                        lastStatusMessage = "📸 ${result.formatLabel} (${kb}КБ, 0 EXIF) за ${result.durationMs}мс$contourTag$dehazeTag$iqTag$stageTag"
 
                         if (shotIdx < burstCount) {
                             delay(1000)
@@ -922,7 +924,12 @@ fun GhostCameraScreen(
                 }
             )
             if (session != null) {
-                glRenderer.attachEncoderSurface(session.inputSurface, session.width, session.height) {
+                glRenderer.attachEncoderSurface(
+                    surface = session.inputSurface,
+                    width = session.width,
+                    height = session.height,
+                    sessionStartNanoTime = session.sessionStartNanoTime
+                ) {
                     visorVideoRecorder.notifyExternalFramePushed()
                 }
                 isRecordingVideo = true
@@ -1222,6 +1229,7 @@ fun GhostCameraScreen(
 
         var lastTelemetryAnalysisMs = 0L
         var previousMotionGrid: IntArray? = null
+        val claheLutScratch = ByteArray(ClaheLutBuilder.LUT_BYTE_SIZE)
 
         imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
             try {
@@ -1333,6 +1341,17 @@ fun GhostCameraScreen(
 
                 if (analyzerFlags.visorMode != VisorMode.NORMAL && !analyzerFlags.stealthBlackoutActive) {
                     if (analyzerFlags.useGpuShader) {
+                        if (analyzerFlags.visorMode == VisorMode.DEHAZE_LIVE && runSlowCvPass) {
+                            val yPlane = imageProxy.planes[0]
+                            val lut = ClaheLutBuilder.build4x4TileLuts(
+                                yBuffer = yPlane.buffer,
+                                width = imageProxy.width,
+                                height = imageProxy.height,
+                                rowStride = yPlane.rowStride,
+                                outLut = claheLutScratch
+                            )
+                            glRenderer.updateDehazeClaheLut(lut)
+                        }
                         if (analyzerFlags.visorMode == VisorMode.WIREFRAME_POSE || runSlowCvPass) {
                             val tel = cyberVisorEngine.analyzeTelemetryOnly(
                                 imageProxy = imageProxy,
@@ -1652,9 +1671,16 @@ fun GhostCameraScreen(
             }
         )
 
-        TacticalReticle(modifier = Modifier.fillMaxSize())
+        if (shouldShowTacticalReticle(selectedCameraMode, visorMode, isRecordingVideo)) {
+            TacticalReticle(modifier = Modifier.fillMaxSize())
+        }
 
-        DocumentLevelOverlay(isDocumentModeActive = isDocumentModeActive, telemetry = telemetry)
+        val showDocumentLevel = shouldShowDocumentLevelOverlay(
+            selectedCameraMode = selectedCameraMode,
+            isDocumentModeActive = isDocumentModeActive,
+            isRecordingVideo = isRecordingVideo
+        )
+        DocumentLevelOverlay(isDocumentModeActive = showDocumentLevel, telemetry = telemetry)
 
         LiveOpticalOverlaysLayer(
             isFocusPeakingEnabled = isFocusPeakingEnabled,
@@ -1726,7 +1752,15 @@ fun GhostCameraScreen(
             onToggleZebra = { isZebraEnabled = !isZebraEnabled },
             onToggleFocusPeaking = { isFocusPeakingEnabled = !isFocusPeakingEnabled },
             onToggleFalseColor = { isFalseColorEnabled = !isFalseColorEnabled },
-            onToggleDocumentMode = { isDocumentModeActive = !isDocumentModeActive },
+            onToggleDocumentMode = {
+                val enableDoc = !isDocumentModeActive
+                isDocumentModeActive = enableDoc
+                if (enableDoc) {
+                    selectedCameraMode = "DOCUMENTS"
+                    visorMode = VisorMode.NORMAL
+                    lastStatusMessage = "Режим: Документы (уровень)"
+                }
+            },
             onToggleDcpDehaze = { isDcpDehazeActive = !isDcpDehazeActive },
             onToggleAutoShutter = { isAutoShutterEnabled = !isAutoShutterEnabled },
             onToggleFocusBracketing = { isFocusBracketingActive = !isFocusBracketingActive },

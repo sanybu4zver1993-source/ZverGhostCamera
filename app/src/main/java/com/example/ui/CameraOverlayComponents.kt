@@ -306,6 +306,18 @@ internal fun CameraGestureLayer(
     )
 }
 
+internal fun shouldShowDocumentLevelOverlay(
+    selectedCameraMode: String,
+    isDocumentModeActive: Boolean,
+    isRecordingVideo: Boolean
+): Boolean = selectedCameraMode == "DOCUMENTS" && isDocumentModeActive && !isRecordingVideo
+
+internal fun shouldShowTacticalReticle(
+    selectedCameraMode: String,
+    visorMode: VisorMode,
+    isRecordingVideo: Boolean
+): Boolean = !isRecordingVideo && selectedCameraMode != "DOCUMENTS" && visorMode == VisorMode.NORMAL
+
 @Composable
 internal fun DocumentLevelOverlay(
     isDocumentModeActive: Boolean,

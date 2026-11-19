@@ -86,34 +86,26 @@ class PanicTriggerReceiver : BroadcastReceiver() {
             ACTION_TRIGGER -> {
                 Log.w("PanicKit", "Received ACTION_TRIGGER. Verifying caller authenticity...")
                 var isAuthorized = false
+                val myUid = android.os.Process.myUid()
 
-                // Path A: Verified UID and Signing Certificate (Android 14+)
-                if (callerUid != -1) {
+                // Path A: Verified external UID and APK Signing Certificate (Android 14+ getSentFromUid)
+                if (callerUid != -1 && callerUid != myUid) {
                     val callerPackages = context.packageManager.getPackagesForUid(callerUid)
                     if (!callerPackages.isNullOrEmpty()) {
                         val callerCerts = getCertificateFingerprints(context, callerPackages[0])
                         val trusted = prefs.getStringSet(KEY_TRUSTED_FINGERPRINTS, emptySet()) ?: emptySet()
-                        if (callerCerts.any { trusted.contains(it) } || (trusted.isEmpty() && callerPackages[0].contains("guardianproject"))) {
+                        if (callerCerts.any { trusted.contains(it) }) {
                             isAuthorized = true
-                            Log.i("PanicKit", "Authorized via APK Certificate Fingerprint match.")
+                            Log.i("PanicKit", "Authorized via verified UID & APK Certificate Fingerprint match.")
                         }
                     }
                 }
 
-                // Path B: Fallback for Android 14/15 where getSentFromUid() == -1 via Constant-Time comparison
+                // Path B: Constant-time Cryptographic Shared Secret Nonce (also covers API < 34 where callerUid == -1)
                 if (!isAuthorized && incomingSecret != null && storedSecret != null) {
                     if (constantTimeEquals(incomingSecret, storedSecret)) {
                         isAuthorized = true
                         Log.i("PanicKit", "Authorized via Cryptographic Shared Secret Nonce match (constant-time).")
-                    }
-                }
-
-                // Path C: First-time setup / Trusted GuardianProject package fallback
-                if (!isAuthorized && (storedSecret == null || callerUid != -1)) {
-                    val pkg = intent.getPackage() ?: intent.getStringExtra("caller_package") ?: ""
-                    if (pkg.contains("guardianproject") || pkg.contains("ripple")) {
-                        isAuthorized = true
-                        Log.i("PanicKit", "Authorized via GuardianProject Package Origin.")
                     }
                 }
 
@@ -128,7 +120,14 @@ class PanicTriggerReceiver : BroadcastReceiver() {
                         Log.e("PanicKit", "Error during panic execution", e)
                     }
                 } else {
-                    Log.e("PanicKit", "REJECTED UNVERIFIED PANIC TRIGGER! Neither Certificate nor Nonce matched.")
+                    // Fail-safe defensive lock: lock in-memory sessions without deleting files on disk
+                    Log.e("PanicKit", "UNVERIFIED PANIC TRIGGER: refusing destructive wipe; locking RAM sessions only.")
+                    try {
+                        GhostCryptoVault.lockSession()
+                        GhostCryptoVault.clearRamShots()
+                        com.example.assist.ByokManager.clearSessionMemory()
+                        com.example.security.SentinelEngine.clearSession()
+                    } catch (_: Exception) {}
                 }
             }
         }

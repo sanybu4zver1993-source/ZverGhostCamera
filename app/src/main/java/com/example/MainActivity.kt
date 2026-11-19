@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             GhostCryptoVault.shredEphemeralShareFiles(this@MainActivity)
             GhostCryptoVault.shredOrphanedVideoTemps(this@MainActivity, minAgeMs = 15_000L)
+            GhostCryptoVault.shredOrphanedVaultTempFiles(this@MainActivity, minAgeMs = 15_000L)
         }
     }
 
@@ -148,19 +149,22 @@ class MainActivity : ComponentActivity() {
 
     private fun handleCustomUri(intent: Intent?) {
         val uri = intent?.data ?: return
-        if (uri.scheme == "zver") {
-            when (uri.host) {
-                "capture" -> onVolumeShutterTrigger?.invoke()
-                "video" -> onVideoToggleTrigger?.invoke()
-                "torch" -> onTorchToggleTrigger?.invoke()
-                "stealth" -> onBlackoutToggleTrigger?.invoke()
-                "lock" -> {
-                    GhostCryptoVault.lockSession()
-                    ByokManager.clearSessionMemory()
-                    SentinelEngine.clearSession()
-                    com.example.security.SecureClipboard.clearIfOwned(this)
-                    onLockGateTrigger?.invoke()
-                }
+        if (uri.scheme?.lowercase() != "zver") return
+        val route = uri.host?.lowercase()?.trim() ?: return
+        when (route) {
+            "capture" -> onVolumeShutterTrigger?.invoke()
+            "video" -> onVideoToggleTrigger?.invoke()
+            "torch" -> onTorchToggleTrigger?.invoke()
+            "stealth" -> onBlackoutToggleTrigger?.invoke()
+            "lock" -> {
+                GhostCryptoVault.lockSession()
+                ByokManager.clearSessionMemory()
+                SentinelEngine.clearSession()
+                com.example.security.SecureClipboard.clearIfOwned(this)
+                onLockGateTrigger?.invoke()
+            }
+            else -> {
+                // Unknown zver:// route ignored cleanly (no arbitrary command execution)
             }
         }
     }

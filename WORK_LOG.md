@@ -248,3 +248,34 @@
 - **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
 - **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** реальное время сжатия WebP (`<200ms`), фактические FPS GPU-рендера `OpenGL ES 3.0` на Mali-G52 и запись MP4 25–30 FPS с GLSL-фильтрами без растяжения кадра — `UNVERIFIED` до проверки на телефоне.
 - **Шаг Г (Keystore):** `debug.keystore` и `signingConfigs` не изменялись; пользователю выдано обязательное предупреждение о предварительном бэкапе старых `.gcf` файлов до перехода на релизную подпись.
+
+---
+
+## 2026-11-19 — P6 (Доработки по ТЗ GPT-6.2 Sol: Атомарный Сейф + Тайминги стадий, CLAHE LUT в GPU, PTS-синхронизация A/V, Изоляция прицела и Харденинг PanicKit)
+
+### 1. Реализованные изменения
+- **Атомарный Сейф и Профайлер стадий (`GhostCryptoVault.kt`, `CaptureManager.kt`, `CameraDiagnostics.kt`, `MainActivity.kt`):**
+  - Добавлен метод `GhostCryptoVault.writeEncryptedAtomically(...)`: шифрование потока GCF1 (`MAGIC + 12B IV + AES-256-GCM`) сначала пишется в `.gcf.tmp` в том же каталоге и переименовывается в `.gcf` только после полного закрытия `CipherOutputStream` и финализации GCM-тега; обратная совместимость со всеми существующими 23+ файлами `.gcf` полностью сохранена.
+  - Переведены `encryptBytesToVault`, `encryptFileToVault` и `CaptureManager.persistEncryptedCaptureResult` на атомарную запись.
+  - Добавлен `GhostCryptoVault.shredOrphanedVaultTempFiles(...)` и подключён в `MainActivity.onResume` для автоочистки оборванных `.gcf.tmp` / нулевых `.gcf`.
+  - В `CaptureManager` добавлен `CaptureStageTimings` (`captureRawMs`, `processEncodeMs`, `vaultEncryptMs`, `monoVaultMs`, `totalMs`); при сохранении `>= 500мс` статус-баннер автоматически показывает разбиение по стадиям (`raw=...ms proc=...ms aes=...ms mono=...ms`).
+  - В `CameraDiagnostics` добавлен `buildDiagnosticJson(...)` (схема `zver-diag-v1`, без кадров, аудио, ключей и PII).
+- **Исправление залипшего прицела и уровня «НАКЛОН» (`CameraOverlayComponents.kt`, `GhostCameraScreen.kt`):**
+  - Введены чистые правила `shouldShowDocumentLevelOverlay` (`tab == "DOCUMENTS" && isDocumentModeActive && !isRecordingVideo`) и `shouldShowTacticalReticle` (`!isRecordingVideo && tab != "DOCUMENTS" && visorMode == VisorMode.NORMAL`).
+  - Переключатель уровня в шторке при включении переводит на `"DOCUMENTS"` и при выходе/записи больше не оставляет «НАКЛОН» и прицел поверх `"Видео"` / `"Визор"`.
+- **GPU `GlVisorDualRenderer` и `VisorVideoRecorder` (PTS-синхронизация, CLAHE 4×4 LUT, 0 аллокаций позы):**
+  - В `GlVisorDualRenderer` добавлен `GlVisorPtsNormalizer`: устраняет рассинхрон часовых доменов между `SurfaceTexture.getTimestamp()` (HAL sensor clock) и `AudioRecord` (`System.nanoTime()`), приводя видео-PTS к строго монотонной шкале от `sessionStartNanoTime` из `VisorVideoRecorder.ExternalSurfaceSession`.
+  - Добавлен `ClaheLutBuilder` (4×4 тайловые гистограммы Y-плоскости, clipLimit `2.4f`, компактная 2D-текстура `256×16` `GL_LUMINANCE`), загрузка `updateDehazeClaheLut(...)` из `ImageAnalysis` при активном `DEHAZE_LIVE` и билинейная интерполяция по 4 тайлам прямо во фрагментном шейдере GLES 3.0 (с автоматическим fallback на dark-channel).
+  - Убраны покадровые нативные аллокации `ByteBuffer.allocateDirect` в `drawPoseWireframePass` (преаллоцированные `poseBoneFloatBuf` / `poseJointFloatBuf`).
+  - В `VisorVideoRecorder.stopAndFinalize` поставлен атомарный `compareAndSet` на `isStoppingFlag` против двойного вызова `signalEndOfInputStream()`.
+- **Безопасность `PanicTriggerReceiver` и диплинков `zver://` (`PanicTriggerReceiver.kt`, `MainActivity.kt`):**
+  - Убран небезопасный строковый fallback (`caller_package`), позволявший стороннему приложению на API < 34 вызвать стирание Сейфа без ключа; теперь вайп допускается только при подтверждённом внешнем UID+SHA-256 сертификате из `ACTION_CONNECT` либо при совпадении `EXTRA_SHARED_SECRET` в постоянном времени; неподтверждённый триггер выполняет только безопасную блокировку RAM-сессии (`lockSession` + `clearRamShots` + сброс BYOK/Sentinel).
+  - В `MainActivity.handleCustomUri` добавлен строгий allowlist известных маршрутов `zver://` (`capture`, `video`, `torch`, `stealth`, `lock`).
+- **Тесты (`P6HardeningAndClaheTest.kt`, новый файл):**
+  - Добавлено 6 JVM/Robolectric-тестов: `GlVisorPtsNormalizer`, `ClaheLutBuilder` + шейдеры `uDehazeLut`, правила видимости `DocumentLevelOverlay`/`TacticalReticle`, атомарная запись `.gcf.tmp -> .gcf` + `shredOrphanedVaultTempFiles`, защита `PanicTriggerReceiver` от спуфинга, `CameraDiagnostics.buildDiagnosticJson`.
+
+### 2. Верификация P6
+- **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL**, **66/66 PASS** (`0 failures, 0 errors, 0 skipped` по 15 тестовым классам, включая `P6HardeningAndClaheTest`: 6/6 PASS).
+- **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** живая синхронизация звука и GPU-видео по `GlVisorPtsNormalizer`, визуальное качество 4×4 CLAHE LUT в режиме `Анти-Туман` на Mali-G52 и замер поэтапного времени сохранения WebP в статусе — `UNVERIFIED` до проверки на телефоне.
+

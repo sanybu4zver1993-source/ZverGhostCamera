@@ -256,7 +256,8 @@ class VisorVideoRecorder {
     data class ExternalSurfaceSession(
         val inputSurface: Surface,
         val width: Int,
-        val height: Int
+        val height: Int,
+        val sessionStartNanoTime: Long
     )
 
     val isRecording: Boolean
@@ -487,7 +488,7 @@ class VisorVideoRecorder {
                     runAudioEncodeLoop(aCodec, aRecord)
                 }
             }
-            ExternalSurfaceSession(surface, encWidth, encHeight)
+            ExternalSurfaceSession(surface, encWidth, encHeight, startTimeNs)
         } catch (e: Exception) {
             cleanupResources()
             isRecordingFlag.set(false)
@@ -528,8 +529,8 @@ class VisorVideoRecorder {
 
     suspend fun stopAndFinalize(onBeforeSignalEos: (() -> Unit)? = null): File? = withContext(Dispatchers.Default) {
         if (!isRecordingFlag.get()) return@withContext null
+        if (!isStoppingFlag.compareAndSet(false, true)) return@withContext null
         try { onBeforeSignalEos?.invoke() } catch (_: Exception) {}
-        isStoppingFlag.set(true)
         synchronized(frameLock) {
             frameLock.notifyAll()
         }

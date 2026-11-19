@@ -459,6 +459,54 @@ object GhostCryptoVault {
 
     // --- ENCRYPTED DISK VAULT STREAMS ---
 
+    fun writeEncryptedAtomically(
+        context: Context,
+        prefix: String = MEDIA_PHOTO,
+        writer: (CipherOutputStream) -> Unit
+    ): File {
+        val vaultDir = activeProfile.getDirectory(context)
+        val baseName = "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
+        val tempFile = File(vaultDir, "$baseName.gcf.tmp")
+        val targetFile = File(vaultDir, "$baseName.gcf")
+
+        val iv = ByteArray(GCM_IV_LEN)
+        secureRandom.nextBytes(iv)
+
+        val cipher = Cipher.getInstance(AES_GCM)
+        val gcmSpec = GCMParameterSpec(GCM_TAG_LEN, iv)
+        cipher.init(Cipher.ENCRYPT_MODE, getActiveVaultKey(context), gcmSpec)
+
+        val fos = FileOutputStream(tempFile)
+        try {
+            fos.write(MAGIC_HEADER)
+            fos.write(iv)
+            CipherOutputStream(fos, cipher).use { cos ->
+                writer(cos)
+                cos.flush()
+            }
+            if (!tempFile.exists() || tempFile.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)) {
+                throw IOException("Incomplete GCF atomic write")
+            }
+            if (!tempFile.renameTo(targetFile)) {
+                FileInputStream(tempFile).use { input ->
+                    FileOutputStream(targetFile).use { out ->
+                        input.copyTo(out)
+                        out.fd.sync()
+                    }
+                }
+                shredFile(tempFile)
+            }
+            return targetFile
+        } catch (e: Exception) {
+            try { fos.close() } catch (_: Exception) {}
+            shredFile(tempFile)
+            shredFile(targetFile)
+            throw e
+        } finally {
+            Arrays.fill(iv, 0.toByte())
+        }
+    }
+
     fun openEncryptedOutputStream(context: Context, prefix: String = MEDIA_PHOTO): Pair<File, CipherOutputStream> {
         val vaultDir = activeProfile.getDirectory(context)
         val targetFile = File(vaultDir, "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.gcf")
@@ -490,40 +538,27 @@ object GhostCryptoVault {
     fun isVideoFile(file: File): Boolean = file.name.startsWith("${MEDIA_VIDEO}_")
 
     fun encryptBytesToVault(context: Context, plainBytes: ByteArray, prefix: String = MEDIA_PHOTO): File {
-        val (targetFile, cipherOut) = openEncryptedOutputStream(context, prefix)
-        try {
-            cipherOut.use { stream ->
-                stream.write(plainBytes)
-                stream.flush()
-            }
-            try {
-                val volume = if (activeProfile == VaultProfile.MAIN) {
-                    MonoVaultEngine.VolumeType.MASTER
-                } else {
-                    MonoVaultEngine.VolumeType.DECOY
-                }
-                MonoVaultEngine.appendRecord(context, volume, plainBytes)
-            } catch (_: Exception) {}
-            return targetFile
-        } catch (e: Exception) {
-            shredFile(targetFile)
-            throw e
+        val targetFile = writeEncryptedAtomically(context, prefix) { stream ->
+            stream.write(plainBytes)
         }
+        try {
+            val volume = if (activeProfile == VaultProfile.MAIN) {
+                MonoVaultEngine.VolumeType.MASTER
+            } else {
+                MonoVaultEngine.VolumeType.DECOY
+            }
+            MonoVaultEngine.appendRecord(context, volume, plainBytes)
+        } catch (_: Exception) {}
+        return targetFile
     }
 
     fun encryptFileToVault(context: Context, sourceFile: File, prefix: String = MEDIA_VIDEO): File {
-        val (targetFile, cipherOut) = openEncryptedOutputStream(context, prefix)
         try {
-            cipherOut.use { out ->
+            return writeEncryptedAtomically(context, prefix) { out ->
                 FileInputStream(sourceFile).use { input ->
                     input.copyTo(out)
                 }
-                out.flush()
             }
-            return targetFile
-        } catch (e: Exception) {
-            shredFile(targetFile)
-            throw e
         } finally {
             shredFile(sourceFile)
         }
@@ -1160,6 +1195,23 @@ object GhostCryptoVault {
             try { nomedia.createNewFile() } catch (_: Exception) {}
         }
         return dir
+    }
+
+    fun shredOrphanedVaultTempFiles(context: Context, minAgeMs: Long = 0L): Int {
+        var count = 0
+        val now = System.currentTimeMillis()
+        for (profile in VaultProfile.entries) {
+            val dir = File(context.filesDir, profile.dirName)
+            if (!dir.exists()) continue
+            dir.listFiles()?.forEach { f ->
+                val isOrphanTemp = f.name.endsWith(".gcf.tmp") || (f.name.endsWith(".gcf") && f.length() == 0L)
+                val oldEnough = minAgeMs <= 0L || (now - f.lastModified()) >= minAgeMs
+                if (isOrphanTemp && oldEnough && shredFile(f)) {
+                    count++
+                }
+            }
+        }
+        return count
     }
 
     fun shredOrphanedVideoTemps(context: Context, minAgeMs: Long = 0L): Int {

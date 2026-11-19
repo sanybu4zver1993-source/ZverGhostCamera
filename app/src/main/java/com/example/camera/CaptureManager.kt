@@ -38,6 +38,23 @@ class CaptureManager(
     private val appContext = context.applicationContext
     private val captureMutex = Mutex()
 
+    data class CaptureStageTimings(
+        val captureRawMs: Long = 0L,
+        val processEncodeMs: Long = 0L,
+        val vaultEncryptMs: Long = 0L,
+        val monoVaultMs: Long = 0L,
+        val totalMs: Long = 0L
+    ) {
+        fun formatCompactRu(): String =
+            "raw=${captureRawMs}ms proc=${processEncodeMs}ms aes=${vaultEncryptMs}ms mono=${monoVaultMs}ms"
+    }
+
+    companion object {
+        @Volatile
+        var lastCaptureStageTimings: CaptureStageTimings? = null
+            private set
+    }
+
     data class CaptureResult(
         val encryptedFile: File?,
         val encryptedSizeBytes: Long,
@@ -46,7 +63,8 @@ class CaptureManager(
         val isRamOnly: Boolean = false,
         val isClean: Boolean = true,
         val formatLabel: String = "WEBP",
-        val iqLabel: String = ""
+        val iqLabel: String = "",
+        val stageTimings: CaptureStageTimings = CaptureStageTimings()
     )
 
     data class StackCaptureResult(
@@ -114,12 +132,15 @@ class CaptureManager(
             }
         }
 
+        val rawCaptureStart = System.currentTimeMillis()
         val rawShot = captureRawJpeg()
+        val captureRawMs = (System.currentTimeMillis() - rawCaptureStart).coerceAtLeast(0L)
         var cleanBytes: ByteArray? = null
         var decodedForVisor: android.graphics.Bitmap? = null
         var renderedVisorBmp: android.graphics.Bitmap? = null
         try {
             withContext(Dispatchers.IO) {
+                val procStart = System.currentTimeMillis()
                 var strippedCount = 0
                 val audit: ExifStripper.AuditReport
 
@@ -173,6 +194,7 @@ class CaptureManager(
                         strippedCount = 1
                     }
                 }
+                val processEncodeMs = (System.currentTimeMillis() - procStart).coerceAtLeast(0L)
 
                 val iqTag = buildList {
                     if (visorMode != VisorMode.NORMAL && !forceDocumentBw) add("ВИЗОР:${visorMode.badgeRu}")
@@ -186,7 +208,9 @@ class CaptureManager(
                     strippedCount = strippedCount,
                     startTime = startTime,
                     audit = audit,
-                    iqTag = iqTag
+                    iqTag = iqTag,
+                    captureRawMs = captureRawMs,
+                    processEncodeMs = processEncodeMs
                 )
             }
         } finally {
@@ -403,55 +427,78 @@ class CaptureManager(
         strippedCount: Int,
         startTime: Long,
         audit: ExifStripper.AuditReport,
-        iqTag: String
+        iqTag: String,
+        captureRawMs: Long = 0L,
+        processEncodeMs: Long = 0L
     ): CaptureResult {
         return if (ramOnly) {
+            val t0 = System.currentTimeMillis()
             val shot = GhostCryptoVault.addRamShot(payload.clone(), isVideo = false)
+            val totalMs = System.currentTimeMillis() - startTime
+            val timings = CaptureStageTimings(
+                captureRawMs = captureRawMs,
+                processEncodeMs = processEncodeMs,
+                vaultEncryptMs = (System.currentTimeMillis() - t0).coerceAtLeast(0L),
+                monoVaultMs = 0L,
+                totalMs = totalMs
+            )
+            lastCaptureStageTimings = timings
             CaptureResult(
                 encryptedFile = null,
                 encryptedSizeBytes = shot.bytes.size.toLong(),
                 strippedSegmentsCount = strippedCount,
-                durationMs = System.currentTimeMillis() - startTime,
+                durationMs = totalMs,
                 isRamOnly = true,
                 isClean = audit.isClean,
                 formatLabel = audit.format,
-                iqLabel = iqTag
+                iqLabel = iqTag,
+                stageTimings = timings
             )
         } else {
-            val (targetFile, cos) = GhostCryptoVault.openEncryptedOutputStream(
-                appContext,
-                prefix = GhostCryptoVault.MEDIA_PHOTO
-            )
-            try {
-                cos.use { stream ->
+            val encStart = System.currentTimeMillis()
+            val targetFile = try {
+                GhostCryptoVault.writeEncryptedAtomically(
+                    appContext,
+                    prefix = GhostCryptoVault.MEDIA_PHOTO
+                ) { stream ->
                     stream.write(payload)
-                    stream.flush()
                 }
-
-                // Mirror stripped payload into Monolithic VeraCrypt Container
-                try {
-                    val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
-                        MonoVaultEngine.VolumeType.MASTER
-                    } else {
-                        MonoVaultEngine.VolumeType.DECOY
-                    }
-                    MonoVaultEngine.appendRecord(appContext, volume, payload)
-                } catch (_: Exception) {}
-
-                CaptureResult(
-                    encryptedFile = targetFile,
-                    encryptedSizeBytes = targetFile.length(),
-                    strippedSegmentsCount = strippedCount,
-                    durationMs = System.currentTimeMillis() - startTime,
-                    isRamOnly = false,
-                    isClean = audit.isClean,
-                    formatLabel = audit.format,
-                    iqLabel = iqTag
-                )
             } catch (e: Exception) {
-                GhostCryptoVault.shredFile(targetFile)
                 throw IOException("Streaming capture failed", e)
             }
+            val vaultEncryptMs = (System.currentTimeMillis() - encStart).coerceAtLeast(0L)
+
+            val monoStart = System.currentTimeMillis()
+            try {
+                val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                    MonoVaultEngine.VolumeType.MASTER
+                } else {
+                    MonoVaultEngine.VolumeType.DECOY
+                }
+                MonoVaultEngine.appendRecord(appContext, volume, payload)
+            } catch (_: Exception) {}
+            val monoVaultMs = (System.currentTimeMillis() - monoStart).coerceAtLeast(0L)
+            val totalMs = System.currentTimeMillis() - startTime
+            val timings = CaptureStageTimings(
+                captureRawMs = captureRawMs,
+                processEncodeMs = processEncodeMs,
+                vaultEncryptMs = vaultEncryptMs,
+                monoVaultMs = monoVaultMs,
+                totalMs = totalMs
+            )
+            lastCaptureStageTimings = timings
+
+            CaptureResult(
+                encryptedFile = targetFile,
+                encryptedSizeBytes = targetFile.length(),
+                strippedSegmentsCount = strippedCount,
+                durationMs = totalMs,
+                isRamOnly = false,
+                isClean = audit.isClean,
+                formatLabel = audit.format,
+                iqLabel = iqTag,
+                stageTimings = timings
+            )
         }
     }
 
