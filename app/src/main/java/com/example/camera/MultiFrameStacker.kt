@@ -396,13 +396,15 @@ object MultiFrameStacker {
 
         val stepX = max(2, w / 48)
         val stepY = max(2, h / 48)
+        val twoRows = IntArray(w * 2)
         var edgeHits = 0
         var samples = 0
         for (y in stepY until h - stepY step stepY) {
+            bitmap.getPixels(twoRows, 0, w, 0, y, w, 2)
             for (x in stepX until w - stepX step stepX) {
-                val c = fastLum(bitmap.getPixel(x, y))
-                val r = fastLum(bitmap.getPixel(x + 1, y))
-                val d = fastLum(bitmap.getPixel(x, y + 1))
+                val c = fastLum(twoRows[x])
+                val r = fastLum(twoRows[x + 1])
+                val d = fastLum(twoRows[w + x])
                 if (abs(c - r) + abs(c - d) >= 24) {
                     edgeHits++
                 }

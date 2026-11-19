@@ -51,6 +51,23 @@ object OfflinePrivacyEngine {
         val extractedText: String
     )
 
+    /**
+     * Moves a normalized region by (dxNorm, dyNorm) while preserving exact dimensions
+     * and clamping cleanly inside [0f..1f].
+     */
+    fun moveRegionClamped(rect: RectF, dxNorm: Float, dyNorm: Float): RectF {
+        val w = absRectWidth(rect).coerceIn(0.02f, 1f)
+        val h = absRectHeight(rect).coerceIn(0.02f, 1f)
+        val left0 = min(rect.left, rect.right)
+        val top0 = min(rect.top, rect.bottom)
+        val newLeft = (left0 + dxNorm).coerceIn(0f, 1f - w)
+        val newTop = (top0 + dyNorm).coerceIn(0f, 1f - h)
+        return RectF(newLeft, newTop, newLeft + w, newTop + h)
+    }
+
+    private fun absRectWidth(r: RectF): Float = max(r.left, r.right) - min(r.left, r.right)
+    private fun absRectHeight(r: RectF): Float = max(r.top, r.bottom) - min(r.top, r.bottom)
+
     suspend fun detectFacesOffline(bitmap: Bitmap): List<NormalizedRegion> =
         suspendCancellableCoroutine { cont ->
             val options = FaceDetectorOptions.Builder()

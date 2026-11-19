@@ -183,3 +183,68 @@
 - **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL**, **49/49 PASS** (`0 failures, 0 errors, 0 skipped`, включая `P3VisorRefinementsTest`: 5/5 PASS).
 - **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
 - **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** аппаратное кодирование H.264/AAC в `VisorVideoRecorder` (`c2.mtk.avc.encoder`), реальная калибровка живой листвы против зелёного пластика, стабильность ML Kit Pose на близкой дистанции и контраст Sobel-дорожек на плате — `UNVERIFIED` до проверки пользователем на устройстве.
+
+---
+
+## 2026-11-19 — Часть 4 (Сейф без лагов, Шредер, FLAG_SECURE, Редактор блюра + Drag, Офлайн-войсченджер) + Срочные фиксы по живому logcat Redmi 13C
+
+### 1. Реализованные изменения (Часть 4 + Logcat-оптимизация)
+- **`OfflineVoiceChanger.kt` (новый файл):**
+  - 100% офлайн-анонимайзер голоса для MP4 в Сейфе (`VoicePreset`: `ORIGINAL`, `DEEP_ANON` 0.74x, `GRAVE_BASS` 0.62x, `CYBER_ROBOT` 0.86x + кольцевая модуляция 46 Гц, `HIGH_PITCH` 1.34x).
+  - Видеотрек переносится zero-copy через `MediaExtractor`/`MediaMuxer`; аудиодорожка декодируется в PCM16, обрабатывается OLA с сохранением точной длительности (0 мс рассинхрона A/V) и кодируется обратно в AAC-LC 96 кбит/с; тихие видеофайлы без аудиодорожки обрабатываются безопасно.
+- **`GhostVaultDialog.kt`:**
+  - Вся тяжёлая криптография и дисковый I/O (`isConfigured`, `setupVaultPins`, 600k PBKDF2 `unlockWithPinOutcome`, авто-вайп при исчерпании попыток, `refreshFiles`, удаление одиночного файла и полный шредер) вынесены с главного потока на `Dispatchers.IO`/`Dispatchers.Default` с индикаторами загрузки (`isConfigLoaded`, `isPinBusy`, `isWiping`).
+  - Добавлено подтверждение удаления одиночного файла через диалог `pendingSingleShred`; все красные кнопки шредера работают асинхронно.
+  - Синхронизирован `FLAG_SECURE` внутри Сейфа с настройкой `ZverPrefs.isScreenRecBlockEnabled(context)` (если пользователь отключил блок записи экрана в Настройках — Сейф также позволяет запись).
+  - Добавлено `decorFitsSystemWindows = false` в `DialogProperties` для корректного отступа над 3-кнопочной навигацией Android 15.
+  - Встроен офлайн-просмотр и сохранение новой изменённой копии MP4 с изменённым голосом (`"ПРИМЕНИТЬ ГОЛОС"` -> предпросмотр -> `"В СЕЙФ"` через `Mp4Sanitizer`, оригинальный зашифрованный файл не перезаписывается).
+- **`OfflinePrivacyEngine.kt`, `PrivacyEditorDialog.kt`, `VaultPhotoEditorDialog.kt`, `VikaAiSheet.kt`:**
+  - В `DialogProperties` всех полноэкранных диалогов добавлено `decorFitsSystemWindows = false`.
+  - В `OfflinePrivacyEngine.moveRegionClamped(...)` и `PrivacyEditorDialog` добавлено плавное перетаскивание (`drag`) уже нарисованных областей блюра/пикселизации с ограничением в `[0f..1f]` (тап по боксу по-прежнему удаляет его, драг с пустого места рисует новый бокс).
+- **`VisorVideoRecorder.kt`:**
+  - Кодер видео переведён с медленного попиксельного YUV-пакера на `COLOR_FormatSurface` + `createInputSurface()` с 2-буферным пулом преаллоцированных `Bitmap` (`0` LOS-аллокаций на кадр) и прямым рисованием `PoseWireframe` на Canvas Surface (`lockHardwareCanvas()` с fallback на `lockCanvas(null)`).
+  - Добавлен `MuxerLifecycleGuard` против повторного вызова `MediaMuxer.stop()` и `MPEG4Writer: Stop() called but track is not started or stopped`. (Публичный API `VisorYuvPacker` сохранён для обратной совместимости.)
+- **Модуляризация `GhostCameraScreen.kt` + CV-диета + Lifecycle-очистка:**
+  - Экран `GhostCameraScreen.kt` разбит на `CameraOverlayComponents.kt`, `CameraHudComponents.kt`, `CameraDialogsLayer.kt` и компактный корневой `GhostCameraScreen.kt`, чтобы каждый `@Composable` метод оставался значительно ниже лимита компилятора ART (`32898` инструкций, прекращён спам интерпретатора каждые 200 мс).
+  - Тикающие значения телеметрии (`liveLaplacianVariance`, `gyroAngularSpeed`, `recordingDurationSeconds`, `recordingBytesWritten`, `visorDisplayState`, `peakingPoints`, `liveZebraPoints`) вынесены в `@Stable class CameraTelemetryState` и читаются только в листовых виджетах.
+  - Для `ImageAnalysis` задана стратегия `ResolutionSelector` (`640x480`) + `STRATEGY_KEEP_ONLY_LATEST`, троттлинг фоновых CV-проходов до `>= 230 мс` (~4.3 Гц) с пропуском отключённых оверлеев и передачей кадров `WIREFRAME_POSE` в `VisorVideoRecorder` без `snapshotLatestBitmapCopy()`.
+  - Исправлено залипание уровня `"НАКЛОН"` при переключении режима с `"Документы"` на другие режимы; добавлен `LifecycleEventObserver` (`ON_PAUSE`/`ON_STOP` останавливает активную запись, чистит анализатор и отвязывает `ProcessCameraProvider` до уничтожения `SurfaceView`, `ON_START` перепривязывает камеру).
+- **`P4VaultAndPerfTest.kt` (новый файл):**
+  - Добавлено 5 Robolectric-тестов (проверка `OfflineVoiceChanger.transformPcm16Samples` на сохранение точной длины без рассинхрона и изменение тембра, `moveRegionClamped`, `ZverPrefs.isScreenRecBlockEnabled`, `MuxerLifecycleGuard` против двойного/пустого stop, безопасный `stopAndFinalize()`).
+
+### 2. Верификация Части 4
+- **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL**, **54/54 PASS** (`0 failures, 0 errors, 0 skipped`, включая `P4VaultAndPerfTest`: 5/5 PASS).
+- **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** плавность UI без ART-спама `32898`, реальные 24–30 FPS при записи видео Визора через `COLOR_FormatSurface`, отсутствие ошибки `BufferQueue has been abandoned` / `MPEG4Writer` и тест офлайн-войсченджера в Сейфе — `UNVERIFIED` до проверки пользователем на устройстве.
+
+
+---
+
+## 2026-11-19 — Шаг А (WebP/Photo ускорение) + Часть 5 (Малипусики UX) + Шаги Б/В (OpenGL ES 3.0 Dual-Output + GLSL Шейдеры)
+
+### 1. Реализованные изменения
+- **Шаг А — Ускорение фото-пайплайна WebP (`ExifStripper.kt`, `MultiFrameStacker.kt`):**
+  - В `ExifStripper.processAndPurgeExif`: `inSampleSize` теперь учитывает `preset.maxDim`, исключая лишнее декодирование и поворот 8 МП кадра перед даунскейлом.
+  - В `ExifStripper.processBitmapClean`: `ByteArrayOutputStream(65_536)` преаллоцирован против повторных расширений буфера.
+  - В `ExifStripper.applyAntiPrnuCascade`: удалены два промежуточных полноразмерных `Bitmap.createScaledBitmap`; асимметричный кроп рендерится напрямую через синусоидальную 8×8 сетку `drawBitmapMesh` в итоговый `warped` битмап.
+  - В `ExifStripper.stripWebpMetadataChunks`: добавлен zero-allocation fast-path, когда в контейнере отсутствуют чанки `EXIF`/`XMP `/`ICCP` и биты флагов `VP8X` (`0x2C`), а при наличии метаданных выполняется прямая запись чанков без множественных `copyOfRange` и in-place обновление RIFF-размера и флагов `VP8X`.
+  - В `MultiFrameStacker.estimateSmartCompressionQuality`: ~7 000 одиночных JNI-вызовов `bitmap.getPixel(...)` заменены построчным чтением `bitmap.getPixels(twoRows, 0, w, 0, y, w, 2)` (~48 вызовов).
+- **Часть 5 — UX полировка («Малипусики»):**
+  - `VoiceControlManager.kt`: добавлен чистый маршрутизатор `parseCommand` с маппингом `"выключи таймер"`, `"таймер выкл"`, `"сбрось таймер"`, `"без таймера"`, `"убери таймер"`, `"отмени таймер"` → `VoiceCommand.TIMER_OFF` (до ветки `"таймер"` → `TIMER_5`) и поддержкой `"стоп"` / `"останови"` → `TOGGLE_VIDEO`.
+  - `PcbLabDialog.kt` и `GhostSettingsDialog.kt`: добавлены `BackHandler { onDismiss() }` и `decorFitsSystemWindows = false` в `DialogProperties`.
+  - `CameraHudComponents.kt` (`RecordingAndStatusBanner`, `AudioWatcherMeterStrip`): цветовое разделение ошибок/предупреждений (`CyberRed` / `NeonYellow` vs `CyberGreen`), `maxLines = 2` + `TextOverflow.Ellipsis`, клик для закрытия неактивного статусного баннера (`onDismissStatus`), увеличенная зона нажатия `38x32 dp` для пороговых чипов `AudioWatcher`.
+  - `GhostCameraScreen.kt`: авто-очистка транзиентных не-ошибочных баннеров `lastStatusMessage` через 4 секунды и `BackHandler` для сворачивания открытой шторки инструментов или PRO-панели.
+- **Шаги Б и В — Единый GPU-конвейер OpenGL ES 3.0 Dual-Output + GLSL-шейдеры (`GlVisorDualRenderer.kt`, `VisorVideoRecorder.kt`, `CyberVisorEngine.kt`, `CameraOverlayComponents.kt`, `GhostCameraScreen.kt`):**
+  - Создан `GlVisorDualRenderer.kt`: выделенный `HandlerThread("ZverGlVisor")`, инициализация `EGL14` (`ES 3.0` с автоматическим fallback на `ES 2.0`), внешняя текстура камеры `GL_TEXTURE_EXTERNAL_OES` (`SurfaceTexture`) для `Preview.SurfaceProvider` CameraX, одновременный вывод обработанного кадра на экранную `TextureView` и опциональную поверхность видеокодера `MediaCodec.createInputSurface()` с `EGLExt.eglPresentationTimeANDROID`, aspect-safe матрица `GlVisorMath.computeCenterCropMvp` (учитывающая 90°/270° поворот `stMatrix`), оффскринный `glReadPixels`-захват `captureSnapshotBitmap()` и автоматический fallback на CPU при недоступности EGL/GPU.
+  - Реализованы GLSL-шейдеры (`FRAGMENT_300` + fallback `FRAGMENT_100`) для всех 12 безпамятевых/пространственных режимов `VisorMode.supportsGpuShader()` (`NORMAL`, `THERMAL_LUT`, `NIGHT_GAMMA`, `VEIN_HEMO`, `DERMA_UV_SIM`, `OCR_CONTRAST`, `DEHAZE_LIVE`, 3×3 Sobel `EDGE_TRACE`, `VEG_CHLOROPHYLL`, `IR_BEACON`, `SKIN_CHROMA`, `WIREFRAME_POSE` + второй проход `POSE_VERTEX`/`POSE_FRAGMENT` для отрисовки костей/суставов в превью и в MP4). Временные многокадровые режимы (`BIO_RPPG`, `EULER_AMP`) сохранены на CPU-пути.
+  - В `VisorVideoRecorder.kt` добавлен режим `startForExternalSurface(...)` + `notifyExternalFramePushed()` + `stopAndFinalize(onBeforeSignalEos = ...)`, устраняющий копирование `Bitmap` на 25–30 FPS при записи GPU-визора и корректно отключающий `EGLSurface` до `signalEndOfInputStream()`.
+  - В `CyberVisorEngine.kt` добавлен облегчённый метод `analyzeTelemetryOnly(...)` для обновления ML Kit Pose landmarks и телеметрии без генерации экранных `Bitmap`.
+  - В `CameraOverlayComponents.kt` вынесен `CameraViewportSurface` (`TextureView` ↔ `PreviewView`), добавлена поддержка `SurfaceOrientedMeteringPointFactory` для tap-to-focus в GPU-режиме и `gpuVisorTelemetry` в `CameraTelemetryState`.
+- **Тесты (`P5PolishAndGpuTest.kt`, новый файл):**
+  - Добавлено 6 тестов: fast-path/стриппинг `VP8X` + `EXIF`/`XMP `/`ICCP` в WebP, `estimateSmartCompressionQuality` + `processBitmapClean`, `VoiceControlManager.parseCommand`, полнота 12 GPU-шейдеров + исключение временных режимов, математика `computeCenterCropMvp` (включая поворот 90° и `flipVertical`), и жизненный цикл `MuxerLifecycleGuard` / `VisorVideoRecorder`.
+
+### 2. Верификация Шага А + Части 5 + Шагов Б/В
+- **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL**, **60/60 PASS** (`0 failures, 0 errors, 0 skipped` по 14 тестовым классам, включая `P5PolishAndGpuTest`: 6/6 PASS).
+- **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** реальное время сжатия WebP (`<200ms`), фактические FPS GPU-рендера `OpenGL ES 3.0` на Mali-G52 и запись MP4 25–30 FPS с GLSL-фильтрами без растяжения кадра — `UNVERIFIED` до проверки на телефоне.
+- **Шаг Г (Keystore):** `debug.keystore` и `signingConfigs` не изменялись; пользователю выдано обязательное предупреждение о предварительном бэкапе старых `.gcf` файлов до перехода на релизную подпись.

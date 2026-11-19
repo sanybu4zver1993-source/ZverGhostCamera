@@ -37,7 +37,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.FileProvider
+import com.example.audio.OfflineVoiceChanger
 import com.example.camera.ExifStripper
+import com.example.camera.Mp4Sanitizer
 import com.example.crypto.GhostCryptoVault
 import com.example.crypto.MonoVaultEngine
 import com.example.security.ZverPrefs
@@ -73,8 +75,8 @@ fun GhostVaultDialog(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val isAlreadyConfigured = remember { GhostCryptoVault.isConfigured(context) }
-    var inSetupFlow by remember { mutableStateOf(forceSetupFlow || !isAlreadyConfigured) }
+    var isConfigLoaded by remember { mutableStateOf(false) }
+    var inSetupFlow by remember { mutableStateOf(forceSetupFlow) }
     var setupStep by remember { mutableStateOf(1) } // 1: Main, 2: Decoy, 3: Duress
     var setupMainPin by remember { mutableStateOf(charArrayOf()) }
     var setupDecoyPin by remember { mutableStateOf<CharArray?>(null) }
@@ -83,6 +85,9 @@ fun GhostVaultDialog(
     var enteredPinChars by remember { mutableStateOf(charArrayOf()) }
     var pinErrorText by remember { mutableStateOf<String?>(null) }
     var lockoutRemainingSec by remember { mutableStateOf(0) }
+    var isPinBusy by remember { mutableStateOf(false) }
+    var isWiping by remember { mutableStateOf(false) }
+    var pendingSingleShred by remember { mutableStateOf(false) }
 
     var activeTab by remember {
         mutableStateOf(
@@ -107,6 +112,12 @@ fun GhostVaultDialog(
     var decryptedRawBytes by remember { mutableStateOf<ByteArray?>(null) }
     var isDecrypting by remember { mutableStateOf(false) }
 
+    // Offline Voice Changer states for decrypted MP4 playback & saving
+    var selectedVoicePreset by remember { mutableStateOf(OfflineVoiceChanger.VoicePreset.DEEP_ANON) }
+    var voicePreviewFile by remember { mutableStateOf<File?>(null) }
+    var isTransformingVoice by remember { mutableStateOf(false) }
+    var voiceTransformProgress by remember { mutableStateOf(0f) }
+
     var showWipeConfirm by remember { mutableStateOf(false) }
     var showPrivacyEditor by remember { mutableStateOf(false) }
     var showPhotoEditor by remember { mutableStateOf(false) }
@@ -120,7 +131,16 @@ fun GhostVaultDialog(
 
     val scrambleEnabled = remember { ZverPrefs.isPinScrambleEnabled(context) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(forceSetupFlow) {
+        val configured = withContext(Dispatchers.IO) {
+            GhostCryptoVault.isConfigured(context)
+        }
+        inSetupFlow = forceSetupFlow || !configured
+        isConfigLoaded = true
+    }
+
+    LaunchedEffect(isConfigLoaded, unlockedProfile, inSetupFlow) {
+        if (!isConfigLoaded) return@LaunchedEffect
         while (unlockedProfile == null && !inSetupFlow) {
             val until = ZverPrefs.getLockoutUntilMs(context)
             val rem = ((until - System.currentTimeMillis()) / 1000L).toInt()
@@ -145,6 +165,8 @@ fun GhostVaultDialog(
     fun cleanupPreviewMedia() {
         decryptedBitmap?.recycle()
         decryptedBitmap = null
+        voicePreviewFile?.let { GhostCryptoVault.shredFile(it) }
+        voicePreviewFile = null
         decryptedVideoFile?.let { GhostCryptoVault.shredFile(it) }
         decryptedVideoFile = null
         decryptedRawBytes?.let { Arrays.fill(it, 0.toByte()) }
@@ -152,31 +174,51 @@ fun GhostVaultDialog(
     }
 
     fun refreshFiles() {
-        vaultFiles = GhostCryptoVault.listVaultFiles(context)
-        ramShots = GhostCryptoVault.listRamShots()
         scope.launch {
-            val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
-                MonoVaultEngine.VolumeType.MASTER
-            } else {
-                MonoVaultEngine.VolumeType.DECOY
+            val (files, ram, mono) = withContext(Dispatchers.IO) {
+                val f = GhostCryptoVault.listVaultFiles(context)
+                val r = GhostCryptoVault.listRamShots()
+                val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                    MonoVaultEngine.VolumeType.MASTER
+                } else {
+                    MonoVaultEngine.VolumeType.DECOY
+                }
+                val m = MonoVaultEngine.listRecords(context, vol)
+                Triple(f, r, m)
             }
-            monoRecords = withContext(Dispatchers.IO) {
-                MonoVaultEngine.listRecords(context, vol)
-            }
+            vaultFiles = files
+            ramShots = ram
+            monoRecords = mono
+            onVaultUpdated()
         }
-        onVaultUpdated()
     }
 
     fun finishSetupWith(duressPin: CharArray?) {
-        GhostCryptoVault.setupVaultPins(context, setupMainPin, setupDecoyPin, duressPin)
+        if (isPinBusy) return
+        val mainClone = setupMainPin.clone()
+        val decoyClone = setupDecoyPin?.clone()
+        val duressClone = duressPin?.clone()
+        setupMainPin.fill('0')
         setupMainPin = charArrayOf()
+        setupDecoyPin?.fill('0')
         setupDecoyPin = null
+        duressPin?.fill('0')
         enteredPinChars.fill('0')
         enteredPinChars = charArrayOf()
-        inSetupFlow = false
-        unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
-        statusMessage = "КЛЮЧИ PBKDF2 И КОНТУРЫ ЗАЩИТЫ АКТИВНЫ"
-        refreshFiles()
+        isPinBusy = true
+        scope.launch {
+            try {
+                withContext(Dispatchers.Default) {
+                    GhostCryptoVault.setupVaultPins(context, mainClone, decoyClone, duressClone)
+                }
+                inSetupFlow = false
+                unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
+                statusMessage = "КЛЮЧИ PBKDF2 И КОНТУРЫ ЗАЩИТЫ АКТИВНЫ"
+                refreshFiles()
+            } finally {
+                isPinBusy = false
+            }
+        }
     }
 
     Dialog(
@@ -185,13 +227,21 @@ fun GhostVaultDialog(
             GhostCryptoVault.lockSession()
             onDismiss()
         },
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         val dialogView = LocalView.current
         DisposableEffect(Unit) {
             val dialogWindow = (dialogView.parent as? DialogWindowProvider)?.window
-            dialogWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            com.example.MainActivity.onVaultSecureOverrideChanged?.invoke(true)
+            val blockScreenRec = ZverPrefs.isScreenRecBlockEnabled(context)
+            if (blockScreenRec) {
+                dialogWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                dialogWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            com.example.MainActivity.onVaultSecureOverrideChanged?.invoke(blockScreenRec)
             onDispose {
                 com.example.MainActivity.onVaultSecureOverrideChanged?.invoke(false)
             }
@@ -204,8 +254,23 @@ fun GhostVaultDialog(
                 .navigationBarsPadding()
                 .padding(14.dp)
         ) {
+            if (!isConfigLoaded) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(color = CyberGreen, strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "ИНИЦИАЛИЗАЦИЯ СХРОНА...",
+                        color = CyberMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            }
             // STEP A: 3-CONTOUR PBKDF2 SETUP
-            if (inSetupFlow) {
+            else if (inSetupFlow) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth(0.94f)
@@ -246,8 +311,20 @@ fun GhostVaultDialog(
                     PinDotsRow(count = enteredPinChars.size, max = 6)
                     Spacer(modifier = Modifier.height(14.dp))
 
+                    if (isPinBusy) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(bottom = 10.dp)
+                        ) {
+                            CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text("ГЕНЕРАЦИЯ PBKDF2-КЛЮЧЕЙ...", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        }
+                    }
+
                     SecureKeypad(
                         scrambleDigits = false,
+                        enabled = !isPinBusy,
                         onKeyPressed = { char ->
                             if (enteredPinChars.size < 6) enteredPinChars = enteredPinChars + char
                         },
@@ -256,7 +333,7 @@ fun GhostVaultDialog(
                             enteredPinChars = charArrayOf()
                         },
                         onConfirm = {
-                            if (enteredPinChars.size >= 4) {
+                            if (!isPinBusy && enteredPinChars.size >= 4) {
                                 when (setupStep) {
                                     1 -> {
                                         setupMainPin = enteredPinChars.clone()
@@ -280,16 +357,19 @@ fun GhostVaultDialog(
 
                     if (setupStep >= 2) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        TextButton(onClick = {
-                            enteredPinChars.fill('0')
-                            enteredPinChars = charArrayOf()
-                            if (setupStep == 2) {
-                                setupDecoyPin = null
-                                setupStep = 3
-                            } else {
-                                finishSetupWith(null)
+                        TextButton(
+                            enabled = !isPinBusy,
+                            onClick = {
+                                enteredPinChars.fill('0')
+                                enteredPinChars = charArrayOf()
+                                if (setupStep == 2) {
+                                    setupDecoyPin = null
+                                    setupStep = 3
+                                } else {
+                                    finishSetupWith(null)
+                                }
                             }
-                        }) {
+                        ) {
                             Text(
                                 text = if (setupStep == 2) "ПРОПУСТИТЬ ЛОЖНЫЙ ПИН" else "ПРОПУСТИТЬ ПИН ПРИНУЖДЕНИЯ",
                                 color = CyberGreen,
@@ -345,9 +425,20 @@ fun GhostVaultDialog(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
+                    if (isPinBusy) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(bottom = 10.dp)
+                        ) {
+                            CircularProgressIndicator(color = CyberGreen, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text("ПРОВЕРКА PBKDF2 (600K)...", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        }
+                    }
+
                     SecureKeypad(
                         scrambleDigits = scrambleEnabled,
-                        enabled = lockoutRemainingSec == 0,
+                        enabled = lockoutRemainingSec == 0 && !isPinBusy,
                         onKeyPressed = { char ->
                             pinErrorText = null
                             if (enteredPinChars.size < 6) enteredPinChars = enteredPinChars + char
@@ -357,36 +448,48 @@ fun GhostVaultDialog(
                             enteredPinChars = charArrayOf()
                         },
                         onConfirm = {
-                            if (enteredPinChars.isNotEmpty() && lockoutRemainingSec == 0) {
-                                val outcome = GhostCryptoVault.unlockWithPinOutcome(context, enteredPinChars.clone())
+                            if (!isPinBusy && enteredPinChars.isNotEmpty() && lockoutRemainingSec == 0) {
+                                val pinClone = enteredPinChars.clone()
                                 enteredPinChars.fill('0')
                                 enteredPinChars = charArrayOf()
+                                isPinBusy = true
 
-                                when (outcome) {
-                                    GhostCryptoVault.UnlockOutcome.MAIN -> {
-                                        unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
-                                        refreshFiles()
-                                    }
-                                    GhostCryptoVault.UnlockOutcome.DECOY,
-                                    GhostCryptoVault.UnlockOutcome.DURESS_WIPED -> {
-                                        unlockedProfile = GhostCryptoVault.VaultProfile.DECOY
-                                        refreshFiles()
-                                    }
-                                    GhostCryptoVault.UnlockOutcome.INVALID -> {
-                                        val fails = ZverPrefs.incrementFailedPinAttempts(context)
-                                        val maxWipe = ZverPrefs.getMaxFailedPinWipe(context)
-                                        if (maxWipe > 0 && fails >= maxWipe) {
-                                            GhostCryptoVault.cryptoShred(context)
-                                            MonoVaultEngine.cryptoShredMonolith(context)
-                                            ZverPrefs.resetFailedPinAttempts(context)
-                                            unlockedProfile = GhostCryptoVault.VaultProfile.DECOY
-                                            refreshFiles()
-                                        } else {
-                                            val until = ZverPrefs.getLockoutUntilMs(context)
-                                            val rem = ((until - System.currentTimeMillis()) / 1000L).toInt()
-                                            lockoutRemainingSec = maxOf(0, rem)
-                                            pinErrorText = "ОШИБКА: НЕВЕРНЫЙ ПИН (ПОПЫТКА #$fails)"
+                                scope.launch {
+                                    try {
+                                        val outcome = withContext(Dispatchers.Default) {
+                                            GhostCryptoVault.unlockWithPinOutcome(context, pinClone)
                                         }
+                                        when (outcome) {
+                                            GhostCryptoVault.UnlockOutcome.MAIN -> {
+                                                unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
+                                                refreshFiles()
+                                            }
+                                            GhostCryptoVault.UnlockOutcome.DECOY,
+                                            GhostCryptoVault.UnlockOutcome.DURESS_WIPED -> {
+                                                unlockedProfile = GhostCryptoVault.VaultProfile.DECOY
+                                                refreshFiles()
+                                            }
+                                            GhostCryptoVault.UnlockOutcome.INVALID -> {
+                                                val fails = ZverPrefs.incrementFailedPinAttempts(context)
+                                                val maxWipe = ZverPrefs.getMaxFailedPinWipe(context)
+                                                if (maxWipe > 0 && fails >= maxWipe) {
+                                                    withContext(Dispatchers.IO) {
+                                                        GhostCryptoVault.cryptoShred(context)
+                                                        MonoVaultEngine.cryptoShredMonolith(context)
+                                                    }
+                                                    ZverPrefs.resetFailedPinAttempts(context)
+                                                    unlockedProfile = GhostCryptoVault.VaultProfile.DECOY
+                                                    refreshFiles()
+                                                } else {
+                                                    val until = ZverPrefs.getLockoutUntilMs(context)
+                                                    val rem = ((until - System.currentTimeMillis()) / 1000L).toInt()
+                                                    lockoutRemainingSec = maxOf(0, rem)
+                                                    pinErrorText = "ОШИБКА: НЕВЕРНЫЙ ПИН (ПОПЫТКА #$fails)"
+                                                }
+                                            }
+                                        }
+                                    } finally {
+                                        isPinBusy = false
                                     }
                                 }
                             }
@@ -395,10 +498,13 @@ fun GhostVaultDialog(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    TextButton(onClick = {
-                        enteredPinChars.fill('0')
-                        onDismiss()
-                    }) {
+                    TextButton(
+                        enabled = !isPinBusy,
+                        onClick = {
+                            enteredPinChars.fill('0')
+                            onDismiss()
+                        }
+                    ) {
                         Text("ОТМЕНА", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                     }
                 }
@@ -669,18 +775,11 @@ fun GhostVaultDialog(
 
                                 if (selectedMonoId == null) {
                                     Button(
-                                        onClick = {
-                                            selectedFile?.let { f -> GhostCryptoVault.shredFile(f) }
-                                            selectedRamId?.let { id -> GhostCryptoVault.shredRamShot(id) }
-                                            cleanupPreviewMedia()
-                                            selectedFile = null
-                                            selectedRamId = null
-                                            statusMessage = "ФАЙЛ УНИЧТОЖЕН"
-                                            refreshFiles()
-                                        },
+                                        onClick = { pendingSingleShred = true },
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberRed),
                                         shape = RoundedCornerShape(6.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_shred_single_btn")
                                     ) {
                                         Icon(Icons.Default.DeleteForever, contentDescription = "Shred", modifier = Modifier.size(14.dp), tint = Color.White)
                                         Spacer(modifier = Modifier.width(4.dp))
@@ -696,7 +795,8 @@ fun GhostVaultDialog(
                                     CircularProgressIndicator(color = CyberGreen, strokeWidth = 2.dp)
                                 }
                             } else if (decryptedVideoFile != null) {
-                                val videoFile = decryptedVideoFile!!
+                                val origVideoFile = decryptedVideoFile!!
+                                val activeVideo = voicePreviewFile ?: origVideoFile
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
@@ -706,21 +806,198 @@ fun GhostVaultDialog(
                                         .background(Color.Black),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    androidx.compose.ui.viewinterop.AndroidView(
-                                        factory = { ctx ->
-                                            android.widget.VideoView(ctx).apply {
-                                                val controller = android.widget.MediaController(ctx)
-                                                controller.setAnchorView(this)
-                                                setMediaController(controller)
-                                                setVideoPath(videoFile.absolutePath)
-                                                setOnPreparedListener { mp ->
-                                                    mp.isLooping = false
-                                                    start()
+                                    key(activeVideo.absolutePath) {
+                                        androidx.compose.ui.viewinterop.AndroidView(
+                                            factory = { ctx ->
+                                                android.widget.VideoView(ctx).apply {
+                                                    val controller = android.widget.MediaController(ctx)
+                                                    controller.setAnchorView(this)
+                                                    setMediaController(controller)
+                                                    setVideoPath(activeVideo.absolutePath)
+                                                    setOnPreparedListener { mp ->
+                                                        mp.isLooping = false
+                                                        start()
+                                                    }
                                                 }
+                                            },
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Offline Voice Changer Panel inside Vault Video Player
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(CyberSurface)
+                                        .border(1.dp, CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                                        .padding(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = if (voicePreviewFile != null) "🎙 ГОЛОС: ${selectedVoicePreset.labelRu}" else "🎙 ОФФЛАЙН СМЕНА ГОЛОСА (MP4)",
+                                            color = CyberCyan,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp
+                                        )
+                                        if (isTransformingVoice) {
+                                            Text(
+                                                text = "${(voiceTransformProgress * 100).toInt()}%",
+                                                color = CyberGreen,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        OfflineVoiceChanger.VoicePreset.values()
+                                            .filter { it != OfflineVoiceChanger.VoicePreset.ORIGINAL }
+                                            .forEach { vp ->
+                                                val sel = selectedVoicePreset == vp
+                                                Text(
+                                                    text = vp.badgeRu,
+                                                    color = if (sel) Color.Black else CyberMuted,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 9.sp,
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                        .background(if (sel) CyberCyan else CyberBlack)
+                                                        .border(1.dp, if (sel) CyberCyan else CyberBorder, RoundedCornerShape(6.dp))
+                                                        .clickable(enabled = !isTransformingVoice) { selectedVoicePreset = vp }
+                                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                                        .testTag("voice_preset_${vp.name.lowercase()}")
+                                                )
                                             }
-                                        },
-                                        modifier = Modifier.fillMaxSize()
-                                    )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Button(
+                                            enabled = !isTransformingVoice,
+                                            onClick = {
+                                                isTransformingVoice = true
+                                                voiceTransformProgress = 0f
+                                                statusMessage = "ОБРАБОТКА ГОЛОСА (${selectedVoicePreset.badgeRu})..."
+                                                scope.launch {
+                                                    try {
+                                                        val outStage = File(
+                                                            GhostCryptoVault.getVideoStageDir(context),
+                                                            "voice_${selectedVoicePreset.name.lowercase()}_${System.currentTimeMillis()}.mp4"
+                                                        )
+                                                        val res = withContext(Dispatchers.IO) {
+                                                            OfflineVoiceChanger.processMp4Offline(
+                                                                inputMp4 = origVideoFile,
+                                                                outputMp4 = outStage,
+                                                                preset = selectedVoicePreset,
+                                                                onProgress = { p -> voiceTransformProgress = p }
+                                                            )
+                                                        }
+                                                        if (res.success && outStage.exists()) {
+                                                            voicePreviewFile?.let { GhostCryptoVault.shredFile(it) }
+                                                            voicePreviewFile = outStage
+                                                            statusMessage = "✅ ${res.detailRu} (ПРЕДПРОСМОТР)"
+                                                        } else {
+                                                            GhostCryptoVault.shredFile(outStage)
+                                                            statusMessage = "⚠ ${res.detailRu}"
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        statusMessage = "СБОЙ ГОЛОСА: ${e.message}"
+                                                    } finally {
+                                                        isTransformingVoice = false
+                                                    }
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = CyberCyan.copy(alpha = 0.22f)),
+                                            shape = RoundedCornerShape(6.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.weight(1f).height(40.dp).testTag("voice_apply_btn")
+                                        ) {
+                                            Text(
+                                                if (isTransformingVoice) "ОБРАБОТКА..." else "ПРИМЕНИТЬ ГОЛОС",
+                                                color = CyberCyan,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+
+                                        if (voicePreviewFile != null) {
+                                            OutlinedButton(
+                                                enabled = !isTransformingVoice,
+                                                onClick = {
+                                                    voicePreviewFile?.let { GhostCryptoVault.shredFile(it) }
+                                                    voicePreviewFile = null
+                                                    statusMessage = "ВОССТАНОВЛЕН ОРИГИНАЛ"
+                                                },
+                                                shape = RoundedCornerShape(6.dp),
+                                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                                modifier = Modifier.height(40.dp)
+                                            ) {
+                                                Text("ОРИГ", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                            }
+
+                                            Button(
+                                                enabled = !isTransformingVoice,
+                                                onClick = {
+                                                    val preview = voicePreviewFile ?: return@Button
+                                                    isTransformingVoice = true
+                                                    scope.launch {
+                                                        try {
+                                                            val msg = withContext(Dispatchers.IO) {
+                                                                val cleanCopy = File(
+                                                                    GhostCryptoVault.getVideoStageDir(context),
+                                                                    "voice_clean_${System.currentTimeMillis()}.mp4"
+                                                                )
+                                                                val sanitized = Mp4Sanitizer.sanitizeMp4File(preview, cleanCopy)
+                                                                val srcToStore = if (sanitized && cleanCopy.exists()) cleanCopy else preview.copyTo(cleanCopy, overwrite = true)
+                                                                if (ZverPrefs.isRamOnlyMode(context)) {
+                                                                    val bytes = srcToStore.readBytes()
+                                                                    val shot = GhostCryptoVault.addRamShot(bytes, isVideo = true)
+                                                                    GhostCryptoVault.shredFile(cleanCopy)
+                                                                    "⚡ КОПИЯ С ГОЛОСОМ В ОЗУ (RAM_${shot.id})"
+                                                                } else {
+                                                                    val savedFile = GhostCryptoVault.encryptFileToVault(context, srcToStore, GhostCryptoVault.MEDIA_VIDEO)
+                                                                    GhostCryptoVault.shredFile(cleanCopy)
+                                                                    "💾 КОПИЯ С ГОЛОСОМ: ${savedFile.name}"
+                                                                }
+                                                            }
+                                                            statusMessage = msg
+                                                            refreshFiles()
+                                                        } catch (e: Exception) {
+                                                            statusMessage = "ОШИБКА СОХРАНЕНИЯ: ${e.message}"
+                                                        } finally {
+                                                            isTransformingVoice = false
+                                                        }
+                                                    }
+                                                },
+                                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreen),
+                                                shape = RoundedCornerShape(6.dp),
+                                                contentPadding = PaddingValues(horizontal = 10.dp),
+                                                modifier = Modifier.height(40.dp).testTag("voice_save_copy_btn")
+                                            ) {
+                                                Text("В СЕЙФ", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                            }
+                                        }
+                                    }
                                 }
                             } else if (decryptedBitmap != null) {
                                 Box(
@@ -1227,24 +1504,76 @@ fun GhostVaultDialog(
                 )
             }
 
+            if (pendingSingleShred) {
+                AlertDialog(
+                    onDismissRequest = { pendingSingleShred = false },
+                    title = { Text("УНИЧТОЖИТЬ ФАЙЛ?", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
+                    text = { Text("Файл будет затёрт случайным шумом и удалён без возможности восстановления.", color = Color.White, fontSize = 12.sp) },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val targetF = selectedFile
+                                val targetRam = selectedRamId
+                                pendingSingleShred = false
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        targetF?.let { GhostCryptoVault.shredFile(it) }
+                                        targetRam?.let { GhostCryptoVault.shredRamShot(it) }
+                                    }
+                                    cleanupPreviewMedia()
+                                    selectedFile = null
+                                    selectedRamId = null
+                                    statusMessage = "ФАЙЛ УНИЧТОЖЕН"
+                                    refreshFiles()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
+                        ) { Text("СТЕРЕТЬ", color = Color.White) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingSingleShred = false }) { Text("ОТМЕНА", color = CyberMuted) }
+                    },
+                    containerColor = CyberSurface
+                )
+            }
+
             if (showWipeConfirm) {
                 AlertDialog(
-                    onDismissRequest = { showWipeConfirm = false },
+                    onDismissRequest = { if (!isWiping) showWipeConfirm = false },
                     title = { Text("УНИЧТОЖИТЬ ВСЕ КЛЮЧИ И СХРОН", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) },
                     text = { Text("Отзывает ключи TEE KeyStore, затирает монолит и файлы во всех контурах.", color = Color.White, fontSize = 12.sp) },
                     confirmButton = {
                         Button(
+                            enabled = !isWiping,
                             onClick = {
-                                val count = GhostCryptoVault.cryptoShred(context)
-                                MonoVaultEngine.cryptoShredMonolith(context)
-                                showWipeConfirm = false
-                                statusMessage = "УНИЧТОЖЕНО $count ЭЛЕМЕНТОВ И ВСЕ КЛЮЧИ"
-                                refreshFiles()
+                                isWiping = true
+                                scope.launch {
+                                    try {
+                                        val count = withContext(Dispatchers.IO) {
+                                            val c = GhostCryptoVault.cryptoShred(context)
+                                            MonoVaultEngine.cryptoShredMonolith(context)
+                                            c
+                                        }
+                                        cleanupPreviewMedia()
+                                        selectedFile = null
+                                        selectedRamId = null
+                                        selectedMonoId = null
+                                        showWipeConfirm = false
+                                        statusMessage = "УНИЧТОЖЕНО $count ЭЛЕМЕНТОВ И ВСЕ КЛЮЧИ"
+                                        refreshFiles()
+                                    } finally {
+                                        isWiping = false
+                                    }
+                                }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = CyberRed)
-                        ) { Text("ДА, УНИЧТОЖИТЬ", color = Color.White) }
+                        ) { Text(if (isWiping) "ЗАТИРАНИЕ..." else "ДА, УНИЧТОЖИТЬ", color = Color.White) }
                     },
-                    dismissButton = { TextButton(onClick = { showWipeConfirm = false }) { Text("ОТМЕНА", color = CyberMuted) } },
+                    dismissButton = {
+                        TextButton(enabled = !isWiping, onClick = { showWipeConfirm = false }) {
+                            Text("ОТМЕНА", color = CyberMuted)
+                        }
+                    },
                     containerColor = CyberSurface
                 )
             }

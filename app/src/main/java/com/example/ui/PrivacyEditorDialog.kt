@@ -89,6 +89,10 @@ fun PrivacyEditorDialog(
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
+    var movingRegionId by remember { mutableStateOf<String?>(null) }
+    var movingOriginalRect by remember { mutableStateOf<RectF?>(null) }
+    var movingLiveRect by remember { mutableStateOf<RectF?>(null) }
+    val latestRegions by rememberUpdatedState(regions)
 
     // Re-render redacted preview cleanly in background whenever regions/style/invert change
     LaunchedEffect(regions, style, invertMode, sourceBitmap) {
@@ -131,7 +135,10 @@ fun PrivacyEditorDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Column(
             modifier = Modifier
@@ -329,17 +336,55 @@ fun PrivacyEditorDialog(
                             onDragStart = { start ->
                                 dragStart = start
                                 dragEnd = start
+                                val bounds = getDisplayBoxBounds()
+                                val bw = bounds.width().coerceAtLeast(1f)
+                                val bh = bounds.height().coerceAtLeast(1f)
+                                val nx = ((start.x - bounds.left) / bw).coerceIn(0f, 1f)
+                                val ny = ((start.y - bounds.top) / bh).coerceIn(0f, 1f)
+                                val hit = latestRegions.lastOrNull { r ->
+                                    nx in min(r.rect.left, r.rect.right)..max(r.rect.left, r.rect.right) &&
+                                        ny in min(r.rect.top, r.rect.bottom)..max(r.rect.top, r.rect.bottom)
+                                }
+                                if (hit != null) {
+                                    movingRegionId = hit.id
+                                    movingOriginalRect = RectF(hit.rect)
+                                    movingLiveRect = RectF(hit.rect)
+                                    statusText = "Перемещение зоны..."
+                                } else {
+                                    movingRegionId = null
+                                    movingOriginalRect = null
+                                    movingLiveRect = null
+                                }
                             },
                             onDrag = { change, _ ->
                                 change.consume()
                                 dragEnd = change.position
+                                val s = dragStart
+                                val orig = movingOriginalRect
+                                if (s != null && orig != null) {
+                                    val bounds = getDisplayBoxBounds()
+                                    val dxNorm = (change.position.x - s.x) / bounds.width().coerceAtLeast(1f)
+                                    val dyNorm = (change.position.y - s.y) / bounds.height().coerceAtLeast(1f)
+                                    movingLiveRect = OfflinePrivacyEngine.moveRegionClamped(orig, dxNorm, dyNorm)
+                                }
                             },
                             onDragEnd = {
+                                val targetMoveId = movingRegionId
+                                val finalMovedRect = movingLiveRect
                                 val s = dragStart
                                 val e = dragEnd
                                 dragStart = null
                                 dragEnd = null
-                                if (s != null && e != null) {
+                                movingRegionId = null
+                                movingOriginalRect = null
+                                movingLiveRect = null
+
+                                if (targetMoveId != null && finalMovedRect != null) {
+                                    regions = regions.map { reg ->
+                                        if (reg.id == targetMoveId) reg.copy(rect = finalMovedRect) else reg
+                                    }
+                                    statusText = "Зона перемещена (всего ${regions.size}; тап — удалить)"
+                                } else if (s != null && e != null) {
                                     val bounds = getDisplayBoxBounds()
                                     val l = ((min(s.x, e.x) - bounds.left) / bounds.width()).coerceIn(0f, 1f)
                                     val t = ((min(s.y, e.y) - bounds.top) / bounds.height()).coerceIn(0f, 1f)
@@ -352,9 +397,16 @@ fun PrivacyEditorDialog(
                                             kind = OfflinePrivacyEngine.RegionKind.MANUAL
                                         )
                                         regions = regions + newRegion
-                                        statusText = "Добавлена зона (всего ${regions.size}; тап — удалить)"
+                                        statusText = "Добавлена зона (всего ${regions.size}; тап — удалить, драг — сдвиг)"
                                     }
                                 }
+                            },
+                            onDragCancel = {
+                                dragStart = null
+                                dragEnd = null
+                                movingRegionId = null
+                                movingOriginalRect = null
+                                movingLiveRect = null
                             }
                         )
                     },
@@ -368,25 +420,27 @@ fun PrivacyEditorDialog(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Draw region outlines + active drag marquee
+                // Draw region outlines + active move preview + active new marquee
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val bounds = getDisplayBoxBounds()
                     for (reg in regions) {
-                        val rx = bounds.left + reg.rect.left * bounds.width()
-                        val ry = bounds.top + reg.rect.top * bounds.height()
-                        val rw = (reg.rect.right - reg.rect.left) * bounds.width()
-                        val rh = (reg.rect.bottom - reg.rect.top) * bounds.height()
+                        val isMovingThis = reg.id == movingRegionId
+                        val rRect = if (isMovingThis && movingLiveRect != null) movingLiveRect!! else reg.rect
+                        val rx = bounds.left + rRect.left * bounds.width()
+                        val ry = bounds.top + rRect.top * bounds.height()
+                        val rw = (rRect.right - rRect.left) * bounds.width()
+                        val rh = (rRect.bottom - rRect.top) * bounds.height()
                         drawRect(
-                            color = if (reg.kind == OfflinePrivacyEngine.RegionKind.FACE) EdGreen else EdCyan,
+                            color = if (isMovingThis) Color(0xFFFFC107) else if (reg.kind == OfflinePrivacyEngine.RegionKind.FACE) EdGreen else EdCyan,
                             topLeft = Offset(rx, ry),
                             size = Size(rw, rh),
-                            style = Stroke(width = 1.5.dp.toPx())
+                            style = Stroke(width = if (isMovingThis) 2.5.dp.toPx() else 1.5.dp.toPx())
                         )
                     }
 
                     val ds = dragStart
                     val de = dragEnd
-                    if (ds != null && de != null) {
+                    if (movingRegionId == null && ds != null && de != null) {
                         drawRect(
                             color = EdRed,
                             topLeft = Offset(min(ds.x, de.x), min(ds.y, de.y)),

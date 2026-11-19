@@ -826,6 +826,246 @@ class CyberVisorEngine {
         return IrHaloEval(true, "КАНДИДАТ ИК")
     }
 
+    /**
+     * Lightweight telemetry-only pass when [GlVisorDualRenderer] handles screen & video rendering
+     * on the GPU. Produces zero display Bitmaps while keeping live badges, IR halo validation,
+     * and ML Kit Pose landmarks updated.
+     */
+    fun analyzeTelemetryOnly(
+        imageProxy: ImageProxy,
+        rotationDegrees: Int,
+        isFrontCamera: Boolean
+    ): VisorTelemetry? {
+        val mode = currentMode
+        if (mode == VisorMode.NORMAL) return null
+
+        when (mode) {
+            VisorMode.THERMAL_LUT,
+            VisorMode.NIGHT_GAMMA,
+            VisorMode.VEIN_HEMO,
+            VisorMode.DERMA_UV_SIM,
+            VisorMode.OCR_CONTRAST,
+            VisorMode.DEHAZE_LIVE -> return VisorTelemetry(mode = mode)
+            else -> {}
+        }
+
+        val planes = imageProxy.planes
+        if (planes.size < 3) return VisorTelemetry(mode = mode)
+        val srcW = imageProxy.width
+        val srcH = imageProxy.height
+        if (srcW < 16 || srcH < 16) return VisorTelemetry(mode = mode)
+
+        if (mode == VisorMode.WIREFRAME_POSE) {
+            if (lastPoseIsFront != isFrontCamera) {
+                lastPoseIsFront = isFrontCamera
+                poseSmoother.reset()
+                latestPoseWireframe = null
+            }
+            val nowMs = System.currentTimeMillis()
+            if (nowMs - lastPoseInferMs >= 110L && poseBusy.compareAndSet(false, true)) {
+                lastPoseInferMs = nowMs
+                val step = max(2, max(srcW, srcH) / 240)
+                val subW = (srcW / step).coerceAtLeast(16)
+                val subH = (srcH / step).coerceAtLeast(16)
+                val rot = ((rotationDegrees % 360) + 360) % 360
+                val swapDims = (rot == 90 || rot == 270)
+                val dstW = if (swapDims) subH else subW
+                val dstH = if (swapDims) subW else subH
+                val totalDst = dstW * dstH
+                if (rawRgbaBuffer.size != totalDst) rawRgbaBuffer = IntArray(totalDst)
+
+                val yBuf = planes[0].buffer
+                val uBuf = planes[1].buffer
+                val vBuf = planes[2].buffer
+                val yRS = planes[0].rowStride
+                val yPS = planes[0].pixelStride
+                val uRS = planes[1].rowStride
+                val uPS = planes[1].pixelStride
+                val vRS = planes[2].rowStride
+                val vPS = planes[2].pixelStride
+                val yLim = yBuf.limit()
+                val uLim = uBuf.limit()
+                val vLim = vBuf.limit()
+
+                for (sy in 0 until subH) {
+                    val oy = sy * step
+                    val yRO = oy * yRS
+                    val uvY = oy shr 1
+                    val uRO = uvY * uRS
+                    val vRO = uvY * vRS
+                    for (sx in 0 until subW) {
+                        val ox = sx * step
+                        val yI = yRO + ox * yPS
+                        val uvX = ox shr 1
+                        val uI = uRO + uvX * uPS
+                        val vI = vRO + uvX * vPS
+                        val yVal = if (yI in 0 until yLim) (yBuf.get(yI).toInt() and 0xFF) else 128
+                        val uVal = (if (uI in 0 until uLim) (uBuf.get(uI).toInt() and 0xFF) else 128) - 128
+                        val vVal = (if (vI in 0 until vLim) (vBuf.get(vI).toInt() and 0xFF) else 128) - 128
+                        val r = (yVal + ((359 * vVal) shr 8)).coerceIn(0, 255)
+                        val g = (yVal - ((88 * uVal + 183 * vVal) shr 8)).coerceIn(0, 255)
+                        val b = (yVal + ((454 * uVal) shr 8)).coerceIn(0, 255)
+                        var dx: Int
+                        var dy: Int
+                        when (rot) {
+                            90 -> { dx = subH - 1 - sy; dy = sx }
+                            180 -> { dx = subW - 1 - sx; dy = subH - 1 - sy }
+                            270 -> { dx = sy; dy = subW - 1 - sx }
+                            else -> { dx = sx; dy = sy }
+                        }
+                        if (isFrontCamera) dx = dstW - 1 - dx
+                        rawRgbaBuffer[dy * dstW + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    }
+                }
+                val poseBmp = Bitmap.createBitmap(rawRgbaBuffer, dstW, dstH, Bitmap.Config.ARGB_8888)
+                val input = InputImage.fromBitmap(poseBmp, 0)
+                poseDetector.process(input)
+                    .addOnSuccessListener { pose ->
+                        latestPoseWireframe = buildSmoothedWireframe(pose, dstW.toFloat(), dstH.toFloat())
+                    }
+                    .addOnCompleteListener {
+                        if (!poseBmp.isRecycled) poseBmp.recycle()
+                        poseBusy.set(false)
+                    }
+            }
+            return VisorTelemetry(mode = mode, poseWireframe = latestPoseWireframe)
+        }
+
+        // Coarse (~160x120) fast metrics pass for IR_BEACON / VEG_CHLOROPHYLL / SKIN_CHROMA / EDGE_TRACE
+        val step = max(4, max(srcW, srcH) / 160)
+        val subW = (srcW / step).coerceAtLeast(8)
+        val subH = (srcH / step).coerceAtLeast(8)
+        val rot = ((rotationDegrees % 360) + 360) % 360
+        val swapDims = (rot == 90 || rot == 270)
+        val dstW = if (swapDims) subH else subW
+        val dstH = if (swapDims) subW else subH
+        val total = dstW * dstH
+
+        val yBuf = planes[0].buffer
+        val uBuf = planes[1].buffer
+        val vBuf = planes[2].buffer
+        val yRS = planes[0].rowStride
+        val yPS = planes[0].pixelStride
+        val uRS = planes[1].rowStride
+        val uPS = planes[1].pixelStride
+        val vRS = planes[2].rowStride
+        val vPS = planes[2].pixelStride
+        val yLim = yBuf.limit()
+        val uLim = uBuf.limit()
+        val vLim = vBuf.limit()
+
+        if (mode == VisorMode.IR_BEACON && rawRgbaBuffer.size != total) {
+            rawRgbaBuffer = IntArray(total)
+        }
+
+        var skinCnt = 0
+        var vegLive = 0
+        var vegSynth = 0
+        var irCands = 0
+        var irMinX = dstW
+        var irMaxX = -1
+        var irMinY = dstH
+        var irMaxY = -1
+        var edgeHits = 0
+        var prevRowLuma = 0
+
+        for (sy in 0 until subH) {
+            val oy = sy * step
+            val yRO = oy * yRS
+            val uvY = oy shr 1
+            val uRO = uvY * uRS
+            val vRO = uvY * vRS
+            for (sx in 0 until subW) {
+                val ox = sx * step
+                val yI = yRO + ox * yPS
+                val uvX = ox shr 1
+                val uI = uRO + uvX * uPS
+                val vI = vRO + uvX * vPS
+                val yVal = if (yI in 0 until yLim) (yBuf.get(yI).toInt() and 0xFF) else 128
+                val uRaw = if (uI in 0 until uLim) (uBuf.get(uI).toInt() and 0xFF) else 128
+                val vRaw = if (vI in 0 until vLim) (vBuf.get(vI).toInt() and 0xFF) else 128
+                val uVal = uRaw - 128
+                val vVal = vRaw - 128
+                val r = (yVal + ((359 * vVal) shr 8)).coerceIn(0, 255)
+                val g = (yVal - ((88 * uVal + 183 * vVal) shr 8)).coerceIn(0, 255)
+                val b = (yVal + ((454 * uVal) shr 8)).coerceIn(0, 255)
+
+                when (mode) {
+                    VisorMode.SKIN_CHROMA -> {
+                        if (YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(yVal, uRaw, vRaw) && isWarmHumanSkinRgbGuard(r, g, b)) {
+                            skinCnt++
+                        }
+                    }
+                    VisorMode.VEG_CHLOROPHYLL -> {
+                        when (classifyChlorophyllPixel(r, g, b).toInt()) {
+                            1 -> vegLive++
+                            2 -> vegSynth++
+                        }
+                    }
+                    VisorMode.IR_BEACON -> {
+                        var dx: Int
+                        var dy: Int
+                        when (rot) {
+                            90 -> { dx = subH - 1 - sy; dy = sx }
+                            180 -> { dx = subW - 1 - sx; dy = subH - 1 - sy }
+                            270 -> { dx = sy; dy = subW - 1 - sx }
+                            else -> { dx = sx; dy = sy }
+                        }
+                        if (isFrontCamera) dx = dstW - 1 - dx
+                        rawRgbaBuffer[dy * dstW + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                        val irScore = (r + b) - (g * 2)
+                        if (irScore > 55 && ((r > 170 && b > 145) || (r > 246 && g > 246 && b > 246))) {
+                            irCands++
+                            if (dx < irMinX) irMinX = dx
+                            if (dx > irMaxX) irMaxX = dx
+                            if (dy < irMinY) irMinY = dy
+                            if (dy > irMaxY) irMaxY = dy
+                        }
+                    }
+                    VisorMode.EDGE_TRACE -> {
+                        if (sx > 0 && abs(yVal - prevRowLuma) > 22) edgeHits++
+                        prevRowLuma = yVal
+                    }
+                    else -> {}
+                }
+            }
+        }
+
+        return when (mode) {
+            VisorMode.SKIN_CHROMA -> VisorTelemetry(
+                mode = mode,
+                skinPercent = ((skinCnt * 100f) / max(1, total)).roundToInt().coerceIn(0, 100),
+                skinCompactness = if (skinCnt > 8) 0.5f else 0f
+            )
+            VisorMode.VEG_CHLOROPHYLL -> VisorTelemetry(
+                mode = mode,
+                vegLivePercent = ((vegLive * 100f) / max(1, total)).roundToInt().coerceIn(0, 100),
+                vegSyntheticPercent = ((vegSynth * 100f) / max(1, total)).roundToInt().coerceIn(0, 100)
+            )
+            VisorMode.EDGE_TRACE -> VisorTelemetry(
+                mode = mode,
+                edgeTraceDensityPercent = ((edgeHits * 100f) / max(1, total)).roundToInt().coerceIn(0, 100)
+            )
+            VisorMode.IR_BEACON -> {
+                val irEval = evaluateIrHaloCandidate(rawRgbaBuffer, dstW, dstH, irCands, irMinX, irMaxX, irMinY, irMaxY)
+                val confirmed = if (irEval.isCompactCandidate) {
+                    irPersistFrames = min(60, irPersistFrames + 1)
+                    irPersistFrames >= 6
+                } else {
+                    irPersistFrames = max(0, irPersistFrames - 2)
+                    false
+                }
+                val label = when {
+                    confirmed -> "УСТОЙЧИВЫЙ ТОЧЕЧНЫЙ ОРЕОЛ ($irCands пикс)"
+                    irEval.isCompactCandidate -> "КАНДИДАТ ИК ($irPersistFrames/6 кадров)"
+                    else -> irEval.rejectionLabel
+                }
+                VisorTelemetry(mode = mode, irPeakDetected = confirmed, irHotPixels = irCands, irStatusLabel = label)
+            }
+            else -> VisorTelemetry(mode = mode)
+        }
+    }
+
     fun snapshotLatestBitmapCopy(): Bitmap? = synchronized(bitmapLock) {
         val src = frontBufferBitmap ?: return null
         if (src.isRecycled) return null

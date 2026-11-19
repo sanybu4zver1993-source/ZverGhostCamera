@@ -94,7 +94,11 @@ object ExifStripper {
         }
 
         var sampleSize = 1
-        while ((origW.toLong() / sampleSize) * (origH.toLong() / sampleSize) > MAX_PIXELS) {
+        val targetMaxDim = preset.maxDim
+        while (
+            ((origW.toLong() / sampleSize) * (origH.toLong() / sampleSize) > MAX_PIXELS) ||
+            (max(origW, origH) / (sampleSize * 2) >= targetMaxDim)
+        ) {
             sampleSize *= 2
         }
 
@@ -217,8 +221,8 @@ object ExifStripper {
             val finalW = current.width
             val finalH = current.height
 
-            // 5. Encode using clean codec format
-            val baos = ByteArrayOutputStream()
+            // 7. Encode using clean codec format (pre-sized buffer avoids repeated array reallocations)
+            val baos = ByteArrayOutputStream(65_536)
             val useWebP = preset.useWebP
             val format = if (useWebP) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -343,21 +347,11 @@ object ExifStripper {
         val ch = max(32, bottom - top)
 
         val cropped = Bitmap.createBitmap(bitmap, left, top, cw, ch)
-        // Anisotropic non-integer intermediate pass (independently varies X/Y pitch to defeat 1D/2D scale search)
-        val scaleX = 0.946f + secureRandom.nextFloat() * 0.030f
-        val scaleY = 0.946f + secureRandom.nextFloat() * 0.030f
-        val midW = max(32, (cw * scaleX).toInt())
-        val midH = max(32, (ch * scaleY).toInt())
-        val mid = Bitmap.createScaledBitmap(cropped, midW, midH, true)
-        cropped.recycle()
-
-        // Normalize to even-aligned target size (hides exact sensor aspect ratio fingerprints)
+        // Normalize to even-aligned target size in a single Skia mesh+anisotropic resample pass
         val outW = (w and 0xFFFE).coerceAtLeast(32)
         val outH = (h and 0xFFFE).coerceAtLeast(32)
-        val resampled = Bitmap.createScaledBitmap(mid, outW, outH, true)
-        mid.recycle()
 
-        // Smooth 8x8 sinusoidal elastic mesh warp (Skia-accelerated)
+        // Smooth 8x8 sinusoidal elastic mesh warp directly from asymmetrically cropped buffer
         val warped = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         val meshW = 8
         val meshH = 8
@@ -383,8 +377,8 @@ object ExifStripper {
         }
         val warpCanvas = Canvas(warped)
         val warpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-        warpCanvas.drawBitmapMesh(resampled, meshW, meshH, verts, 0, null, 0, warpPaint)
-        resampled.recycle()
+        warpCanvas.drawBitmapMesh(cropped, meshW, meshH, verts, 0, null, 0, warpPaint)
+        cropped.recycle()
 
         if (preserveBinary) {
             return warped
@@ -653,49 +647,92 @@ object ExifStripper {
 
     /**
      * Strips EXIF, XMP, and ICCP chunks from RIFF WebP binary containers while preserving VP8/VP8L/VP8X/ALPH/ANIM/ANMF.
+     * Fast-path: returns input directly with zero allocations when no metadata chunks or VP8X metadata flags exist.
      */
     fun stripWebpMetadataChunks(webp: ByteArray): ByteArray {
         if (webp.size < 12) return webp
-        val sigRiff = String(webp, 0, 4, Charsets.US_ASCII)
-        val sigWebp = String(webp, 8, 4, Charsets.US_ASCII)
-        if (sigRiff != "RIFF" || sigWebp != "WEBP") return webp
+        if (webp[0] != 'R'.code.toByte() || webp[1] != 'I'.code.toByte() ||
+            webp[2] != 'F'.code.toByte() || webp[3] != 'F'.code.toByte() ||
+            webp[8] != 'W'.code.toByte() || webp[9] != 'E'.code.toByte() ||
+            webp[10] != 'B'.code.toByte() || webp[11] != 'P'.code.toByte()
+        ) {
+            return webp
+        }
 
-        val body = ByteArrayOutputStream(webp.size)
-        body.write("WEBP".toByteArray(Charsets.US_ASCII))
+        // Quick scan to detect if any metadata chunk or VP8X metadata flag actually exists
+        var scanPos = 12
+        var needsStrip = false
+        while (scanPos + 8 <= webp.size) {
+            val chunkSize = readLeInt(webp, scanPos + 4)
+            if (chunkSize < 0 || scanPos + 8 + chunkSize > webp.size) break
+            if (isWebpMetaTag(webp, scanPos)) {
+                needsStrip = true
+                break
+            }
+            if (isFourCC(webp, scanPos, 'V', 'P', '8', 'X') &&
+                chunkSize > 0 &&
+                (webp[scanPos + 8].toInt() and 0x2C) != 0
+            ) {
+                needsStrip = true
+                break
+            }
+            scanPos += 8 + chunkSize + (chunkSize and 1)
+        }
+        if (!needsStrip) {
+            return webp
+        }
+
+        val out = ByteArrayOutputStream(webp.size)
+        // Reserve 12-byte RIFF....WEBP header (bytes 4..7 patched in place at end)
+        out.write(webp, 0, 12)
 
         var p = 12
-        val metadataFourCC = setOf("EXIF", "XMP ", "ICCP")
+        var vp8xPayloadStart = -1
         while (p + 8 <= webp.size) {
-            val fourCC = String(webp, p, 4, Charsets.US_ASCII)
-            val chunkSize = ByteBuffer.wrap(webp, p + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
+            val chunkSize = readLeInt(webp, p + 4)
             if (chunkSize < 0 || p + 8 + chunkSize > webp.size) break
 
-            val payloadEnd = p + 8 + chunkSize
-            val paddedEnd = payloadEnd + (chunkSize and 1)
-
-            if (fourCC !in metadataFourCC) {
-                val payload = webp.copyOfRange(p + 8, payloadEnd)
-                if (fourCC == "VP8X" && payload.isNotEmpty()) {
-                    // Clear ICC(0x20), EXIF(0x08), XMP(0x04) bits in VP8X flags byte
-                    payload[0] = (payload[0].toInt() and 0x2C.inv()).toByte()
+            val paddedEnd = p + 8 + chunkSize + (chunkSize and 1)
+            if (!isWebpMetaTag(webp, p)) {
+                val writeLen = min(webp.size - p, 8 + chunkSize + (chunkSize and 1))
+                if (isFourCC(webp, p, 'V', 'P', '8', 'X') && chunkSize > 0) {
+                    vp8xPayloadStart = out.size() + 8
                 }
-                body.write(fourCC.toByteArray(Charsets.US_ASCII))
-                body.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(payload.size).array())
-                body.write(payload)
-                if ((payload.size and 1) == 1) {
-                    body.write(0)
-                }
+                out.write(webp, p, writeLen)
             }
-
             p = paddedEnd
         }
 
-        val bodyBytes = body.toByteArray()
-        val out = ByteArrayOutputStream(8 + bodyBytes.size)
-        out.write("RIFF".toByteArray(Charsets.US_ASCII))
-        out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(bodyBytes.size).array())
-        out.write(bodyBytes)
-        return out.toByteArray()
+        val result = out.toByteArray()
+        if (vp8xPayloadStart in 0 until result.size) {
+            result[vp8xPayloadStart] = (result[vp8xPayloadStart].toInt() and 0x2C.inv()).toByte()
+        }
+        val riffPayloadSize = result.size - 8
+        result[4] = (riffPayloadSize and 0xFF).toByte()
+        result[5] = ((riffPayloadSize ushr 8) and 0xFF).toByte()
+        result[6] = ((riffPayloadSize ushr 16) and 0xFF).toByte()
+        result[7] = ((riffPayloadSize ushr 24) and 0xFF).toByte()
+        return result
+    }
+
+    private fun readLeInt(buf: ByteArray, off: Int): Int {
+        return (buf[off].toInt() and 0xFF) or
+            ((buf[off + 1].toInt() and 0xFF) shl 8) or
+            ((buf[off + 2].toInt() and 0xFF) shl 16) or
+            ((buf[off + 3].toInt() and 0xFF) shl 24)
+    }
+
+    private fun isFourCC(buf: ByteArray, off: Int, a: Char, b: Char, c: Char, d: Char): Boolean {
+        return buf[off] == a.code.toByte() &&
+            buf[off + 1] == b.code.toByte() &&
+            buf[off + 2] == c.code.toByte() &&
+            buf[off + 3] == d.code.toByte()
+    }
+
+    private fun isWebpMetaTag(buf: ByteArray, off: Int): Boolean {
+        return isFourCC(buf, off, 'E', 'X', 'I', 'F') ||
+            isFourCC(buf, off, 'X', 'M', 'P', ' ') ||
+            isFourCC(buf, off, 'I', 'C', 'C', 'P')
     }
 
     /**

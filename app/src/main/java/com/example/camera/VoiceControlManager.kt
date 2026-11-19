@@ -93,72 +93,80 @@ class VoiceControlManager(
 
     private fun parseWords(matches: List<String>) {
         for (raw in matches) {
-            val lower = raw.lowercase(Locale.ROOT)
-            when {
+            val cmd = parseCommand(raw)
+            if (cmd != null) {
+                onCommandRecognized(cmd)
+                return
+            }
+        }
+    }
+
+    internal companion object {
+        internal fun parseCommand(raw: String): VoiceCommand? {
+            val lower = raw.lowercase(Locale.ROOT).trim()
+            if (lower.isEmpty()) return null
+            return when {
+                // Выключить / сбросить таймер (must run before generic "таймер")
+                lower.contains("выключи таймер") || lower.contains("таймер выкл") ||
+                    lower.contains("сбрось таймер") || lower.contains("без таймера") ||
+                    lower.contains("убери таймер") || lower.contains("отмени таймер") ->
+                    VoiceCommand.TIMER_OFF
+
                 // Видеосъемка (Запись, видео, начни видео, останови запись)
-                lower.contains("видео") || lower.contains("запись") || lower.contains("сними видео") || lower.contains("запиши") -> {
-                    onCommandRecognized(VoiceCommand.TOGGLE_VIDEO)
-                    return
-                }
+                lower.contains("видео") || lower.contains("запись") || lower.contains("сними видео") ||
+                    lower.contains("запиши") || lower.contains("останови") ||
+                    lower == "стоп" || lower == "хватит" ->
+                    VoiceCommand.TOGGLE_VIDEO
+
                 // Съемка (Сделай снимок, сфоткай, фото, огонь)
                 lower.contains("снять") || lower.contains("снимок") || lower.contains("сфотк") || lower.contains("фотк") ||
-                lower.contains("фото") || lower.contains("огонь") || lower.contains("кадр") || lower.contains("чик") -> {
-                    onCommandRecognized(VoiceCommand.CAPTURE)
-                    return
-                }
+                    lower.contains("фото") || lower.contains("огонь") || lower.contains("кадр") || lower.contains("чик") ->
+                    VoiceCommand.CAPTURE
+
                 // Максимальный зум / приблизь к лицу / максимум
                 lower.contains("максимум") || lower.contains("максимальн") || lower.contains("к лицу") || lower.contains("к лицам") ||
-                lower.contains("сильно") || lower.contains("три") || lower.contains("х3") || lower.contains("3x") -> {
-                    onCommandRecognized(VoiceCommand.ZOOM_MAX)
-                    return
-                }
+                    lower.contains("сильно") || lower.contains("три") || lower.contains("х3") || lower.contains("3x") ->
+                    VoiceCommand.ZOOM_MAX
+
                 // Приблизить / зум 2
                 lower.contains("приблиз") || lower.contains("зум") || lower.contains("ближе") || lower.contains("увелич") ||
-                lower.contains("два") || lower.contains("х2") || lower.contains("2x") -> {
-                    onCommandRecognized(VoiceCommand.ZOOM_IN)
-                    return
-                }
+                    lower.contains("два") || lower.contains("х2") || lower.contains("2x") ->
+                    VoiceCommand.ZOOM_IN
+
                 // Сброс зума / исходное / уменьшить
                 lower.contains("сброс") || lower.contains("исходн") || lower.contains("отдалить") || lower.contains("уменьш") ||
-                lower.contains("назад") || lower.contains("один") || lower.contains("х1") || lower.contains("1x") -> {
-                    onCommandRecognized(VoiceCommand.ZOOM_RESET)
-                    return
-                }
+                    lower.contains("назад") || lower.contains("один") || lower.contains("х1") || lower.contains("1x") ->
+                    VoiceCommand.ZOOM_RESET
+
                 // Включить фонарик / свет
-                lower.contains("включи фонар") || lower.contains("вруби фонар") || lower.contains("включи свет") || lower.contains("подсветк") -> {
-                    onCommandRecognized(VoiceCommand.TORCH_ON)
-                    return
-                }
+                lower.contains("включи фонар") || lower.contains("вруби фонар") || lower.contains("включи свет") || lower.contains("подсветк") ->
+                    VoiceCommand.TORCH_ON
+
                 // Выключить фонарик
-                lower.contains("выключи фонар") || lower.contains("потуши") || lower.contains("выруби фонар") || lower.contains("выключи свет") -> {
-                    onCommandRecognized(VoiceCommand.TORCH_OFF)
-                    return
-                }
+                lower.contains("выключи фонар") || lower.contains("потуши") || lower.contains("выруби фонар") || lower.contains("выключи свет") ->
+                    VoiceCommand.TORCH_OFF
+
                 // Фонарик переключить
-                lower.contains("фонар") || lower.contains("свет") || lower.contains("вспышк") -> {
-                    onCommandRecognized(VoiceCommand.TOGGLE_TORCH)
-                    return
-                }
-                // Таймер
-                lower.contains("таймер") || lower.contains("5 секунд") || lower.contains("пять секунд") -> {
-                    onCommandRecognized(VoiceCommand.TIMER_5)
-                    return
-                }
+                lower.contains("фонар") || lower.contains("свет") || lower.contains("вспышк") ->
+                    VoiceCommand.TOGGLE_TORCH
+
+                // Таймер 5 сек
+                lower.contains("таймер") || lower.contains("5 секунд") || lower.contains("пять секунд") ->
+                    VoiceCommand.TIMER_5
+
                 // Стелс / темнота
-                lower.contains("стелс") || lower.contains("темнот") || lower.contains("черн") || lower.contains("час") || lower.contains("спрячь") -> {
-                    onCommandRecognized(VoiceCommand.TOGGLE_STEALTH)
-                    return
-                }
+                lower.contains("стелс") || lower.contains("темнот") || lower.contains("черн") || lower.contains("час") || lower.contains("спрячь") ->
+                    VoiceCommand.TOGGLE_STEALTH
+
                 // Сейф / схрон
-                lower.contains("сейф") || lower.contains("схрон") || lower.contains("хранилищ") -> {
-                    onCommandRecognized(VoiceCommand.OPEN_VAULT)
-                    return
-                }
+                lower.contains("сейф") || lower.contains("схрон") || lower.contains("хранилищ") ->
+                    VoiceCommand.OPEN_VAULT
+
                 // Перевернуть камеру
-                lower.contains("переверни") || lower.contains("селфи") || lower.contains("фронтал") -> {
-                    onCommandRecognized(VoiceCommand.FLIP_CAMERA)
-                    return
-                }
+                lower.contains("переверни") || lower.contains("селфи") || lower.contains("фронтал") ->
+                    VoiceCommand.FLIP_CAMERA
+
+                else -> null
             }
         }
     }
