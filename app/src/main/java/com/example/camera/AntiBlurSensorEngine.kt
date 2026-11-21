@@ -63,6 +63,21 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
     private var lastKnockTriggerMs = 0L
     private var lastAccelMag = 9.81f
 
+    // Part B: Leaky high-pass gyro EIS integrator (clamped to +/- 0.045f viewport crop margin)
+    @Volatile
+    private var eisOffsetX: Float = 0f
+    @Volatile
+    private var eisOffsetY: Float = 0f
+    private var lastGyroTsNs: Long = 0L
+
+    fun getStabilizedEisOffset(): Pair<Float, Float> = eisOffsetX to eisOffsetY
+
+    fun resetEisIntegrator() {
+        eisOffsetX = 0f
+        eisOffsetY = 0f
+        lastGyroTsNs = 0L
+    }
+
     data class MotionTelemetry(
         val motionScore: Int,       // 0..100 (% of blocks shifted above noise floor)
         val avgLuma: Int,           // 0..255 ambient scene brightness
@@ -120,6 +135,15 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
                 currentAngularSpeed = omega
                 isStable = omega < MICRO_BLUR_THRESHOLD
                 isTripodMode = omega < TRIPOD_THRESHOLD
+
+                val evTsNs = event.timestamp
+                if (lastGyroTsNs > 0L && evTsNs > lastGyroTsNs) {
+                    val dtSec = ((evTsNs - lastGyroTsNs) / 1_000_000_000.0f).coerceIn(0.001f, 0.05f)
+                    val gain = 0.032f
+                    eisOffsetX = ((eisOffsetX * 0.88f) - wy * dtSec * gain).coerceIn(-0.045f, 0.045f)
+                    eisOffsetY = ((eisOffsetY * 0.88f) + wx * dtSec * gain).coerceIn(-0.045f, 0.045f)
+                }
+                lastGyroTsNs = evTsNs
 
                 if (omega >= SNATCH_GYRO_THRESHOLD && (nowMs - lastLinearAccelSpikeMs) <= 300L) {
                     if (nowMs - lastSnatchTriggerMs > 2500L) {
@@ -320,6 +344,60 @@ class AntiBlurSensorEngine(context: Context) : SensorEventListener {
         height: Int,
         rowStride: Int
     ): Int = calculateExposureMetrics(yBuffer, width, height, rowStride).first
+
+    /**
+     * Computes p2/p98 dynamic luma percentiles normalized to 0f..1f with minimum 0.18 span
+     * for smooth GPU histogram stretch in THERMAL_LUT / NIGHT_GAMMA.
+     */
+    fun computeSmoothedLumaBounds(
+        yBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int
+    ): Pair<Float, Float> {
+        if (width < 12 || height < 12) return 0f to 1f
+        val hist = IntArray(256)
+        val limit = yBuffer.limit()
+        var total = 0
+        val step = maxOf(2, minOf(width, height) / 64)
+        for (y in 0 until height step step) {
+            val rowOff = y * rowStride
+            for (x in 0 until width step step) {
+                val idx = rowOff + x
+                if (idx in 0 until limit) {
+                    val lum = yBuffer.get(idx).toInt() and 0xFF
+                    hist[lum]++
+                    total++
+                }
+            }
+        }
+        if (total < 16) return 0f to 1f
+        val lowTarget = (total * 2) / 100
+        val highTarget = (total * 98) / 100
+        var acc = 0
+        var pLow = 0
+        var pHigh = 255
+        var foundLow = false
+        for (i in 0 until 256) {
+            acc += hist[i]
+            if (!foundLow && acc >= lowTarget) {
+                pLow = i
+                foundLow = true
+            }
+            if (acc >= highTarget) {
+                pHigh = i
+                break
+            }
+        }
+        var minN = pLow / 255f
+        var maxN = pHigh / 255f
+        if (maxN - minN < 0.18f) {
+            val mid = (minN + maxN) * 0.5f
+            minN = (mid - 0.09f).coerceIn(0f, 0.82f)
+            maxN = (minN + 0.18f).coerceAtMost(1f)
+        }
+        return minN to maxN
+    }
 
     /**
      * Single-pass 32-bin Y-plane Histogram + Zebra hotspot sampler (<0.5 ms on Helio G85).

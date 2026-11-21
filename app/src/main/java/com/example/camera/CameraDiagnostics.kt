@@ -24,7 +24,12 @@ object CameraDiagnostics {
         val minFocusDiopters: String,
         val aeAwbLock: String,
         val flashAvailable: Boolean,
-        val ultraHighResSupported: Boolean
+        val ultraHighResSupported: Boolean,
+        val fpsRanges: String = "?",
+        val rawSupported: Boolean = false,
+        val timestampSource: String = "UNKNOWN",
+        val focusCalibration: String = "UNKNOWN",
+        val highSpeedSupported: Boolean = false
     )
 
     data class HardwareDiagnosticReport(
@@ -88,6 +93,21 @@ object CameraDiagnostics {
                         "0.0D (fixed)"
                     }
 
+                    val fpsStr = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                        ?.joinToString(",") { "${it.lower}-${it.upper}" } ?: "?"
+                    val rawCap = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+                    val highSpeedCap = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO)
+                    val tsSrc = when (chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)) {
+                        CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME -> "REALTIME"
+                        CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN -> "MONOTONIC"
+                        else -> "UNKNOWN"
+                    }
+                    val fCal = when (chars.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)) {
+                        CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_CALIBRATED -> "CAL"
+                        CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_APPROXIMATE -> "APPROX"
+                        else -> "UNCAL"
+                    }
+
                     lenses.add(
                         CameraLensReport(
                             cameraId = id,
@@ -100,7 +120,12 @@ object CameraDiagnostics {
                             minFocusDiopters = minFocusStr,
                             aeAwbLock = "AE=${if (aeLock) "Y" else "N"}/AWB=${if (awbLock) "Y" else "N"}",
                             flashAvailable = flash,
-                            ultraHighResSupported = ultraRes
+                            ultraHighResSupported = ultraRes,
+                            fpsRanges = fpsStr,
+                            rawSupported = rawCap,
+                            timestampSource = tsSrc,
+                            focusCalibration = fCal,
+                            highSpeedSupported = highSpeedCap
                         )
                     )
                 }
@@ -132,7 +157,7 @@ object CameraDiagnostics {
             } else {
                 for (l in r.lenses) {
                     appendLine(
-                        "ID ${l.cameraId} [${l.lensFacing}] HAL=${l.hardwareLevel} • px=${l.pixelArray} • JPEG=${l.maxJpegSize} • YUV=${l.maxYuvSize} • AF=${l.minFocusDiopters} • ${l.aeAwbLock} • UltraHiRes=${l.ultraHighResSupported}"
+                        "ID ${l.cameraId} [${l.lensFacing}] HAL=${l.hardwareLevel} • px=${l.pixelArray} • JPEG=${l.maxJpegSize} • YUV=${l.maxYuvSize} • AF=${l.minFocusDiopters}(${l.focusCalibration}) • FPS=[${l.fpsRanges}] • TS=${l.timestampSource} • RAW=${l.rawSupported} • HiFPS=${l.highSpeedSupported} • ${l.aeAwbLock}"
                     )
                 }
             }
@@ -154,6 +179,11 @@ object CameraDiagnostics {
                 put("ae_awb_lock", l.aeAwbLock)
                 put("flash", l.flashAvailable)
                 put("ultra_hi_res", l.ultraHighResSupported)
+                put("fps_ranges", l.fpsRanges)
+                put("raw_supported", l.rawSupported)
+                put("timestamp_source", l.timestampSource)
+                put("focus_calibration", l.focusCalibration)
+                put("high_speed_supported", l.highSpeedSupported)
             })
         }
         val root = org.json.JSONObject().apply {

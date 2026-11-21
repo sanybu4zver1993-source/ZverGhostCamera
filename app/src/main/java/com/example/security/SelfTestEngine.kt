@@ -192,12 +192,15 @@ object SelfTestEngine {
             val ids = cm.cameraIdList
             val levels = ids.take(2).map { id ->
                 val ch = cm.getCameraCharacteristics(id)
-                when (ch.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)) {
-                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3 -> "$id:L3"
-                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL -> "$id:FULL"
-                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED -> "$id:LIM"
-                    else -> "$id:LEG"
+                val lvl = when (ch.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)) {
+                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3 -> "L3"
+                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL -> "FULL"
+                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED -> "LIM"
+                    else -> "LEG"
                 }
+                val caps = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+                val rawTag = if (caps.contains(android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)) "+RAW" else ""
+                "$id:$lvl$rawTag"
             }
             "Сенсоров=${ids.size} (${levels.joinToString(", ")})"
         } catch (e: Exception) {

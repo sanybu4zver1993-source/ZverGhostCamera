@@ -45,7 +45,13 @@ object CameraCapabilityProfiler {
         val maxJpegRes: String,
         val maxYuvRes: String,
         val ultraHighResSupported: Boolean,
-        val halSafetyNoteRu: String
+        val halSafetyNoteRu: String,
+        val availableFpsRanges: List<IntRange> = emptyList(),
+        val hasRawCapability: Boolean = false,
+        val rollingShutterSkewNs: Long? = null,
+        val timestampSourceName: String = "UNKNOWN",
+        val focusCalibrationName: String = "UNKNOWN",
+        val constrainedHighSpeedSupported: Boolean = false
     ) {
         companion object {
             fun fallback(lensFacing: Int): CameraProProfile = CameraProProfile(
@@ -68,7 +74,13 @@ object CameraCapabilityProfiler {
                 maxJpegRes = "?",
                 maxYuvRes = "?",
                 ultraHighResSupported = false,
-                halSafetyNoteRu = "Профиль HAL недоступен (нет доступа к CameraManager)"
+                halSafetyNoteRu = "Профиль HAL недоступен (нет доступа к CameraManager)",
+                availableFpsRanges = listOf(15..30),
+                hasRawCapability = false,
+                rollingShutterSkewNs = null,
+                timestampSourceName = "UNKNOWN",
+                focusCalibrationName = "UNCALIBRATED",
+                constrainedHighSpeedSupported = false
             )
         }
     }
@@ -138,6 +150,24 @@ object CameraCapabilityProfiler {
             } else {
                 false
             }
+            val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.map { it.lower..it.upper }
+                ?.distinct()
+                ?.sortedWith(compareBy<IntRange> { it.last }.thenBy { it.first })
+                ?: emptyList()
+            val hasRaw = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+            val highSpeed = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO)
+            val tsSource = when (chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)) {
+                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME -> "REALTIME"
+                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN -> "MONOTONIC"
+                else -> "UNKNOWN"
+            }
+            val focusCal = when (chars.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)) {
+                CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_CALIBRATED -> "CALIBRATED"
+                CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_APPROXIMATE -> "APPROXIMATE"
+                CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED -> "UNCALIBRATED"
+                else -> "UNKNOWN"
+            }
 
             val supportsManualExposure = hasManualSensorCap && iso != null && expNs != null
             val safetyNote = when {
@@ -169,7 +199,13 @@ object CameraCapabilityProfiler {
                 maxJpegRes = maxJpeg?.let { "${it.width}x${it.height}" } ?: "?",
                 maxYuvRes = maxYuv?.let { "${it.width}x${it.height}" } ?: "?",
                 ultraHighResSupported = ultraRes,
-                halSafetyNoteRu = safetyNote
+                halSafetyNoteRu = safetyNote,
+                availableFpsRanges = fpsRanges,
+                hasRawCapability = hasRaw,
+                rollingShutterSkewNs = null,
+                timestampSourceName = tsSource,
+                focusCalibrationName = focusCal,
+                constrainedHighSpeedSupported = highSpeed
             )
         } catch (_: Exception) {
             CameraProProfile.fallback(lensFacing)

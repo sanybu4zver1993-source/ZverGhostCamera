@@ -35,6 +35,8 @@ object ZverPrefs {
     private const val KEY_SMART_COMPRESSION = "smart_compression_enabled"
     private const val KEY_MULTI_FRAME_MODE = "multi_frame_stack_mode"
     private const val KEY_VOLUME_KEY_ACTION = "volume_key_action"
+    private const val KEY_GYRO_EIS_ENABLED = "gyro_eis_lite_enabled"
+    private const val KEY_TIMELAPSE_INTERVAL_MS = "timelapse_interval_ms"
 
     enum class VolumeKeyAction(val labelRu: String) {
         SHUTTER_OR_VIDEO("Кадр / Видео"),
@@ -56,6 +58,24 @@ object ZverPrefs {
     fun setVolumeKeyAction(context: Context, action: VolumeKeyAction) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putString(KEY_VOLUME_KEY_ACTION, action.name).apply()
+    }
+
+    fun isGyroEisEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_GYRO_EIS_ENABLED, false)
+
+    fun setGyroEisEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_GYRO_EIS_ENABLED, enabled).apply()
+    }
+
+    fun getTimeLapseIntervalMs(context: Context): Long =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_TIMELAPSE_INTERVAL_MS, 2000L).coerceIn(500L, 10_000L)
+
+    fun setTimeLapseIntervalMs(context: Context, intervalMs: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putLong(KEY_TIMELAPSE_INTERVAL_MS, intervalMs.coerceIn(500L, 10_000L)).apply()
     }
 
     fun isSmartCompressionEnabled(context: Context): Boolean =

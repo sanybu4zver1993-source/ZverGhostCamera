@@ -29,13 +29,10 @@ import kotlin.math.min
 
 /**
  * Pure GPU shader routing & aspect-ratio math for [GlVisorDualRenderer].
- * Stateless optical/CV modes run at 25-30 FPS inside a single OpenGL ES pass;
- * temporal multi-frame modes ([VisorMode.BIO_RPPG], [VisorMode.EULER_AMP]) stay on CPU.
+ * All 14 [VisorMode] presets execute smoothly on GPU (including ping-pong FBO temporal EULER_AMP
+ * and BIO_RPPG ROI visualization with CPU/POS Radix-2 FFT telemetry).
  */
-fun VisorMode.supportsGpuShader(): Boolean = when (this) {
-    VisorMode.BIO_RPPG, VisorMode.EULER_AMP -> false
-    else -> true
-}
+fun VisorMode.supportsGpuShader(): Boolean = true
 
 fun VisorMode.shaderModeId(): Int = when (this) {
     VisorMode.NORMAL -> 0
@@ -50,15 +47,15 @@ fun VisorMode.shaderModeId(): Int = when (this) {
     VisorMode.IR_BEACON -> 9
     VisorMode.SKIN_CHROMA -> 10
     VisorMode.WIREFRAME_POSE -> 11
-    VisorMode.BIO_RPPG, VisorMode.EULER_AMP -> -1
+    VisorMode.BIO_RPPG -> 12
+    VisorMode.EULER_AMP -> 13
 }
 
 internal object GlVisorMath {
 
     /**
-     * Computes a center-crop (FILL_CENTER) 4x4 MVP matrix so camera frames never stretch or squish
-     * regardless of display TextureView aspect ratio, encoder 9:16/3:4 surface size, or 90/270
-     * sensor rotation encoded in [stMatrix].
+     * Computes a center-crop (FILL_CENTER) 4x4 MVP matrix with optional Gyro-EIS Lite zoom/crop translation
+     * so camera frames never stretch, squish, or expose black edges during stabilization.
      */
     fun computeCenterCropMvp(
         srcWidth: Int,
@@ -67,7 +64,10 @@ internal object GlVisorMath {
         dstHeight: Int,
         stMatrix: FloatArray,
         outMvp: FloatArray,
-        flipVertical: Boolean = false
+        flipVertical: Boolean = false,
+        eisZoomScale: Float = 1.0f,
+        eisOffsetX: Float = 0f,
+        eisOffsetY: Float = 0f
     ) {
         if (outMvp.size < 16) return
         Matrix.setIdentityM(outMvp, 0)
@@ -82,14 +82,21 @@ internal object GlVisorMath {
         val srcAspect = orientedW / max(1f, orientedH)
         val dstAspect = dstWidth.toFloat() / max(1f, dstHeight.toFloat())
 
+        val zoom = eisZoomScale.coerceIn(1.0f, 1.25f)
+        val clampedDx = if (zoom > 1.01f) eisOffsetX.coerceIn(-0.045f, 0.045f) else 0f
+        val clampedDy = if (zoom > 1.01f) eisOffsetY.coerceIn(-0.045f, 0.045f) else 0f
+
         val scaleX: Float
         val scaleY: Float
         if (srcAspect > dstAspect) {
-            scaleX = srcAspect / dstAspect
-            scaleY = 1f
+            scaleX = (srcAspect / dstAspect) * zoom
+            scaleY = zoom
         } else {
-            scaleX = 1f
-            scaleY = dstAspect / srcAspect
+            scaleX = zoom
+            scaleY = (dstAspect / srcAspect) * zoom
+        }
+        if (clampedDx != 0f || clampedDy != 0f) {
+            Matrix.translateM(outMvp, 0, clampedDx, if (flipVertical) -clampedDy else clampedDy, 0f)
         }
         Matrix.scaleM(outMvp, 0, scaleX, if (flipVertical) -scaleY else scaleY, 1f)
     }
@@ -247,9 +254,11 @@ layout(location = 1) in vec2 aTexCoord;
 uniform mat4 uMvpMatrix;
 uniform mat4 uTexMatrix;
 out vec2 vTexCoord;
+out vec2 vQuadUv;
 void main() {
     gl_Position = uMvpMatrix * aPosition;
     vTexCoord = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+    vQuadUv = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
 }
 """
 
@@ -258,10 +267,18 @@ void main() {
 precision highp float;
 uniform samplerExternalOES sTexture;
 uniform sampler2D uDehazeLut;
+uniform sampler2D sEulerStateTex;
 uniform int uHasDehazeLut;
+uniform int uHasEulerState;
 uniform int uMode;
+uniform int uPeakingEnabled;
+uniform int uZebraEnabled;
+uniform float uZebraThreshold;
+uniform float uTimePhase;
+uniform vec2 uLumaRange;
 uniform vec2 uTexelStep;
 in vec2 vTexCoord;
+in vec2 vQuadUv;
 out vec4 fragColor;
 
 float calcLuma(vec3 c) {
@@ -307,15 +324,20 @@ void main() {
     vec3 outRgb = rgb;
 
     if (uMode == 1) {
-        // THERMAL_LUT (Ironbow)
-        float t = clamp(calcLuma(rgb), 0.0, 1.0);
+        // THERMAL_LUT (Ironbow with smoothed p2/p98 stretch)
+        float rawLum = calcLuma(rgb);
+        float span = max(0.18, uLumaRange.y - uLumaRange.x);
+        float t = clamp((rawLum - uLumaRange.x) / span, 0.0, 1.0);
         float r = clamp(1.5 * t + 0.05 * sin(t * 3.14159265), 0.0, 1.0);
         float g = clamp(pow(t, 2.2), 0.0, 1.0);
         float b = (t < 0.5) ? sin(t * 4.3982297) * 0.85 : (t - 0.5) * 1.6;
         outRgb = vec3(r, g, clamp(b, 0.0, 1.0));
     } else if (uMode == 2) {
-        // NIGHT_GAMMA
-        outRgb = pow(clamp(rgb, 0.0, 1.0), vec3(0.42));
+        // NIGHT_GAMMA (adaptive floor stretch + 0.42 gamma)
+        float minFloor = clamp(uLumaRange.x * 0.7, 0.0, 0.25);
+        float span = max(0.28, uLumaRange.y - minFloor);
+        vec3 lifted = clamp((rgb - vec3(minFloor)) / span, 0.0, 1.0);
+        outRgb = pow(lifted, vec3(0.42));
     } else if (uMode == 3) {
         // VEIN_HEMO
         float rf = max(rgb.r, 0.016);
@@ -325,9 +347,18 @@ void main() {
         float vein = clamp(baseLuma - hemo * 2.2, 0.0, 1.0);
         outRgb = vec3(vein * 0.25, vein, clamp(vein * 0.90 + 0.078, 0.0, 1.0));
     } else if (uMode == 4) {
-        // DERMA_UV_SIM
-        float uvc = clamp(rgb.b * 1.35 - rgb.r * 0.35, 0.0, 1.0);
-        outRgb = vec3(uvc * 0.45, uvc * 0.65, clamp(uvc * 1.25 + 0.059, 0.0, 1.0));
+        // DERMA_UV_SIM (specular glare suppression + local blue/melanin micro-contrast)
+        float minChan = min(rgb.r, min(rgb.g, rgb.b));
+        float specMask = smoothstep(0.74, 0.95, minChan);
+        vec3 n1 = texture(sTexture, vTexCoord + vec2(uTexelStep.x * 2.0, 0.0)).rgb;
+        vec3 n2 = texture(sTexture, vTexCoord - vec2(uTexelStep.x * 2.0, 0.0)).rgb;
+        vec3 n3 = texture(sTexture, vTexCoord + vec2(0.0, uTexelStep.y * 2.0)).rgb;
+        vec3 n4 = texture(sTexture, vTexCoord - vec2(0.0, uTexelStep.y * 2.0)).rgb;
+        float localAvgB = (n1.b + n2.b + n3.b + n4.b) * 0.25;
+        float hpDetail = clamp((rgb.b - localAvgB) * 2.4, -0.25, 0.25);
+        float baseUvc = clamp(rgb.b * 1.40 - rgb.r * 0.45 + hpDetail, 0.0, 1.0);
+        float uvc = mix(baseUvc, baseUvc * 0.62, specMask);
+        outRgb = vec3(uvc * 0.42, uvc * 0.62, clamp(uvc * 1.25 + 0.06, 0.0, 1.0));
     } else if (uMode == 5) {
         // OCR_CONTRAST
         float lum = calcLuma(rgb);
@@ -458,6 +489,50 @@ void main() {
     } else if (uMode == 11) {
         // WIREFRAME_POSE cool slate tint (bones/joints drawn in pose pass)
         outRgb = vec3(rgb.r * 0.45, rgb.g * 0.65, rgb.b * 0.85);
+    } else if (uMode == 12) {
+        // BIO_RPPG ROI emerald frame & warm-skin tint
+        bool inRoiX = (vQuadUv.x >= 0.34 && vQuadUv.x <= 0.66);
+        bool inRoiY = (vQuadUv.y >= 0.28 && vQuadUv.y <= 0.70);
+        bool borderX = inRoiY && (abs(vQuadUv.x - 0.34) < 0.006 || abs(vQuadUv.x - 0.66) < 0.006);
+        bool borderY = inRoiX && (abs(vQuadUv.y - 0.28) < 0.005 || abs(vQuadUv.y - 0.70) < 0.005);
+        if (borderX || borderY) {
+            outRgb = vec3(0.0, 1.0, 0.53);
+        } else if (inRoiX && inRoiY && isWarmSkin(rgb)) {
+            outRgb = vec3(rgb.r, min(1.0, rgb.g + 0.10), rgb.b);
+        }
+    } else if (uMode == 13) {
+        // EULER_AMP GPU temporal band-pass amplification using FBO state (R=fast, G=slow)
+        if (uHasEulerState == 1) {
+            vec2 eulerUv = clamp(vec2(vQuadUv.x, 1.0 - vQuadUv.y), 0.0, 1.0);
+            vec2 st = texture(sEulerStateTex, eulerUv).rg;
+            float lC = calcLuma(rgb);
+            float lL = calcLuma(texture(sTexture, vTexCoord - vec2(uTexelStep.x, 0.0)).rgb);
+            float lU = calcLuma(texture(sTexture, vTexCoord - vec2(0.0, uTexelStep.y)).rgb);
+            float edge = abs(lC - lL) + abs(lC - lU);
+            float damp = 1.0 / (1.0 + edge * edge * 90.0);
+            float amp = clamp((st.r - st.g) * 18.0 * damp, -0.35, 0.35);
+            outRgb = clamp(vec3(rgb.r + amp * 0.25, rgb.g + amp, rgb.b + abs(amp) * 0.45), 0.0, 1.0);
+        }
+    }
+
+    if (uPeakingEnabled == 1) {
+        float lC = calcLuma(rgb);
+        float lR = calcLuma(texture(sTexture, vTexCoord + vec2(uTexelStep.x, 0.0)).rgb);
+        float lD = calcLuma(texture(sTexture, vTexCoord + vec2(0.0, uTexelStep.y)).rgb);
+        float pGrad = abs(lC - lR) + abs(lC - lD);
+        if (pGrad > 0.165) {
+            outRgb = mix(outRgb, vec3(0.0, 0.90, 1.0), 0.75);
+        }
+    }
+
+    if (uZebraEnabled == 1) {
+        float lumZ = calcLuma(rgb);
+        if (lumZ >= uZebraThreshold) {
+            float diag = sin((gl_FragCoord.x + gl_FragCoord.y) * 0.52 + uTimePhase);
+            if (diag > 0.20) {
+                outRgb = mix(outRgb, vec3(1.0, 0.16, 0.25), 0.72);
+            }
+        }
     }
 
     fragColor = vec4(outRgb, 1.0);
@@ -470,9 +545,11 @@ attribute vec2 aTexCoord;
 uniform mat4 uMvpMatrix;
 uniform mat4 uTexMatrix;
 varying vec2 vTexCoord;
+varying vec2 vQuadUv;
 void main() {
     gl_Position = uMvpMatrix * aPosition;
     vTexCoord = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+    vQuadUv = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
 }
 """
 
@@ -480,9 +557,17 @@ void main() {
 #extension GL_OES_EGL_image_external : require
 precision mediump float;
 uniform samplerExternalOES sTexture;
+uniform sampler2D sEulerStateTex;
+uniform int uHasEulerState;
 uniform int uMode;
+uniform int uPeakingEnabled;
+uniform int uZebraEnabled;
+uniform float uZebraThreshold;
+uniform float uTimePhase;
+uniform vec2 uLumaRange;
 uniform vec2 uTexelStep;
 varying vec2 vTexCoord;
+varying vec2 vQuadUv;
 
 float calcLuma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
@@ -493,16 +578,24 @@ void main() {
     vec3 outRgb = rgb;
     float luma = calcLuma(rgb);
     if (uMode == 1) {
-        outRgb = vec3(clamp(1.5 * luma, 0.0, 1.0), pow(luma, 2.2), sin(luma * 3.14159) * 0.7);
+        float t = clamp((luma - uLumaRange.x) / max(0.18, uLumaRange.y - uLumaRange.x), 0.0, 1.0);
+        outRgb = vec3(clamp(1.5 * t, 0.0, 1.0), pow(t, 2.2), sin(t * 3.14159) * 0.7);
     } else if (uMode == 2) {
-        outRgb = pow(clamp(rgb, 0.0, 1.0), vec3(0.42));
+        float minF = clamp(uLumaRange.x * 0.7, 0.0, 0.25);
+        vec3 lifted = clamp((rgb - vec3(minF)) / max(0.28, uLumaRange.y - minF), 0.0, 1.0);
+        outRgb = pow(lifted, vec3(0.42));
     } else if (uMode == 3) {
         float hemo = (log(max(rgb.r, 0.02)) - log(max(rgb.g, 0.02))) * 0.82;
         float v = clamp(luma - hemo * 2.2, 0.0, 1.0);
         outRgb = vec3(v * 0.25, v, clamp(v * 0.9 + 0.08, 0.0, 1.0));
     } else if (uMode == 4) {
-        float uvc = clamp(rgb.b * 1.35 - rgb.r * 0.35, 0.0, 1.0);
-        outRgb = vec3(uvc * 0.45, uvc * 0.65, clamp(uvc * 1.25 + 0.06, 0.0, 1.0));
+        float minC = min(rgb.r, min(rgb.g, rgb.b));
+        float spec = smoothstep(0.74, 0.95, minC);
+        float avgB = (texture2D(sTexture, vTexCoord + vec2(uTexelStep.x * 2.0, 0.0)).b +
+            texture2D(sTexture, vTexCoord - vec2(uTexelStep.x * 2.0, 0.0)).b) * 0.5;
+        float baseUv = clamp(rgb.b * 1.40 - rgb.r * 0.45 + clamp((rgb.b - avgB) * 2.0, -0.2, 0.2), 0.0, 1.0);
+        float uvc = mix(baseUv, baseUv * 0.62, spec);
+        outRgb = vec3(uvc * 0.42, uvc * 0.62, clamp(uvc * 1.25 + 0.06, 0.0, 1.0));
     } else if (uMode == 5) {
         float s = clamp((luma - 0.5) * 2.4 + 0.5, 0.0, 1.0);
         outRgb = vec3(s * 0.95, s, clamp(s + 0.05, 0.0, 1.0));
@@ -527,8 +620,75 @@ void main() {
         outRgb = skin ? vec3(clamp(0.5 + luma * 0.5, 0.0, 1.0), clamp(0.25 + luma * 0.45, 0.0, 1.0), 0.1) : vec3(luma * 0.18, luma * 0.25, luma * 0.35);
     } else if (uMode == 11) {
         outRgb = vec3(rgb.r * 0.45, rgb.g * 0.65, rgb.b * 0.85);
+    } else if (uMode == 12) {
+        bool inRoiX = (vQuadUv.x >= 0.34 && vQuadUv.x <= 0.66);
+        bool inRoiY = (vQuadUv.y >= 0.28 && vQuadUv.y <= 0.70);
+        bool borderX = inRoiY && (abs(vQuadUv.x - 0.34) < 0.006 || abs(vQuadUv.x - 0.66) < 0.006);
+        bool borderY = inRoiX && (abs(vQuadUv.y - 0.28) < 0.005 || abs(vQuadUv.y - 0.70) < 0.005);
+        if (borderX || borderY) {
+            outRgb = vec3(0.0, 1.0, 0.53);
+        } else if (inRoiX && inRoiY && (rgb.r - rgb.b) >= 0.03) {
+            outRgb = vec3(rgb.r, min(1.0, rgb.g + 0.10), rgb.b);
+        }
+    } else if (uMode == 13) {
+        if (uHasEulerState == 1) {
+            vec2 eulerUv = clamp(vec2(vQuadUv.x, 1.0 - vQuadUv.y), 0.0, 1.0);
+            vec2 st = texture2D(sEulerStateTex, eulerUv).rg;
+            float amp = clamp((st.r - st.g) * 16.0, -0.35, 0.35);
+            outRgb = clamp(vec3(rgb.r + amp * 0.25, rgb.g + amp, rgb.b + abs(amp) * 0.45), 0.0, 1.0);
+        }
     }
+
+    if (uPeakingEnabled == 1) {
+        float lR = calcLuma(texture2D(sTexture, vTexCoord + vec2(uTexelStep.x, 0.0)).rgb);
+        float lD = calcLuma(texture2D(sTexture, vTexCoord + vec2(0.0, uTexelStep.y)).rgb);
+        if (abs(luma - lR) + abs(luma - lD) > 0.165) {
+            outRgb = mix(outRgb, vec3(0.0, 0.90, 1.0), 0.75);
+        }
+    }
+
+    if (uZebraEnabled == 1) {
+        if (luma >= uZebraThreshold && sin((gl_FragCoord.x + gl_FragCoord.y) * 0.52 + uTimePhase) > 0.20) {
+            outRgb = mix(outRgb, vec3(1.0, 0.16, 0.25), 0.72);
+        }
+    }
+
     gl_FragColor = vec4(outRgb, 1.0);
+}
+"""
+
+    const val EULER_TEMPORAL_VERT = """#version 100
+attribute vec4 aPosition;
+attribute vec2 aTexCoord;
+uniform mat4 uTexMatrix;
+varying vec2 vTexCoord;
+varying vec2 vStateUv;
+void main() {
+    gl_Position = aPosition;
+    vTexCoord = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+    vStateUv = aTexCoord;
+}
+"""
+
+    const val EULER_TEMPORAL_FRAG = """#version 100
+#extension GL_OES_EGL_image_external : require
+precision mediump float;
+uniform samplerExternalOES sTexture;
+uniform sampler2D sPrevStateTex;
+uniform int uResetState;
+varying vec2 vTexCoord;
+varying vec2 vStateUv;
+
+void main() {
+    vec3 rgb = texture2D(sTexture, vTexCoord).rgb;
+    float cur = dot(rgb, vec3(0.299, 0.587, 0.114));
+    vec3 curCenterRgb = texture2D(sTexture, vec2(0.5, 0.5)).rgb;
+    float curAnchor = dot(curCenterRgb, vec3(0.299, 0.587, 0.114));
+    vec4 prev = texture2D(sPrevStateTex, vStateUv);
+    bool aeJump = (uResetState == 1) || (abs(curAnchor - prev.b) > 0.045);
+    float fast = aeJump ? cur : mix(prev.r, cur, 0.55);
+    float slow = aeJump ? cur : mix(prev.g, cur, 0.10);
+    gl_FragColor = vec4(fast, slow, curAnchor, 1.0);
 }
 """
 
@@ -573,6 +733,30 @@ class GlVisorDualRenderer(
     var poseWireframe: PoseWireframe? = null
 
     @Volatile
+    var peakingEnabled: Boolean = false
+
+    @Volatile
+    var zebraEnabled: Boolean = false
+
+    @Volatile
+    var zebraThresholdNorm: Float = 240f / 255f
+
+    @Volatile
+    var eisEnabled: Boolean = false
+
+    @Volatile
+    var eisOffsetX: Float = 0f
+
+    @Volatile
+    var eisOffsetY: Float = 0f
+
+    @Volatile
+    var lumaMinNorm: Float = 0f
+
+    @Volatile
+    var lumaMaxNorm: Float = 1f
+
+    @Volatile
     var onFirstFrameRendered: (() -> Unit)? = null
 
     @Volatile
@@ -610,6 +794,28 @@ class GlVisorDualRenderer(
     private var uHasDehazeLutLoc = -1
     private var uModeLoc = -1
     private var uTexelStepLoc = -1
+    private var uPeakingEnabledLoc = -1
+    private var uZebraEnabledLoc = -1
+    private var uZebraThresholdLoc = -1
+    private var uTimePhaseLoc = -1
+    private var uLumaRangeLoc = -1
+    private var uEulerStateTexLoc = -1
+    private var uHasEulerStateLoc = -1
+
+    private var eulerProgramId = 0
+    private var eulerPosLoc = -1
+    private var eulerTexCoordLoc = -1
+    private var eulerTexMatrixLoc = -1
+    private var eulerTexLoc = -1
+    private var eulerPrevStateTexLoc = -1
+    private var eulerResetStateLoc = -1
+    private val eulerFboIds = IntArray(2)
+    private val eulerTexIds = IntArray(2)
+    private var eulerPingIdx = 0
+    private var eulerHasState = false
+    private var eulerResetNeeded = true
+    private var lastActiveModeId = 0
+    private val eulerStartMs = System.currentTimeMillis()
 
     private var dehazeLutTexId = 0
     private var hasDehazeLut = false
@@ -860,11 +1066,27 @@ class GlVisorDualRenderer(
                 destroyEncoderSurfaceOnly()
 
                 if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                    if (pbufferSurface != EGL14.EGL_NO_SURFACE) {
+                        EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
+                    }
                     if (programId != 0) GLES20.glDeleteProgram(programId)
                     if (poseProgramId != 0) GLES20.glDeleteProgram(poseProgramId)
+                    if (eulerProgramId != 0) GLES20.glDeleteProgram(eulerProgramId)
+                    eulerProgramId = 0
+                    if (eulerFboIds[0] != 0 || eulerFboIds[1] != 0) {
+                        GLES20.glDeleteFramebuffers(2, eulerFboIds, 0)
+                        eulerFboIds[0] = 0
+                        eulerFboIds[1] = 0
+                    }
+                    if (eulerTexIds[0] != 0 || eulerTexIds[1] != 0) {
+                        GLES20.glDeleteTextures(2, eulerTexIds, 0)
+                        eulerTexIds[0] = 0
+                        eulerTexIds[1] = 0
+                    }
+                    eulerHasState = false
                     if (cameraTexId != 0) GLES20.glDeleteTextures(1, intArrayOf(cameraTexId), 0)
                     if (dehazeLutTexId != 0) GLES20.glDeleteTextures(1, intArrayOf(dehazeLutTexId), 0)
+                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
                     if (pbufferSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, pbufferSurface)
                     if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext)
                     EGL14.eglTerminate(eglDisplay)
@@ -932,6 +1154,13 @@ class GlVisorDualRenderer(
             uHasDehazeLutLoc = GLES20.glGetUniformLocation(prog, "uHasDehazeLut")
             uModeLoc = GLES20.glGetUniformLocation(prog, "uMode")
             uTexelStepLoc = GLES20.glGetUniformLocation(prog, "uTexelStep")
+            uPeakingEnabledLoc = GLES20.glGetUniformLocation(prog, "uPeakingEnabled")
+            uZebraEnabledLoc = GLES20.glGetUniformLocation(prog, "uZebraEnabled")
+            uZebraThresholdLoc = GLES20.glGetUniformLocation(prog, "uZebraThreshold")
+            uTimePhaseLoc = GLES20.glGetUniformLocation(prog, "uTimePhase")
+            uLumaRangeLoc = GLES20.glGetUniformLocation(prog, "uLumaRange")
+            uEulerStateTexLoc = GLES20.glGetUniformLocation(prog, "sEulerStateTex")
+            uHasEulerStateLoc = GLES20.glGetUniformLocation(prog, "uHasEulerState")
 
             val pProg = buildProgram(GlVisorShaders.POSE_VERTEX, GlVisorShaders.POSE_FRAGMENT)
             poseProgramId = pProg
@@ -939,6 +1168,47 @@ class GlVisorDualRenderer(
                 posePosLoc = GLES20.glGetAttribLocation(pProg, "aPos")
                 poseColorLoc = GLES20.glGetUniformLocation(pProg, "uColor")
                 posePointSizeLoc = GLES20.glGetUniformLocation(pProg, "uPointSize")
+            }
+
+            val eProg = buildProgram(GlVisorShaders.EULER_TEMPORAL_VERT, GlVisorShaders.EULER_TEMPORAL_FRAG)
+            eulerProgramId = eProg
+            if (eProg != 0) {
+                eulerPosLoc = GLES20.glGetAttribLocation(eProg, "aPosition")
+                eulerTexCoordLoc = GLES20.glGetAttribLocation(eProg, "aTexCoord")
+                eulerTexMatrixLoc = GLES20.glGetUniformLocation(eProg, "uTexMatrix")
+                eulerTexLoc = GLES20.glGetUniformLocation(eProg, "sTexture")
+                eulerPrevStateTexLoc = GLES20.glGetUniformLocation(eProg, "sPrevStateTex")
+                eulerResetStateLoc = GLES20.glGetUniformLocation(eProg, "uResetState")
+
+                GLES20.glGenFramebuffers(2, eulerFboIds, 0)
+                GLES20.glGenTextures(2, eulerTexIds, 0)
+                for (i in 0..1) {
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, eulerTexIds[i])
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                    GLES20.glTexImage2D(
+                        GLES20.GL_TEXTURE_2D,
+                        0,
+                        GLES20.GL_RGBA,
+                        240,
+                        180,
+                        0,
+                        GLES20.GL_RGBA,
+                        GLES20.GL_UNSIGNED_BYTE,
+                        null
+                    )
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, eulerFboIds[i])
+                    GLES20.glFramebufferTexture2D(
+                        GLES20.GL_FRAMEBUFFER,
+                        GLES20.GL_COLOR_ATTACHMENT0,
+                        GLES20.GL_TEXTURE_2D,
+                        eulerTexIds[i],
+                        0
+                    )
+                }
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             }
 
             val texIds = IntArray(2)
@@ -1038,6 +1308,16 @@ class GlVisorDualRenderer(
             return
         }
 
+        val activeMode = shaderModeId.coerceAtLeast(0)
+        if (activeMode == 13 && lastActiveModeId != 13) {
+            eulerResetNeeded = true
+            eulerHasState = false
+        }
+        lastActiveModeId = activeMode
+        if (activeMode == 13) {
+            updateEulerStatePass()
+        }
+
         val ptsNs = st.timestamp
         if (firstFrameNotified.compareAndSet(false, true)) {
             onFirstFrameRendered?.invoke()
@@ -1070,6 +1350,7 @@ class GlVisorDualRenderer(
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
+        val useEis = eisEnabled
         GlVisorMath.computeCenterCropMvp(
             srcWidth = srcBufferWidth,
             srcHeight = srcBufferHeight,
@@ -1077,7 +1358,10 @@ class GlVisorDualRenderer(
             dstHeight = targetH,
             stMatrix = stMatrix,
             outMvp = mvpMatrix,
-            flipVertical = flipVertical
+            flipVertical = flipVertical,
+            eisZoomScale = if (useEis) 1.10f else 1.0f,
+            eisOffsetX = if (useEis) eisOffsetX else 0f,
+            eisOffsetY = if (useEis) eisOffsetY else 0f
         )
 
         GLES20.glUseProgram(programId)
@@ -1093,7 +1377,33 @@ class GlVisorDualRenderer(
             GLES20.glUniform1i(uHasDehazeLutLoc, if (hasDehazeLut) 1 else 0)
         }
         val activeMode = shaderModeId.coerceAtLeast(0)
+        if (uEulerStateTexLoc >= 0 && eulerTexIds[eulerPingIdx] != 0) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, eulerTexIds[eulerPingIdx])
+            GLES20.glUniform1i(uEulerStateTexLoc, 2)
+        }
+        if (uHasEulerStateLoc >= 0) {
+            GLES20.glUniform1i(uHasEulerStateLoc, if (activeMode == 13 && eulerHasState) 1 else 0)
+        }
         GLES20.glUniform1i(uModeLoc, activeMode)
+        if (uPeakingEnabledLoc >= 0) {
+            GLES20.glUniform1i(uPeakingEnabledLoc, if (peakingEnabled) 1 else 0)
+        }
+        if (uZebraEnabledLoc >= 0) {
+            GLES20.glUniform1i(uZebraEnabledLoc, if (zebraEnabled) 1 else 0)
+        }
+        if (uZebraThresholdLoc >= 0) {
+            GLES20.glUniform1f(uZebraThresholdLoc, zebraThresholdNorm.coerceIn(0.5f, 0.99f))
+        }
+        if (uTimePhaseLoc >= 0) {
+            val phase = (((System.currentTimeMillis() - eulerStartMs) % 6283L) / 1000f) * 3.5f
+            GLES20.glUniform1f(uTimePhaseLoc, phase)
+        }
+        if (uLumaRangeLoc >= 0) {
+            val lMin = lumaMinNorm.coerceIn(0f, 0.80f)
+            val lMax = lumaMaxNorm.coerceIn(max(0.20f, lMin + 0.18f), 1f)
+            GLES20.glUniform2f(uLumaRangeLoc, lMin, lMax)
+        }
         GLES20.glUniformMatrix4fv(uMvpMatrixLoc, 1, false, mvpMatrix, 0)
         GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, stMatrix, 0)
         GLES20.glUniform2f(
@@ -1121,6 +1431,47 @@ class GlVisorDualRenderer(
                 drawPoseWireframePass(wf, targetW, flipVertical)
             }
         }
+    }
+
+    private fun updateEulerStatePass() {
+        if (eulerProgramId == 0 || eulerFboIds[0] == 0 || eulerFboIds[1] == 0) return
+        val readIdx = eulerPingIdx
+        val writeIdx = 1 - eulerPingIdx
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, eulerFboIds[writeIdx])
+        GLES20.glViewport(0, 0, 240, 180)
+        GLES20.glUseProgram(eulerProgramId)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
+        if (eulerTexLoc >= 0) GLES20.glUniform1i(eulerTexLoc, 0)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, eulerTexIds[readIdx])
+        if (eulerPrevStateTexLoc >= 0) GLES20.glUniform1i(eulerPrevStateTexLoc, 1)
+
+        if (eulerTexMatrixLoc >= 0) GLES20.glUniformMatrix4fv(eulerTexMatrixLoc, 1, false, stMatrix, 0)
+        if (eulerResetStateLoc >= 0) {
+            GLES20.glUniform1i(eulerResetStateLoc, if (eulerResetNeeded || !eulerHasState) 1 else 0)
+        }
+
+        quadVertices.position(0)
+        GLES20.glEnableVertexAttribArray(eulerPosLoc)
+        GLES20.glVertexAttribPointer(eulerPosLoc, 2, GLES20.GL_FLOAT, false, 16, quadVertices)
+
+        quadVertices.position(2)
+        GLES20.glEnableVertexAttribArray(eulerTexCoordLoc)
+        GLES20.glVertexAttribPointer(eulerTexCoordLoc, 2, GLES20.GL_FLOAT, false, 16, quadVertices)
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        GLES20.glDisableVertexAttribArray(eulerPosLoc)
+        GLES20.glDisableVertexAttribArray(eulerTexCoordLoc)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+        eulerPingIdx = writeIdx
+        eulerHasState = true
+        eulerResetNeeded = false
     }
 
     private fun ensurePoseBoneBuffer(neededFloats: Int): FloatBuffer {
