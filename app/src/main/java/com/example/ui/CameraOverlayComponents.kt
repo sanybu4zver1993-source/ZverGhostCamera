@@ -105,7 +105,8 @@ internal fun CameraViewportSurface(
     useGpuVisorPipeline: Boolean,
     glRenderer: GlVisorDualRenderer,
     onPreviewViewReady: (PreviewView) -> Unit,
-    onTextureViewReady: (TextureView) -> Unit
+    onTextureViewReady: (TextureView) -> Unit,
+    onPreviewStreaming: (() -> Unit)? = null
 ) {
     if (useGpuVisorPipeline) {
         AndroidView(
@@ -153,6 +154,11 @@ internal fun CameraViewportSurface(
                     )
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                     implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+                    previewStreamState.observeForever { state ->
+                        if (state == PreviewView.StreamState.STREAMING) {
+                            onPreviewStreaming?.invoke()
+                        }
+                    }
                     onPreviewViewReady(this)
                 }
             },
@@ -310,13 +316,21 @@ internal fun shouldShowDocumentLevelOverlay(
     selectedCameraMode: String,
     isDocumentModeActive: Boolean,
     isRecordingVideo: Boolean
-): Boolean = selectedCameraMode == "DOCUMENTS" && isDocumentModeActive && !isRecordingVideo
+): Boolean = com.example.camera.CameraUiState(
+    activeTab = com.example.camera.CameraTab.fromKey(selectedCameraMode),
+    isDocumentModeActive = isDocumentModeActive,
+    isRecordingVideo = isRecordingVideo
+).showDocumentLevel
 
 internal fun shouldShowTacticalReticle(
     selectedCameraMode: String,
     visorMode: VisorMode,
     isRecordingVideo: Boolean
-): Boolean = !isRecordingVideo && selectedCameraMode != "DOCUMENTS" && visorMode == VisorMode.NORMAL
+): Boolean = com.example.camera.CameraUiState(
+    activeTab = com.example.camera.CameraTab.fromKey(selectedCameraMode),
+    visorMode = visorMode,
+    isRecordingVideo = isRecordingVideo
+).showTacticalReticle
 
 @Composable
 internal fun DocumentLevelOverlay(

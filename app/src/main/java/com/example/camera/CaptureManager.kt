@@ -9,7 +9,12 @@ import com.example.crypto.MonoVaultEngine
 import com.example.security.ZverPrefs
 import com.example.visor.CyberVisorEngine
 import com.example.visor.VisorMode
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -53,6 +58,26 @@ class CaptureManager(
         @Volatile
         var lastCaptureStageTimings: CaptureStageTimings? = null
             private set
+
+        @OptIn(ExperimentalCoroutinesApi::class)
+        private val monoVaultSerialDispatcher = Dispatchers.IO.limitedParallelism(1)
+        private val monoVaultScope = CoroutineScope(SupervisorJob() + monoVaultSerialDispatcher)
+
+        internal fun enqueueMonoVaultAppendAsync(
+            context: Context,
+            volume: MonoVaultEngine.VolumeType,
+            payloadCopy: ByteArray
+        ): Job {
+            val appCtx = context.applicationContext
+            return monoVaultScope.launch {
+                try {
+                    MonoVaultEngine.appendRecord(appCtx, volume, payloadCopy)
+                } catch (_: Exception) {
+                } finally {
+                    Arrays.fill(payloadCopy, 0.toByte())
+                }
+            }
+        }
     }
 
     data class CaptureResult(
@@ -469,14 +494,12 @@ class CaptureManager(
             val vaultEncryptMs = (System.currentTimeMillis() - encStart).coerceAtLeast(0L)
 
             val monoStart = System.currentTimeMillis()
-            try {
-                val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
-                    MonoVaultEngine.VolumeType.MASTER
-                } else {
-                    MonoVaultEngine.VolumeType.DECOY
-                }
-                MonoVaultEngine.appendRecord(appContext, volume, payload)
-            } catch (_: Exception) {}
+            val volume = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                MonoVaultEngine.VolumeType.MASTER
+            } else {
+                MonoVaultEngine.VolumeType.DECOY
+            }
+            enqueueMonoVaultAppendAsync(appContext, volume, payload.clone())
             val monoVaultMs = (System.currentTimeMillis() - monoStart).coerceAtLeast(0L)
             val totalMs = System.currentTimeMillis() - startTime
             val timings = CaptureStageTimings(

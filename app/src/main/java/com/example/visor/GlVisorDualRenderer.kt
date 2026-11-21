@@ -572,6 +572,10 @@ class GlVisorDualRenderer(
     @Volatile
     var poseWireframe: PoseWireframe? = null
 
+    @Volatile
+    var onFirstFrameRendered: (() -> Unit)? = null
+
+    private val firstFrameNotified = AtomicBoolean(false)
     private var onEncoderFramePushed: (() -> Unit)? = null
 
     // EGL & GL handles (strictly touched on glThread)
@@ -760,6 +764,10 @@ class GlVisorDualRenderer(
         }
     }
 
+    fun resetFirstFrameSignal() {
+        firstFrameNotified.set(false)
+    }
+
     fun detachEncoderSurfaceBlocking() {
         if (released.get()) return
         val latch = CountDownLatch(1)
@@ -772,7 +780,7 @@ class GlVisorDualRenderer(
             }
         }
         if (posted) {
-            try { latch.await(400, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
+            try { latch.await(1500, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
         }
     }
 
@@ -1024,6 +1032,9 @@ class GlVisorDualRenderer(
         }
 
         val ptsNs = st.timestamp
+        if (firstFrameNotified.compareAndSet(false, true)) {
+            onFirstFrameRendered?.invoke()
+        }
 
         if (displaySurface != EGL14.EGL_NO_SURFACE && displayWidth > 0 && displayHeight > 0) {
             if (EGL14.eglMakeCurrent(eglDisplay, displaySurface, displaySurface, eglContext)) {

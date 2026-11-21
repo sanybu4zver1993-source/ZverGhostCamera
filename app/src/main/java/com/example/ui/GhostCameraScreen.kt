@@ -67,12 +67,16 @@ import com.example.assist.GeminiByokClient
 import com.example.assist.GhostAssistService
 import com.example.camera.AntiBlurSensorEngine
 import com.example.camera.AudioWatcherEngine
+import com.example.camera.CameraBindingCoordinator
 import com.example.camera.CameraCapabilityProfiler
+import com.example.camera.CameraTab
+import com.example.camera.CameraUiState
 import com.example.camera.CaptureManager
 import com.example.camera.ExifStripper
 import com.example.camera.Mp4Sanitizer
 import com.example.camera.MultiFrameStacker
 import com.example.camera.PhotoIqEngine
+import com.example.camera.ThermalThrottleController
 import com.example.camera.VoiceControlManager
 import com.example.camera.ZoomIntelligence
 import com.example.crypto.GhostCryptoVault
@@ -193,12 +197,16 @@ fun GhostCameraScreen(
     val visorTickCounter = remember { AtomicLong(0L) }
     var visorMode by remember { mutableStateOf(VisorMode.NORMAL) }
     var gpuVisorFailed by remember { mutableStateOf(false) }
+    val bindingCoordinator = remember { CameraBindingCoordinator(context, scope) }
+    val thermalMonitor = remember { ThermalThrottleController.ThermalMonitor(context) }
     val glRenderer = remember {
         GlVisorDualRenderer { err ->
             scope.launch(Dispatchers.Main) {
                 gpuVisorFailed = true
                 lastStatusMessage = "ВНИМАНИЕ GPU: $err (CPU режим)"
             }
+        }.apply {
+            onFirstFrameRendered = { bindingCoordinator.markFirstFrameReceived() }
         }
     }
     val useGpuVisorPipeline = (visorMode != VisorMode.NORMAL && visorMode.supportsGpuShader() && !gpuVisorFailed)
@@ -433,6 +441,7 @@ fun GhostCameraScreen(
                         }
                     }
                     if (event == Lifecycle.Event.ON_STOP) {
+                        bindingCoordinator.cancelPendingWatchdog()
                         glRenderer.detachEncoderSurfaceBlocking()
                         try { activeImageAnalysis?.clearAnalyzer() } catch (_: Exception) {}
                         try { activeCameraProvider?.unbindAll() } catch (_: Exception) {}
@@ -485,7 +494,10 @@ fun GhostCameraScreen(
             }
         }
         antiBlurEngine.start()
+        thermalMonitor.start()
         onDispose {
+            thermalMonitor.stop()
+            bindingCoordinator.cancelPendingWatchdog()
             antiBlurEngine.onSnatchDetected = null
             antiBlurEngine.onFaceDownDetected = null
             antiBlurEngine.onKnockDetected = null
@@ -1237,7 +1249,8 @@ fun GhostCameraScreen(
                 val needExpo = analyzerFlags.histogramEnabled || analyzerFlags.zebraEnabled || analyzerFlags.falseColorEnabled
                 val needPeaking = analyzerFlags.focusPeakingEnabled
                 val needSentinel = analyzerFlags.sentinelArmed || (analyzerFlags.selectedCameraMode == "SENTINEL")
-                val runSlowCvPass = (nowMs - lastTelemetryAnalysisMs) >= 230L
+                val analysisIntervalMs = thermalMonitor.currentIntervalMs
+                val runSlowCvPass = (nowMs - lastTelemetryAnalysisMs) >= analysisIntervalMs
 
                 if (runSlowCvPass) {
                     lastTelemetryAnalysisMs = nowMs
@@ -1386,12 +1399,15 @@ fun GhostCameraScreen(
         return imageAnalysis
     }
 
-    LaunchedEffect(lensFacing, isVideoCameraMode, keepVisorStreamInVideo, useGpuVisorPipeline, previewView, resumeBindToken) {
+    val isNightExtensionTab = (selectedCameraMode == "NIGHT" && !useGpuVisorPipeline && visorMode == VisorMode.NORMAL)
+
+    LaunchedEffect(lensFacing, isVideoCameraMode, keepVisorStreamInVideo, useGpuVisorPipeline, isNightExtensionTab, previewView, resumeBindToken) {
         if (!useGpuVisorPipeline && previewView == null) return@LaunchedEffect
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
         activeCameraProvider = cameraProvider
 
+        glRenderer.resetFirstFrameSignal()
         val preview = Preview.Builder().build().apply {
             if (useGpuVisorPipeline) {
                 setSurfaceProvider(glRenderer.previewSurfaceProvider)
@@ -1413,6 +1429,7 @@ fun GhostCameraScreen(
         activeImageAnalysis = null
 
         if (isVideoCameraMode) {
+            bindingCoordinator.cancelPendingWatchdog()
             imageCapture = null
             try {
                 cameraProvider.unbindAll()
@@ -1485,36 +1502,36 @@ fun GhostCameraScreen(
 
             val capture = captureBuilder.build()
             val imageAnalysis = createConfiguredImageAnalysis()
-            activeImageAnalysis = imageAnalysis
-            try {
-                cameraProvider.unbindAll()
-                val camera = cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    capture,
-                    imageAnalysis
-                )
-                cameraControl = camera.cameraControl
-                imageCapture = capture
-                boundUseCasesSummary = "PHOTO/OPTIC: Preview + ImageCapture + ImageAnalysis (YUV 640x480)"
-            } catch (eAnalysis: Exception) {
-                try {
-                    activeImageAnalysis = null
-                    cameraProvider.unbindAll()
-                    val camera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        capture
-                    )
-                    cameraControl = camera.cameraControl
+            val tabForBind = if (isNightExtensionTab) CameraTab.NIGHT else CameraTab.fromKey(selectedCameraMode)
+            val outcome = bindingCoordinator.bindPhotoOrMode(
+                cameraProvider = cameraProvider,
+                lifecycleOwner = lifecycleOwner,
+                lensFacing = lensFacing,
+                tab = tabForBind,
+                visorMode = visorMode,
+                useGpuVisorPipeline = useGpuVisorPipeline,
+                preview = preview,
+                imageCapture = capture,
+                imageAnalysis = imageAnalysis,
+                onFirstFrameWatchdogFallback = { fallback ->
+                    cameraControl = fallback.camera.cameraControl
                     imageCapture = capture
-                    boundUseCasesSummary = "FALLBACK (без ImageAnalysis): Preview + ImageCapture (${eAnalysis.javaClass.simpleName})"
-                    lastStatusMessage = "ВНИМАНИЕ HAL: ImageAnalysis отключён (только Фото)"
-                } catch (e: Exception) {
+                    activeImageAnalysis = fallback.activeImageAnalysis
+                    boundUseCasesSummary = fallback.activeUseCasesSummary
+                    lastStatusMessage = "Night Extension: откат на базовый поток HAL"
+                },
+                onFatalBindError = { e ->
                     boundUseCasesSummary = "CAMERA BIND ERROR: ${e.javaClass.simpleName}"
                     lastStatusMessage = "Ошибка камеры: ${e.localizedMessage}"
+                }
+            )
+            if (outcome != null) {
+                cameraControl = outcome.camera.cameraControl
+                imageCapture = capture
+                activeImageAnalysis = outcome.activeImageAnalysis
+                boundUseCasesSummary = outcome.activeUseCasesSummary
+                if (outcome.activeImageAnalysis == null) {
+                    lastStatusMessage = "ВНИМАНИЕ HAL: ImageAnalysis отключён (только Фото)"
                 }
             }
         }
@@ -1636,11 +1653,19 @@ fun GhostCameraScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
+        val cameraUiState = CameraUiState(
+            activeTab = CameraTab.fromKey(selectedCameraMode),
+            visorMode = visorMode,
+            isDocumentModeActive = isDocumentModeActive,
+            isRecordingVideo = isRecordingVideo
+        )
+
         CameraViewportSurface(
             useGpuVisorPipeline = useGpuVisorPipeline,
             glRenderer = glRenderer,
             onPreviewViewReady = { previewView = it },
-            onTextureViewReady = { textureView = it }
+            onTextureViewReady = { textureView = it },
+            onPreviewStreaming = { bindingCoordinator.markFirstFrameReceived() }
         )
 
         VisorLiveOverlayLayer(
@@ -1671,16 +1696,11 @@ fun GhostCameraScreen(
             }
         )
 
-        if (shouldShowTacticalReticle(selectedCameraMode, visorMode, isRecordingVideo)) {
+        if (cameraUiState.showTacticalReticle) {
             TacticalReticle(modifier = Modifier.fillMaxSize())
         }
 
-        val showDocumentLevel = shouldShowDocumentLevelOverlay(
-            selectedCameraMode = selectedCameraMode,
-            isDocumentModeActive = isDocumentModeActive,
-            isRecordingVideo = isRecordingVideo
-        )
-        DocumentLevelOverlay(isDocumentModeActive = showDocumentLevel, telemetry = telemetry)
+        DocumentLevelOverlay(isDocumentModeActive = cameraUiState.showDocumentLevel, telemetry = telemetry)
 
         LiveOpticalOverlaysLayer(
             isFocusPeakingEnabled = isFocusPeakingEnabled,
@@ -1942,14 +1962,12 @@ fun GhostCameraScreen(
                                             prefix = GhostCryptoVault.MEDIA_PHOTO
                                         )
                                         cos.use { it.write(bytes); it.flush() }
-                                        try {
-                                            val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
-                                                MonoVaultEngine.VolumeType.MASTER
-                                            } else {
-                                                MonoVaultEngine.VolumeType.DECOY
-                                            }
-                                            MonoVaultEngine.appendRecord(context, vol, bytes)
-                                        } catch (_: Exception) {}
+                                        val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                                            MonoVaultEngine.VolumeType.MASTER
+                                        } else {
+                                            MonoVaultEngine.VolumeType.DECOY
+                                        }
+                                        CaptureManager.enqueueMonoVaultAppendAsync(context, vol, bytes.clone())
                                     }
                                     Arrays.fill(bytes, 0.toByte())
                                     ram

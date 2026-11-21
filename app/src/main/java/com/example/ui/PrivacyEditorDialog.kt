@@ -2,8 +2,12 @@ package com.example.ui
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.RectF
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -78,12 +82,60 @@ fun PrivacyEditorDialog(
 
     var regions by remember { mutableStateOf<List<OfflinePrivacyEngine.NormalizedRegion>>(emptyList()) }
     var style by remember { mutableStateOf(OfflinePrivacyEngine.RedactionStyle.PIXELATE) }
+    var maskPreset by remember { mutableStateOf(OfflinePrivacyEngine.MaskPreset.CLOWN) }
+    var maskScale by remember { mutableStateOf(1.15f) }
+    var customMaskBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var invertMode by remember { mutableStateOf(false) }
     var preset by remember { mutableStateOf(ZverPrefs.getCompressionPreset(context)) }
     var antiPrnu by remember { mutableStateOf(ZverPrefs.isAntiPrnuEnabled(context)) }
     var isProcessing by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("Обнаружь лица/текст или обведи область пальцем") }
     var osintReport by remember { mutableStateOf<OfflinePrivacyEngine.OsintRiskReport?>(null) }
+
+    val customMaskPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            isProcessing = true
+            val (loadedBmp, hasAlpha) = withContext(Dispatchers.IO) {
+                try {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    context.contentResolver.openInputStream(uri)?.use {
+                        BitmapFactory.decodeStream(it, null, bounds)
+                    }
+                    var sample = 1
+                    val maxDim = max(bounds.outWidth, bounds.outHeight)
+                    while (maxDim / sample > 1024) sample *= 2
+                    val opts = BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                    val bmp = context.contentResolver.openInputStream(uri)?.use {
+                        BitmapFactory.decodeStream(it, null, opts)
+                    }
+                    Pair(bmp, bmp?.hasAlpha() == true)
+                } catch (_: Exception) {
+                    Pair(null, false)
+                }
+            }
+            if (loadedBmp != null) {
+                val old = customMaskBitmap
+                customMaskBitmap = loadedBmp
+                if (old != null && !old.isRecycled) old.recycle()
+                maskPreset = OfflinePrivacyEngine.MaskPreset.CUSTOM_PNG
+                style = OfflinePrivacyEngine.RedactionStyle.MASK
+                statusText = if (hasAlpha) {
+                    "Своя PNG-маска загружена (${loadedBmp.width}x${loadedBmp.height})"
+                } else {
+                    "Картинка загружена (без прозрачного фона — лучше PNG с альфой)"
+                }
+            } else {
+                statusText = "Не удалось загрузить свою маску"
+            }
+            isProcessing = false
+        }
+    }
 
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
@@ -94,14 +146,22 @@ fun PrivacyEditorDialog(
     var movingLiveRect by remember { mutableStateOf<RectF?>(null) }
     val latestRegions by rememberUpdatedState(regions)
 
-    // Re-render redacted preview cleanly in background whenever regions/style/invert change
-    LaunchedEffect(regions, style, invertMode, sourceBitmap) {
+    // Re-render redacted preview cleanly in background whenever regions/style/mask/invert change
+    LaunchedEffect(regions, style, invertMode, maskPreset, maskScale, customMaskBitmap, sourceBitmap) {
         if (regions.isEmpty()) {
             previewBitmap?.let { if (it != sourceBitmap) it.recycle() }
             previewBitmap = null
         } else {
             val rendered = withContext(Dispatchers.Default) {
-                OfflinePrivacyEngine.applyRedactions(sourceBitmap, regions, style, invertMode)
+                OfflinePrivacyEngine.applyRedactions(
+                    source = sourceBitmap,
+                    regions = regions,
+                    style = style,
+                    invertMode = invertMode,
+                    maskPreset = maskPreset,
+                    maskScale = maskScale,
+                    customMaskBitmap = customMaskBitmap
+                )
             }
             val prev = previewBitmap
             previewBitmap = rendered
@@ -115,6 +175,9 @@ fun PrivacyEditorDialog(
         onDispose {
             previewBitmap?.let {
                 if (it != sourceBitmap && !it.isRecycled) it.recycle()
+            }
+            customMaskBitmap?.let {
+                if (!it.isRecycled) it.recycle()
             }
         }
     }
@@ -476,8 +539,14 @@ fun PrivacyEditorDialog(
                             .clip(RoundedCornerShape(6.dp))
                             .background(if (isSel) EdGreen else EdSurface)
                             .border(1.dp, if (isSel) EdGreen else EdBorder, RoundedCornerShape(6.dp))
-                            .clickable { style = s }
+                            .clickable {
+                                style = s
+                                if (s == OfflinePrivacyEngine.RedactionStyle.MASK && regions.isEmpty()) {
+                                    statusText = "Выбери маску и размер! Для авто-наложения нажми АВТО-ЛИЦА или обведи пальцем"
+                                }
+                            }
                             .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("obscura_style_${s.name.lowercase()}")
                     )
                 }
 
@@ -494,6 +563,94 @@ fun PrivacyEditorDialog(
                         .clickable { antiPrnu = !antiPrnu }
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 )
+            }
+
+            if (style == OfflinePrivacyEngine.RedactionStyle.MASK) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(EdSurface)
+                        .border(1.dp, EdBorder, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OfflinePrivacyEngine.MaskPreset.values().forEach { mp ->
+                            val isMpSel = maskPreset == mp
+                            Text(
+                                text = mp.labelRu,
+                                color = if (isMpSel) Color.Black else Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isMpSel) EdCyan else EdBlack)
+                                    .border(1.dp, if (isMpSel) EdCyan else EdBorder, RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        if (mp == OfflinePrivacyEngine.MaskPreset.CUSTOM_PNG) {
+                                            customMaskPickerLauncher.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                            )
+                                        } else {
+                                            maskPreset = mp
+                                        }
+                                    }
+                                    .padding(horizontal = 9.dp, vertical = 5.dp)
+                                    .testTag("obscura_mask_${mp.name.lowercase()}")
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "РАЗМЕР: ${(maskScale * 100).toInt()}%",
+                            color = EdCyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            modifier = Modifier.width(88.dp)
+                        )
+                        FilledTonalButton(
+                            onClick = { maskScale = (maskScale - 0.10f).coerceIn(0.6f, 2.2f) },
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Text("−", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                        Slider(
+                            value = maskScale,
+                            onValueChange = { maskScale = it },
+                            valueRange = 0.6f..2.2f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = EdGreen,
+                                activeTrackColor = EdGreen,
+                                inactiveTrackColor = EdBorder
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("obscura_mask_scale_slider")
+                        )
+                        FilledTonalButton(
+                            onClick = { maskScale = (maskScale + 0.10f).coerceIn(0.6f, 2.2f) },
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Text("+", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))

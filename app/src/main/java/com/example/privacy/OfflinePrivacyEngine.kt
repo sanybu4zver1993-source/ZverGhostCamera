@@ -4,8 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import com.google.mlkit.vision.common.InputImage
@@ -17,12 +16,14 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * OfflinePrivacyEngine (ObscuraCam Core, 100% On-Device):
- * - Runs bundled ML Kit Face Detection & Text Recognition strictly offline (0% network).
+ * - Runs bundled ML Kit Face Detection (with head roll angle) & Text Recognition strictly offline.
  * - Normalizes all regions into 0..1 coordinates for responsive Compose touch editing.
- * - Supports 4 redaction styles: BLACKOUT, PIXELATE, BLUR, MASK (cyber visor) + Invert Mode.
+ * - Supports BLACKOUT, PIXELATE, BLUR, and stylized full-face MASK presets
+ *   (Clown, Wolf, Fox, Cat, Bear, Ghost Skull, Custom Transparent PNG) with adjustable scale.
  */
 object OfflinePrivacyEngine {
 
@@ -31,6 +32,16 @@ object OfflinePrivacyEngine {
         PIXELATE("МОЗАИКА"),
         BLUR("БЛЮР"),
         MASK("МАСКА")
+    }
+
+    enum class MaskPreset(val labelRu: String, val shortBadge: String) {
+        CLOWN("🤡 КЛОУН", "🤡"),
+        WOLF("🐺 ВОЛК", "🐺"),
+        FOX("🦊 ЛИСА", "🦊"),
+        CAT("🐱 КОТ", "🐱"),
+        BEAR("🐻 МЕДВЕДЬ", "🐻"),
+        SKULL("💀 ЧЕРЕП", "💀"),
+        CUSTOM_PNG("🖼 СВОЯ PNG", "🖼")
     }
 
     enum class RegionKind {
@@ -42,7 +53,8 @@ object OfflinePrivacyEngine {
     data class NormalizedRegion(
         val id: String,
         val rect: RectF, // normalized [0f..1f]
-        val kind: RegionKind
+        val kind: RegionKind,
+        val rollDeg: Float = 0f
     )
 
     data class DetectionResult(
@@ -51,10 +63,6 @@ object OfflinePrivacyEngine {
         val extractedText: String
     )
 
-    /**
-     * Moves a normalized region by (dxNorm, dyNorm) while preserving exact dimensions
-     * and clamping cleanly inside [0f..1f].
-     */
     fun moveRegionClamped(rect: RectF, dxNorm: Float, dyNorm: Float): RectF {
         val w = absRectWidth(rect).coerceIn(0.02f, 1f)
         val h = absRectHeight(rect).coerceIn(0.02f, 1f)
@@ -65,6 +73,23 @@ object OfflinePrivacyEngine {
         return RectF(newLeft, newTop, newLeft + w, newTop + h)
     }
 
+    /**
+     * Computes a centered, clamped rectangle scaled by [scale] (for live Mask size adjustments).
+     */
+    fun computeScaledMaskBounds(rect: Rect, scale: Float, maxW: Int, maxH: Int): RectF {
+        val clampedScale = scale.coerceIn(0.6f, 2.2f)
+        val cx = rect.exactCenterX()
+        val cy = rect.exactCenterY()
+        val halfW = (rect.width() * 0.5f) * clampedScale
+        val halfH = (rect.height() * 0.5f) * clampedScale
+        return RectF(
+            (cx - halfW).coerceIn(-maxW * 0.15f, maxW.toFloat()),
+            (cy - halfH).coerceIn(-maxH * 0.15f, maxH.toFloat()),
+            (cx + halfW).coerceIn(0f, maxW * 1.15f),
+            (cy + halfH).coerceIn(0f, maxH * 1.15f)
+        )
+    }
+
     private fun absRectWidth(r: RectF): Float = max(r.left, r.right) - min(r.left, r.right)
     private fun absRectHeight(r: RectF): Float = max(r.top, r.bottom) - min(r.top, r.bottom)
 
@@ -72,6 +97,7 @@ object OfflinePrivacyEngine {
         suspendCancellableCoroutine { cont ->
             val options = FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
                 .enableTracking()
                 .build()
             val detector = FaceDetection.getClient(options)
@@ -91,7 +117,8 @@ object OfflinePrivacyEngine {
                                 (b.right / w).coerceIn(0f, 1f),
                                 (b.bottom / h).coerceIn(0f, 1f)
                             ),
-                            kind = RegionKind.FACE
+                            kind = RegionKind.FACE,
+                            rollDeg = f.headEulerAngleZ
                         )
                     }
                     detector.close()
@@ -171,10 +198,6 @@ object OfflinePrivacyEngine {
         return sum % 10 == 0
     }
 
-    /**
-     * Offline OSINT Risk Linter: scans detected faces & ML Kit OCR text for accidental leaks
-     * before sharing or saving an unredacted frame.
-     */
     fun assessOsintRisks(detection: DetectionResult): OsintRiskReport {
         val warnings = mutableListOf<String>()
         var score = 0
@@ -229,33 +252,35 @@ object OfflinePrivacyEngine {
 
     /**
      * Applies selected redactions onto a fresh ARGB_8888 bitmap without mutating [source].
-     * When [invertMode] is true, blurs/pixelates/blackouts the ENTIRE background while keeping
-     * ONLY the selected [regions] visible (ObscuraCam Crowd/Privacy Spotlight mode).
+     * When [style] == [RedactionStyle.MASK], renders stylized full-face animal/clown/skull masks
+     * (or user-imported transparent PNG) scaled by [maskScale] and rotated by detected head roll.
      */
     fun applyRedactions(
         source: Bitmap,
         regions: List<NormalizedRegion>,
         style: RedactionStyle,
-        invertMode: Boolean
+        invertMode: Boolean,
+        maskPreset: MaskPreset = MaskPreset.CLOWN,
+        maskScale: Float = 1.15f,
+        customMaskBitmap: Bitmap? = null
     ): Bitmap {
         val w = source.width
         val h = source.height
         val out = source.copy(Bitmap.Config.ARGB_8888, true)
         if (regions.isEmpty()) return out
 
-        val pixelRects = regions.mapNotNull { r ->
+        val pixelRegions = regions.mapNotNull { r ->
             val left = (min(r.rect.left, r.rect.right) * w).toInt().coerceIn(0, w - 1)
             val top = (min(r.rect.top, r.rect.bottom) * h).toInt().coerceIn(0, h - 1)
             val right = (max(r.rect.left, r.rect.right) * w).toInt().coerceIn(1, w)
             val bottom = (max(r.rect.top, r.rect.bottom) * h).toInt().coerceIn(1, h)
-            if (right - left >= 4 && bottom - top >= 4) Rect(left, top, right, bottom) else null
+            if (right - left >= 4 && bottom - top >= 4) Pair(Rect(left, top, right, bottom), r.rollDeg) else null
         }
-        if (pixelRects.isEmpty()) return out
+        if (pixelRegions.isEmpty()) return out
 
         val canvas = Canvas(out)
 
         if (invertMode) {
-            // Redact whole frame first, then punch original pixels back inside selected regions
             when (style) {
                 RedactionStyle.BLACKOUT, RedactionStyle.MASK -> {
                     canvas.drawColor(Color.BLACK)
@@ -271,15 +296,14 @@ object OfflinePrivacyEngine {
                     blurred.recycle()
                 }
             }
-            for (rect in pixelRects) {
+            for ((rect, _) in pixelRegions) {
                 canvas.drawBitmap(source, rect, rect, null)
             }
             return out
         }
 
-        // Standard mode: redact each region
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        for (rect in pixelRects) {
+        for ((rect, rollDeg) in pixelRegions) {
             when (style) {
                 RedactionStyle.BLACKOUT -> {
                     paint.style = Paint.Style.FILL
@@ -304,17 +328,20 @@ object OfflinePrivacyEngine {
                     blurred.recycle()
                 }
                 RedactionStyle.MASK -> {
-                    drawCyberVisorMask(canvas, rect)
+                    val scaledBounds = computeScaledMaskBounds(rect, maskScale, w, h)
+                    drawStylizedMask(
+                        canvas = canvas,
+                        bounds = scaledBounds,
+                        rollDeg = rollDeg,
+                        preset = maskPreset,
+                        customMaskBitmap = customMaskBitmap
+                    )
                 }
             }
         }
         return out
     }
 
-    /**
-     * Draws non-linear block mosaic with per-block jittered sampling + slight brightness noise
-     * so faces/plates resist trivial linear pixelation deconvolution.
-     */
     private fun drawJitteredMosaic(canvas: Canvas, source: Bitmap, rect: Rect, blockSize: Int) {
         val blockPaint = Paint().apply { style = Paint.Style.FILL }
         val step = max(6, blockSize)
@@ -366,43 +393,487 @@ object OfflinePrivacyEngine {
         return up
     }
 
-    private fun drawCyberVisorMask(canvas: Canvas, rect: Rect) {
-        val w = rect.width().toFloat()
-        val h = rect.height().toFloat()
-        val visorTop = rect.top + h * 0.22f
-        val visorBottom = rect.top + h * 0.56f
+    private fun drawStylizedMask(
+        canvas: Canvas,
+        bounds: RectF,
+        rollDeg: Float,
+        preset: MaskPreset,
+        customMaskBitmap: Bitmap?
+    ) {
+        val cx = bounds.centerX()
+        val cy = bounds.centerY()
+        val w = bounds.width().coerceAtLeast(16f)
+        val h = bounds.height().coerceAtLeast(16f)
 
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0A0F14")
-            style = Paint.Style.FILL
+        canvas.save()
+        if (kotlin.math.abs(rollDeg) in 1f..45f) {
+            canvas.rotate(-rollDeg, cx, cy)
         }
-        val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#00FF66")
-            style = Paint.Style.STROKE
-            strokeWidth = max(3f, w * 0.03f)
-        }
-        val lensRect = RectF(
-            rect.left + w * 0.06f,
-            visorTop,
-            rect.right - w * 0.06f,
-            visorBottom
-        )
-        val radius = h * 0.08f
-        canvas.drawRoundRect(lensRect, radius, radius, bgPaint)
-        canvas.drawRoundRect(lensRect, radius, radius, framePaint)
 
-        // Subtle reflection stripe across cyber visor
-        val glintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#6600E5FF")
-            strokeWidth = max(2f, h * 0.04f)
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+        if (preset == MaskPreset.CUSTOM_PNG && customMaskBitmap != null && !customMaskBitmap.isRecycled) {
+            val bmpW = customMaskBitmap.width.toFloat().coerceAtLeast(1f)
+            val bmpH = customMaskBitmap.height.toFloat().coerceAtLeast(1f)
+            val aspect = bmpW / bmpH
+            val dst = if (w / h > aspect) {
+                val drawW = h * aspect
+                RectF(cx - drawW * 0.5f, bounds.top, cx + drawW * 0.5f, bounds.bottom)
+            } else {
+                val drawH = w / aspect
+                RectF(bounds.left, cy - drawH * 0.5f, bounds.right, cy + drawH * 0.5f)
+            }
+            val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            canvas.drawBitmap(customMaskBitmap, null, dst, bmpPaint)
+            canvas.restore()
+            return
         }
-        canvas.drawLine(
-            lensRect.left + w * 0.12f,
-            visorTop + h * 0.08f,
-            lensRect.left + w * 0.35f,
-            visorBottom - h * 0.08f,
-            glintPaint
+
+        val effectivePreset = if (preset == MaskPreset.CUSTOM_PNG) MaskPreset.CLOWN else preset
+        when (effectivePreset) {
+            MaskPreset.CLOWN -> drawClownMask(canvas, cx, cy, w, h)
+            MaskPreset.WOLF -> drawWolfMask(canvas, cx, cy, w, h)
+            MaskPreset.FOX -> drawFoxMask(canvas, cx, cy, w, h)
+            MaskPreset.CAT -> drawCatMask(canvas, cx, cy, w, h)
+            MaskPreset.BEAR -> drawBearMask(canvas, cx, cy, w, h)
+            MaskPreset.SKULL -> drawSkullMask(canvas, cx, cy, w, h)
+            MaskPreset.CUSTOM_PNG -> drawClownMask(canvas, cx, cy, w, h)
+        }
+        canvas.restore()
+    }
+
+    private fun drawClownMask(canvas: Canvas, cx: Float, cy: Float, w: Float, h: Float) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+
+        // Colorful curly side wigs
+        val puffColors = intArrayOf(
+            Color.rgb(255, 61, 0),
+            Color.rgb(255, 196, 0),
+            Color.rgb(0, 176, 255),
+            Color.rgb(170, 0, 255)
         )
+        val puffR = w * 0.14f
+        val leftX = cx - w * 0.44f
+        val rightX = cx + w * 0.44f
+        for (i in 0 until 4) {
+            fill.color = puffColors[i % puffColors.size]
+            val py = cy - h * 0.28f + i * (h * 0.13f)
+            canvas.drawCircle(leftX - (if (i % 2 == 0) w * 0.04f else 0f), py, puffR, fill)
+            canvas.drawCircle(rightX + (if (i % 2 == 0) w * 0.04f else 0f), py, puffR, fill)
+        }
+
+        // White clown face base covering full identity
+        val faceOval = RectF(cx - w * 0.46f, cy - h * 0.46f, cx + w * 0.46f, cy + h * 0.48f)
+        fill.color = Color.rgb(248, 249, 252)
+        canvas.drawOval(faceOval, fill)
+        stroke.color = Color.rgb(30, 34, 42)
+        stroke.strokeWidth = max(2f, w * 0.025f)
+        canvas.drawOval(faceOval, stroke)
+
+        // Rosy cheeks
+        fill.color = Color.argb(170, 255, 82, 120)
+        canvas.drawCircle(cx - w * 0.27f, cy + h * 0.06f, w * 0.10f, fill)
+        canvas.drawCircle(cx + w * 0.27f, cy + h * 0.06f, w * 0.10f, fill)
+
+        // Arched blue eyebrows
+        stroke.color = Color.rgb(25, 118, 210)
+        stroke.strokeWidth = max(3f, w * 0.045f)
+        val browW = w * 0.16f
+        canvas.drawArc(
+            RectF(cx - w * 0.21f - browW * 0.5f, cy - h * 0.30f, cx - w * 0.21f + browW * 0.5f, cy - h * 0.18f),
+            195f, 150f, false, stroke
+        )
+        canvas.drawArc(
+            RectF(cx + w * 0.21f - browW * 0.5f, cy - h * 0.30f, cx + w * 0.21f + browW * 0.5f, cy - h * 0.18f),
+            195f, 150f, false, stroke
+        )
+
+        // Painted diamond eye accents + dark eyes
+        val eyeY = cy - h * 0.11f
+        for (dir in intArrayOf(-1, 1)) {
+            val ex = cx + dir * w * 0.19f
+            val diamond = Path().apply {
+                moveTo(ex, eyeY - h * 0.11f)
+                lineTo(ex + w * 0.065f, eyeY)
+                lineTo(ex, eyeY + h * 0.10f)
+                lineTo(ex - w * 0.065f, eyeY)
+                close()
+            }
+            fill.color = Color.rgb(0, 176, 255)
+            canvas.drawPath(diamond, fill)
+            fill.color = Color.rgb(18, 22, 28)
+            canvas.drawCircle(ex, eyeY, w * 0.048f, fill)
+            fill.color = Color.WHITE
+            canvas.drawCircle(ex - w * 0.015f, eyeY - h * 0.015f, w * 0.016f, fill)
+        }
+
+        // Giant red clown mouth
+        val smileRect = RectF(cx - w * 0.28f, cy + h * 0.06f, cx + w * 0.28f, cy + h * 0.36f)
+        fill.color = Color.rgb(229, 28, 35)
+        canvas.drawArc(smileRect, 10f, 160f, true, fill)
+        fill.color = Color.WHITE
+        val teethRect = RectF(cx - w * 0.20f, cy + h * 0.14f, cx + w * 0.20f, cy + h * 0.26f)
+        canvas.drawArc(teethRect, 12f, 156f, true, fill)
+
+        // Shiny round red nose
+        val noseY = cy + h * 0.01f
+        val noseR = min(w, h) * 0.135f
+        fill.color = Color.rgb(255, 23, 68)
+        canvas.drawCircle(cx, noseY, noseR, fill)
+        stroke.color = Color.rgb(150, 0, 28)
+        stroke.strokeWidth = max(2f, w * 0.02f)
+        canvas.drawCircle(cx, noseY, noseR, stroke)
+        fill.color = Color.argb(210, 255, 255, 255)
+        canvas.drawCircle(cx - noseR * 0.32f, noseY - noseR * 0.32f, noseR * 0.24f, fill)
+    }
+
+    private fun drawWolfMask(canvas: Canvas, cx: Float, cy: Float, w: Float, h: Float) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeJoin = Paint.Join.ROUND }
+
+        // Sharp upright wolf ears
+        for (dir in intArrayOf(-1, 1)) {
+            val outerEar = Path().apply {
+                moveTo(cx + dir * w * 0.16f, cy - h * 0.32f)
+                lineTo(cx + dir * w * 0.44f, cy - h * 0.60f)
+                lineTo(cx + dir * w * 0.46f, cy - h * 0.16f)
+                close()
+            }
+            fill.color = Color.rgb(69, 80, 92)
+            canvas.drawPath(outerEar, fill)
+
+            val innerEar = Path().apply {
+                moveTo(cx + dir * w * 0.22f, cy - h * 0.31f)
+                lineTo(cx + dir * w * 0.39f, cy - h * 0.50f)
+                lineTo(cx + dir * w * 0.40f, cy - h * 0.22f)
+                close()
+            }
+            fill.color = Color.rgb(168, 125, 134)
+            canvas.drawPath(innerEar, fill)
+        }
+
+        // Wolf head fur silhouette with jagged cheek tufts
+        val headPath = Path().apply {
+            moveTo(cx, cy - h * 0.44f)
+            lineTo(cx + w * 0.36f, cy - h * 0.32f)
+            lineTo(cx + w * 0.52f, cy - h * 0.02f)
+            lineTo(cx + w * 0.42f, cy + h * 0.08f)
+            lineTo(cx + w * 0.48f, cy + h * 0.22f)
+            lineTo(cx + w * 0.25f, cy + h * 0.42f)
+            lineTo(cx, cy + h * 0.50f)
+            lineTo(cx - w * 0.25f, cy + h * 0.42f)
+            lineTo(cx - w * 0.48f, cy + h * 0.22f)
+            lineTo(cx - w * 0.42f, cy + h * 0.08f)
+            lineTo(cx - w * 0.52f, cy - h * 0.02f)
+            lineTo(cx - w * 0.36f, cy - h * 0.32f)
+            close()
+        }
+        fill.color = Color.rgb(84, 96, 110)
+        canvas.drawPath(headPath, fill)
+
+        // Silver/white lower cheek fur & snout
+        val snout = Path().apply {
+            moveTo(cx, cy - h * 0.04f)
+            lineTo(cx + w * 0.38f, cy + h * 0.14f)
+            lineTo(cx + w * 0.20f, cy + h * 0.40f)
+            lineTo(cx, cy + h * 0.48f)
+            lineTo(cx - w * 0.20f, cy + h * 0.40f)
+            lineTo(cx - w * 0.38f, cy + h * 0.14f)
+            close()
+        }
+        fill.color = Color.rgb(218, 224, 232)
+        canvas.drawPath(snout, fill)
+
+        // Dark fur brow ridge
+        val brow = Path().apply {
+            moveTo(cx - w * 0.32f, cy - h * 0.18f)
+            lineTo(cx, cy - h * 0.04f)
+            lineTo(cx + w * 0.32f, cy - h * 0.18f)
+            lineTo(cx + w * 0.18f, cy - h * 0.28f)
+            lineTo(cx, cy - h * 0.18f)
+            lineTo(cx - w * 0.18f, cy - h * 0.28f)
+            close()
+        }
+        fill.color = Color.rgb(44, 52, 62)
+        canvas.drawPath(brow, fill)
+
+        // Fierce amber eyes
+        for (dir in intArrayOf(-1, 1)) {
+            val eyePath = Path().apply {
+                moveTo(cx + dir * w * 0.09f, cy - h * 0.06f)
+                lineTo(cx + dir * w * 0.27f, cy - h * 0.15f)
+                lineTo(cx + dir * w * 0.23f, cy - h * 0.03f)
+                close()
+            }
+            fill.color = Color.rgb(255, 193, 7)
+            canvas.drawPath(eyePath, fill)
+            fill.color = Color.BLACK
+            canvas.drawCircle(cx + dir * w * 0.19f, cy - h * 0.08f, w * 0.025f, fill)
+        }
+
+        // Wolf black nose
+        val nose = Path().apply {
+            moveTo(cx - w * 0.11f, cy + h * 0.14f)
+            lineTo(cx + w * 0.11f, cy + h * 0.14f)
+            lineTo(cx, cy + h * 0.26f)
+            close()
+        }
+        fill.color = Color.rgb(20, 22, 26)
+        canvas.drawPath(nose, fill)
+
+        // Fang grin line
+        stroke.color = Color.rgb(30, 34, 40)
+        stroke.strokeWidth = max(2f, w * 0.025f)
+        canvas.drawLine(cx, cy + h * 0.26f, cx, cy + h * 0.35f, stroke)
+        canvas.drawLine(cx - w * 0.14f, cy + h * 0.34f, cx + w * 0.14f, cy + h * 0.34f, stroke)
+    }
+
+    private fun drawFoxMask(canvas: Canvas, cx: Float, cy: Float, w: Float, h: Float) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+
+        // Pointed fox ears with dark tips
+        for (dir in intArrayOf(-1, 1)) {
+            val ear = Path().apply {
+                moveTo(cx + dir * w * 0.14f, cy - h * 0.30f)
+                lineTo(cx + dir * w * 0.44f, cy - h * 0.58f)
+                lineTo(cx + dir * w * 0.45f, cy - h * 0.12f)
+                close()
+            }
+            fill.color = Color.rgb(245, 108, 18)
+            canvas.drawPath(ear, fill)
+
+            val tip = Path().apply {
+                moveTo(cx + dir * w * 0.32f, cy - h * 0.46f)
+                lineTo(cx + dir * w * 0.44f, cy - h * 0.58f)
+                lineTo(cx + dir * w * 0.44f, cy - h * 0.39f)
+                close()
+            }
+            fill.color = Color.rgb(35, 32, 34)
+            canvas.drawPath(tip, fill)
+
+            val inner = Path().apply {
+                moveTo(cx + dir * w * 0.21f, cy - h * 0.29f)
+                lineTo(cx + dir * w * 0.37f, cy - h * 0.46f)
+                lineTo(cx + dir * w * 0.38f, cy - h * 0.19f)
+                close()
+            }
+            fill.color = Color.rgb(255, 240, 224)
+            canvas.drawPath(inner, fill)
+        }
+
+        // Fox head base
+        val head = Path().apply {
+            moveTo(cx, cy - h * 0.44f)
+            lineTo(cx + w * 0.38f, cy - h * 0.28f)
+            lineTo(cx + w * 0.52f, cy + h * 0.04f)
+            lineTo(cx + w * 0.22f, cy + h * 0.38f)
+            lineTo(cx, cy + h * 0.48f)
+            lineTo(cx - w * 0.22f, cy + h * 0.38f)
+            lineTo(cx - w * 0.52f, cy + h * 0.04f)
+            lineTo(cx - w * 0.38f, cy - h * 0.28f)
+            close()
+        }
+        fill.color = Color.rgb(255, 118, 22)
+        canvas.drawPath(head, fill)
+
+        // Creamy white cheek halves
+        for (dir in intArrayOf(-1, 1)) {
+            val cheek = Path().apply {
+                moveTo(cx, cy + h * 0.08f)
+                lineTo(cx + dir * w * 0.49f, cy + h * 0.05f)
+                lineTo(cx + dir * w * 0.22f, cy + h * 0.38f)
+                lineTo(cx, cy + h * 0.48f)
+                close()
+            }
+            fill.color = Color.rgb(255, 247, 238)
+            canvas.drawPath(cheek, fill)
+        }
+
+        // Sly fox eyes
+        for (dir in intArrayOf(-1, 1)) {
+            fill.color = Color.rgb(24, 24, 28)
+            canvas.drawOval(
+                RectF(cx + dir * w * 0.18f - w * 0.07f, cy - h * 0.12f, cx + dir * w * 0.18f + w * 0.07f, cy - h * 0.02f),
+                fill
+            )
+            fill.color = Color.rgb(255, 214, 0)
+            canvas.drawCircle(cx + dir * w * 0.18f, cy - h * 0.07f, w * 0.025f, fill)
+        }
+
+        // Shiny black fox nose
+        fill.color = Color.rgb(22, 22, 26)
+        canvas.drawOval(RectF(cx - w * 0.085f, cy + h * 0.20f, cx + w * 0.085f, cy + h * 0.32f), fill)
+
+        // Whiskers
+        stroke.color = Color.rgb(65, 55, 50)
+        stroke.strokeWidth = max(1.5f, w * 0.016f)
+        for (dir in intArrayOf(-1, 1)) {
+            canvas.drawLine(cx + dir * w * 0.20f, cy + h * 0.18f, cx + dir * w * 0.44f, cy + h * 0.14f, stroke)
+            canvas.drawLine(cx + dir * w * 0.20f, cy + h * 0.24f, cx + dir * w * 0.44f, cy + h * 0.26f, stroke)
+        }
+    }
+
+    private fun drawCatMask(canvas: Canvas, cx: Float, cy: Float, w: Float, h: Float) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+
+        // Cat ears
+        for (dir in intArrayOf(-1, 1)) {
+            val ear = Path().apply {
+                moveTo(cx + dir * w * 0.16f, cy - h * 0.34f)
+                lineTo(cx + dir * w * 0.44f, cy - h * 0.56f)
+                lineTo(cx + dir * w * 0.45f, cy - h * 0.12f)
+                close()
+            }
+            fill.color = Color.rgb(52, 56, 66)
+            canvas.drawPath(ear, fill)
+
+            val inner = Path().apply {
+                moveTo(cx + dir * w * 0.22f, cy - h * 0.32f)
+                lineTo(cx + dir * w * 0.38f, cy - h * 0.46f)
+                lineTo(cx + dir * w * 0.39f, cy - h * 0.18f)
+                close()
+            }
+            fill.color = Color.rgb(255, 148, 178)
+            canvas.drawPath(inner, fill)
+        }
+
+        // Rounded cat face
+        val headRect = RectF(cx - w * 0.47f, cy - h * 0.42f, cx + w * 0.47f, cy + h * 0.44f)
+        fill.color = Color.rgb(58, 62, 74)
+        canvas.drawOval(headRect, fill)
+
+        // Cream muzzle pads
+        fill.color = Color.rgb(245, 240, 235)
+        canvas.drawCircle(cx - w * 0.08f, cy + h * 0.14f, w * 0.11f, fill)
+        canvas.drawCircle(cx + w * 0.08f, cy + h * 0.14f, w * 0.11f, fill)
+
+        // Emerald eyes + vertical slit pupils
+        for (dir in intArrayOf(-1, 1)) {
+            val ex = cx + dir * w * 0.20f
+            val ey = cy - h * 0.08f
+            fill.color = Color.rgb(0, 230, 118)
+            canvas.drawOval(RectF(ex - w * 0.085f, ey - h * 0.065f, ex + w * 0.085f, ey + h * 0.065f), fill)
+            fill.color = Color.BLACK
+            canvas.drawOval(RectF(ex - w * 0.022f, ey - h * 0.055f, ex + w * 0.022f, ey + h * 0.055f), fill)
+            fill.color = Color.WHITE
+            canvas.drawCircle(ex - w * 0.02f, ey - h * 0.02f, w * 0.015f, fill)
+        }
+
+        // Pink triangle nose
+        val nose = Path().apply {
+            moveTo(cx - w * 0.065f, cy + h * 0.05f)
+            lineTo(cx + w * 0.065f, cy + h * 0.05f)
+            lineTo(cx, cy + h * 0.13f)
+            close()
+        }
+        fill.color = Color.rgb(255, 110, 155)
+        canvas.drawPath(nose, fill)
+
+        // Cute cat "w" mouth + whiskers
+        stroke.color = Color.rgb(30, 32, 38)
+        stroke.strokeWidth = max(2f, w * 0.022f)
+        canvas.drawArc(RectF(cx - w * 0.14f, cy + h * 0.12f, cx, cy + h * 0.22f), 0f, 180f, false, stroke)
+        canvas.drawArc(RectF(cx, cy + h * 0.12f, cx + w * 0.14f, cy + h * 0.22f), 0f, 180f, false, stroke)
+
+        stroke.color = Color.rgb(235, 240, 245)
+        stroke.strokeWidth = max(1.5f, w * 0.015f)
+        for (dir in intArrayOf(-1, 1)) {
+            canvas.drawLine(cx + dir * w * 0.18f, cy + h * 0.10f, cx + dir * w * 0.45f, cy + h * 0.04f, stroke)
+            canvas.drawLine(cx + dir * w * 0.19f, cy + h * 0.15f, cx + dir * w * 0.47f, cy + h * 0.16f, stroke)
+            canvas.drawLine(cx + dir * w * 0.18f, cy + h * 0.20f, cx + dir * w * 0.44f, cy + h * 0.27f, stroke)
+        }
+    }
+
+    private fun drawBearMask(canvas: Canvas, cx: Float, cy: Float, w: Float, h: Float) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+
+        // Round bear ears
+        val earR = w * 0.17f
+        for (dir in intArrayOf(-1, 1)) {
+            val ex = cx + dir * w * 0.34f
+            val ey = cy - h * 0.36f
+            fill.color = Color.rgb(109, 76, 65)
+            canvas.drawCircle(ex, ey, earR, fill)
+            fill.color = Color.rgb(215, 204, 200)
+            canvas.drawCircle(ex, ey, earR * 0.56f, fill)
+        }
+
+        // Bear face
+        fill.color = Color.rgb(121, 85, 72)
+        canvas.drawOval(RectF(cx - w * 0.46f, cy - h * 0.44f, cx + w * 0.46f, cy + h * 0.46f), fill)
+
+        // Tan muzzle
+        fill.color = Color.rgb(225, 198, 174)
+        canvas.drawOval(RectF(cx - w * 0.25f, cy - h * 0.01f, cx + w * 0.25f, cy + h * 0.38f), fill)
+
+        // Bear eyes + brows
+        for (dir in intArrayOf(-1, 1)) {
+            val ex = cx + dir * w * 0.19f
+            val ey = cy - h * 0.12f
+            fill.color = Color.rgb(28, 22, 20)
+            canvas.drawCircle(ex, ey, w * 0.055f, fill)
+            fill.color = Color.WHITE
+            canvas.drawCircle(ex - w * 0.016f, ey - h * 0.016f, w * 0.016f, fill)
+        }
+
+        // Big dark bear nose
+        fill.color = Color.rgb(34, 26, 24)
+        canvas.drawOval(RectF(cx - w * 0.11f, cy + h * 0.04f, cx + w * 0.11f, cy + h * 0.18f), fill)
+
+        // Smile
+        stroke.color = Color.rgb(42, 30, 26)
+        stroke.strokeWidth = max(2.5f, w * 0.026f)
+        canvas.drawLine(cx, cy + h * 0.18f, cx, cy + h * 0.26f, stroke)
+        canvas.drawArc(RectF(cx - w * 0.15f, cy + h * 0.18f, cx + w * 0.15f, cy + h * 0.30f), 15f, 150f, false, stroke)
+    }
+
+    private fun drawSkullMask(canvas: Canvas, cx: Float, cy: Float, w: Float, h: Float) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+
+        // Dark tactical balaclava base
+        fill.color = Color.rgb(20, 24, 30)
+        canvas.drawOval(RectF(cx - w * 0.48f, cy - h * 0.48f, cx + w * 0.48f, cy + h * 0.50f), fill)
+
+        // Bone skull cranium + jaw
+        val skull = Path().apply {
+            addOval(RectF(cx - w * 0.42f, cy - h * 0.42f, cx + w * 0.42f, cy + h * 0.20f), Path.Direction.CW)
+        }
+        fill.color = Color.rgb(232, 232, 224)
+        canvas.drawPath(skull, fill)
+        val jawRect = RectF(cx - w * 0.26f, cy + h * 0.02f, cx + w * 0.26f, cy + h * 0.44f)
+        canvas.drawRoundRect(jawRect, w * 0.09f, w * 0.09f, fill)
+
+        // Hollow eye sockets + subtle neon glint
+        for (dir in intArrayOf(-1, 1)) {
+            val ex = cx + dir * w * 0.18f
+            val ey = cy - h * 0.08f
+            fill.color = Color.rgb(18, 20, 24)
+            canvas.drawOval(RectF(ex - w * 0.11f, ey - h * 0.10f, ex + w * 0.11f, ey + h * 0.10f), fill)
+            fill.color = Color.rgb(0, 255, 102)
+            canvas.drawCircle(ex, ey, w * 0.026f, fill)
+        }
+
+        // Nasal triangle cavity
+        val nose = Path().apply {
+            moveTo(cx, cy + h * 0.02f)
+            lineTo(cx + w * 0.065f, cy + h * 0.16f)
+            lineTo(cx - w * 0.065f, cy + h * 0.16f)
+            close()
+        }
+        fill.color = Color.rgb(18, 20, 24)
+        canvas.drawPath(nose, fill)
+
+        // Stitched teeth bars
+        stroke.color = Color.rgb(22, 24, 28)
+        stroke.strokeWidth = max(2.5f, w * 0.025f)
+        val teethY = cy + h * 0.29f
+        canvas.drawLine(cx - w * 0.19f, teethY, cx + w * 0.19f, teethY, stroke)
+        for (i in -2..2) {
+            val tx = cx + i * w * 0.075f
+            canvas.drawLine(tx, teethY - h * 0.06f, tx, teethY + h * 0.07f, stroke)
+        }
     }
 }

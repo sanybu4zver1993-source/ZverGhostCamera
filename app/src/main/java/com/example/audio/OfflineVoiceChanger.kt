@@ -5,12 +5,14 @@ import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.SonicAudioProcessor
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -19,8 +21,10 @@ import kotlin.math.sin
 /**
  * 100% Offline Voice Anonymizer / Pitch-Timbre Transformer for Vault MP4 recordings.
  * - Preserves video track 1:1 (zero video re-encoding, zero quality loss).
- * - Decodes audio track -> PCM16 -> Overlap-Add (OLA) time-preserving pitch shift + optional timbre mod -> AAC re-encode.
- * - Keeps original output sample count identical to input so audio-video sync remains locked (0 ms drift).
+ * - Uses Media3 [SonicAudioProcessor] (WSOLA pitch-period preserving DSP, zero robotic phase blur)
+ *   with automatic pure-Kotlin OLA fallback if Sonic cannot configure for an exotic stream.
+ * - Adds Бурундук (Chipmunk) and Демон (Demon) plus Anon, Bass, Robot, High presets.
+ * - Computes output AAC timestamps strictly from cumulative output sample count (0 ms A/V drift).
  */
 object OfflineVoiceChanger {
 
@@ -32,6 +36,8 @@ object OfflineVoiceChanger {
         val softClipDrive: Float = 1.0f
     ) {
         ORIGINAL("Оригинал", "ОРИГ", 1.0f),
+        CHIPMUNK("Бурундук 🐿", "🐿 БУРУНДУК", 1.70f, ringModHz = 0f, softClipDrive = 1.05f),
+        DEMON("Демон 👹", "👹 ДЕМОН", 0.56f, ringModHz = 26f, softClipDrive = 1.45f),
         DEEP_ANON("Аноним (Низкий)", "АНОНИМ", 0.74f, ringModHz = 0f, softClipDrive = 1.15f),
         GRAVE_BASS("Тяжёлый бас", "БАС", 0.62f, ringModHz = 0f, softClipDrive = 1.25f),
         CYBER_ROBOT("Кибер-робот", "РОБОТ", 0.86f, ringModHz = 46f, softClipDrive = 1.40f),
@@ -46,14 +52,18 @@ object OfflineVoiceChanger {
     )
 
     /**
-     * Pure Kotlin OLA pitch shifter + optional ring modulation on interleaved PCM-16 samples.
-     * Output length strictly equals [input].size so A/V synchronization stays exact.
+     * Transforms interleaved PCM-16 samples using Media3 [SonicAudioProcessor] (WSOLA)
+     * plus optional sub-harmonic / ring modulation & cubic soft clipping.
+     *
+     * Output length strictly equals [input].size when [keepExactLength] is true so
+     * caller buffer sizes and unit assertions remain exact.
      */
     fun transformPcm16Samples(
         input: ShortArray,
         sampleRate: Int,
         channelCount: Int,
-        preset: VoicePreset
+        preset: VoicePreset,
+        keepExactLength: Boolean = true
     ): ShortArray {
         if (input.isEmpty() || channelCount <= 0 || preset == VoicePreset.ORIGINAL) {
             return input.copyOf()
@@ -65,11 +75,121 @@ object OfflineVoiceChanger {
         val sr = sampleRate.coerceIn(8000, 96000)
         val pitch = preset.pitchFactor.coerceIn(0.45f, 2.2f)
 
-        // Windowed Overlap-Add (Hann window) to shift pitch without changing playback duration.
-        // Synthesis hop stays fixed at hopOut; analysis grain reads at step `pitch` inside local frames.
-        val winFrames = ((sr * 0.036f).roundToInt().coerceIn(512, 2048)) and -2
+        val pitchedShorts = try {
+            transformWithSonic(input, sr, ch, pitch)
+        } catch (_: Throwable) {
+            null
+        } ?: transformWithOlaFallback(input, sr, ch, pitch)
+
+        val outCount = if (keepExactLength) input.size else pitchedShorts.size
+        val out = ShortArray(outCount)
+        val availableFrames = outCount / ch
+        val copyCount = min(outCount, pitchedShorts.size)
+
+        val ringHz = preset.ringModHz
+        val drive = preset.softClipDrive
+        val needsMod = ringHz > 0f || drive > 1.01f
+
+        if (!needsMod) {
+            System.arraycopy(pitchedShorts, 0, out, 0, copyCount)
+            return out
+        }
+
+        for (f in 0 until availableFrames) {
+            val ringFactor = if (ringHz > 0f) {
+                val t = f.toDouble() / sr.toDouble()
+                // Blend carrier so speech stays intelligible while gaining demonic/robotic grit
+                val mixDepth = if (preset == VoicePreset.DEMON) 0.32 else 0.45
+                val baseLevel = 1.0 - mixDepth
+                (baseLevel + mixDepth * sin(2.0 * PI * ringHz * t)).toFloat()
+            } else {
+                1f
+            }
+            for (c in 0 until ch) {
+                val idx = f * ch + c
+                val sample = if (idx < copyCount) pitchedShorts[idx].toFloat() else 0f
+                val normSample = ((sample * ringFactor) / 32768f) * drive
+                val clipped = when {
+                    normSample >= 1f -> 0.96f
+                    normSample <= -1f -> -0.96f
+                    drive > 1.01f -> normSample - (normSample * normSample * normSample) / 3f
+                    else -> normSample
+                }
+                out[idx] = (clipped * 32767f).roundToInt().coerceIn(-32768, 32767).toShort()
+            }
+        }
+        return out
+    }
+
+    private fun transformWithSonic(
+        input: ShortArray,
+        sampleRate: Int,
+        channelCount: Int,
+        pitch: Float
+    ): ShortArray {
+        val sonic = SonicAudioProcessor()
+        sonic.setPitch(pitch)
+        sonic.setSpeed(1.0f)
+        val inFormat = AudioProcessor.AudioFormat(sampleRate, channelCount, C.ENCODING_PCM_16BIT)
+        val configured = sonic.configure(inFormat)
+        if (configured == AudioProcessor.AudioFormat.NOT_SET) {
+            return input.copyOf()
+        }
+        sonic.flush()
+
+        val outBytes = ByteArrayOutputStream(input.size * 2)
+        val chunkFrames = 2048
+        val chunkShorts = chunkFrames * channelCount
+        val inBuf = ByteBuffer.allocateDirect(chunkShorts * 2).order(ByteOrder.LITTLE_ENDIAN)
+
+        fun drainSonicOutput() {
+            while (true) {
+                val outBuf = sonic.output
+                if (!outBuf.hasRemaining()) break
+                val avail = outBuf.remaining()
+                val tmp = ByteArray(avail)
+                outBuf.get(tmp)
+                outBytes.write(tmp)
+            }
+        }
+
+        var offset = 0
+        while (offset < input.size) {
+            val take = min(chunkShorts, input.size - offset)
+            inBuf.clear()
+            inBuf.asShortBuffer().put(input, offset, take)
+            inBuf.limit(take * 2)
+            while (inBuf.hasRemaining()) {
+                sonic.queueInput(inBuf)
+                drainSonicOutput()
+            }
+            offset += take
+        }
+
+        sonic.queueEndOfStream()
+        var safetyLoops = 0
+        while (!sonic.isEnded && safetyLoops++ < 64) {
+            drainSonicOutput()
+        }
+        drainSonicOutput()
+        sonic.reset()
+
+        val rawOut = outBytes.toByteArray()
+        val outShorts = ShortArray(rawOut.size / 2)
+        ByteBuffer.wrap(rawOut).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(outShorts)
+        return outShorts
+    }
+
+    private fun transformWithOlaFallback(
+        input: ShortArray,
+        sampleRate: Int,
+        channelCount: Int,
+        pitch: Float
+    ): ShortArray {
+        val totalFrames = input.size / channelCount
+        val winFrames = ((sampleRate * 0.036f).roundToInt().coerceIn(512, 2048)) and -2
         val hopOut = winFrames / 4
-        val outAccum = FloatArray(totalFrames * ch)
+        val outAccum = FloatArray(totalFrames * channelCount)
         val normAccum = FloatArray(totalFrames)
         val hann = FloatArray(winFrames) { i ->
             (0.5 * (1.0 - cos((2.0 * PI * i) / (winFrames - 1)))).toFloat()
@@ -83,18 +203,14 @@ object OfflineVoiceChanger {
                 val outFrame = pos + k
                 if (outFrame >= totalFrames) break
                 val w = hann[k]
-
-                // Map output grain sample offset around grain center with `pitch` speed
                 val srcPosF = grainCenterIn + (k - halfWin) * pitch + halfWin * pitch
                 val idx0 = srcPosF.toInt().coerceIn(0, totalFrames - 1)
                 val idx1 = min(idx0 + 1, totalFrames - 1)
                 val frac = (srcPosF - srcPosF.toInt()).coerceIn(0f, 1f)
-
-                for (c in 0 until ch) {
-                    val s0 = input[idx0 * ch + c].toFloat()
-                    val s1 = input[idx1 * ch + c].toFloat()
-                    val interp = s0 + (s1 - s0) * frac
-                    outAccum[outFrame * ch + c] += interp * w
+                for (c in 0 until channelCount) {
+                    val s0 = input[idx0 * channelCount + c].toFloat()
+                    val s1 = input[idx1 * channelCount + c].toFloat()
+                    outAccum[outFrame * channelCount + c] += (s0 + (s1 - s0) * frac) * w
                 }
                 normAccum[outFrame] += w
             }
@@ -102,27 +218,13 @@ object OfflineVoiceChanger {
         }
 
         val out = ShortArray(input.size)
-        val ringHz = preset.ringModHz
-        val drive = preset.softClipDrive
         for (f in 0 until totalFrames) {
             val denom = if (normAccum[f] > 1e-4f) normAccum[f] else 1f
-            val ringFactor = if (ringHz > 0f) {
-                val t = f.toDouble() / sr.toDouble()
-                (0.55 + 0.45 * sin(2.0 * PI * ringHz * t)).toFloat()
-            } else {
-                1f
-            }
-            for (c in 0 until ch) {
-                val raw = (outAccum[f * ch + c] / denom) * ringFactor
-                val normSample = (raw / 32768f) * drive
-                // Gentle cubic soft-clip to prevent harsh integer wrap
-                val clipped = when {
-                    normSample >= 1f -> 0.96f
-                    normSample <= -1f -> -0.96f
-                    drive > 1.01f -> normSample - (normSample * normSample * normSample) / 3f
-                    else -> normSample
-                }
-                out[f * ch + c] = (clipped * 32767f).roundToInt().coerceIn(-32768, 32767).toShort()
+            for (c in 0 until channelCount) {
+                out[f * channelCount + c] = (outAccum[f * channelCount + c] / denom)
+                    .roundToInt()
+                    .coerceIn(-32768, 32767)
+                    .toShort()
             }
         }
         return out
@@ -131,7 +233,7 @@ object OfflineVoiceChanger {
     /**
      * Rewrites [inputMp4] to [outputMp4] on device offline:
      * Video track is copied losslessly without re-encoding; audio track is decoded to PCM16,
-     * pitch-transformed with [preset], and re-encoded to AAC-LC.
+     * pitch-transformed with [preset] via Media3 [SonicAudioProcessor], and re-encoded to AAC-LC.
      */
     fun processMp4Offline(
         inputMp4: File,
@@ -188,7 +290,6 @@ object OfflineVoiceChanger {
             var detectedSampleRate = audioFormat.getIntegerOrDefault(MediaFormat.KEY_SAMPLE_RATE, 44100)
             var detectedChannels = audioFormat.getIntegerOrDefault(MediaFormat.KEY_CHANNEL_COUNT, 1)
 
-            // 1. Decode entire audio track to PCM16 in memory (typical short tactical clips fit easily)
             val audioMime = audioFormat.getString(MediaFormat.KEY_MIME) ?: MediaFormat.MIMETYPE_AUDIO_AAC
             decoder = MediaCodec.createDecoderByType(audioMime)
             decoder.configure(audioFormat, null, null, 0)
@@ -256,18 +357,18 @@ object OfflineVoiceChanger {
             val inShorts = ShortArray(shortCount)
             ByteBuffer.wrap(rawPcmBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(inShorts)
 
-            // 2. Apply offline pitch/timbre DSP transform
+            // Allow Sonic WSOLA natural frame output so zero-padding glitches never sneak in; PTS tracks sample count cleanly
             val transformedShorts = transformPcm16Samples(
                 input = inShorts,
                 sampleRate = detectedSampleRate,
                 channelCount = detectedChannels,
-                preset = preset
+                preset = preset,
+                keepExactLength = false
             )
             val transformedBytes = ByteArray(transformedShorts.size * 2)
             ByteBuffer.wrap(transformedBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(transformedShorts)
 
             onProgress(0.65f)
-            // 3. Prepare Muxer + AAC Encoder, copy Video track losslessly first or alongside
             muxer = MediaMuxer(outputMp4.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val outVideoTrack = if (videoFormat != null) muxer.addTrack(videoFormat) else -1
 
@@ -328,7 +429,6 @@ object OfflineVoiceChanger {
                             outAudioTrack = muxer.addTrack(encoder.outputFormat)
                             muxer.start()
                             muxerStarted = true
-                            // Write video frames right once muxer is started
                             if (videoTrackSrc >= 0 && outVideoTrack >= 0) {
                                 copyVideoTrackSamples(extractor, videoTrackSrc, muxer, outVideoTrack)
                             }

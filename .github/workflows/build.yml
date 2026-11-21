@@ -15,7 +15,7 @@ on:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Android APK (Debug + R8 Release)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -50,7 +50,8 @@ jobs:
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "apk_name=ZverCamera-${TAG}.apk" >> "$GITHUB_OUTPUT"
+          echo "apk_debug=ZverCamera-${TAG}-debug.apk" >> "$GITHUB_OUTPUT"
+          echo "apk_release=ZverCamera-${TAG}-release.apk" >> "$GITHUB_OUTPUT"
 
       - name: Create and Push Git Tag
         run: |
@@ -59,7 +60,7 @@ jobs:
           git tag -f ${{ steps.meta.outputs.tag }}
           git push origin -f ${{ steps.meta.outputs.tag }} || true
 
-      - name: Prepare environment & Keystore
+      - name: Prepare Keystores (Debug + Release)
         run: |
           touch .env
           touch .env.example
@@ -67,16 +68,29 @@ jobs:
             base64 -d debug.keystore.base64 > debug.keystore || base64 --decode debug.keystore.base64 > debug.keystore || true
           fi
           if [ ! -s "debug.keystore" ]; then
-            echo "Keystore not found or empty, generating debug.keystore with keytool..."
+            echo "Debug keystore not found or empty, generating debug.keystore with keytool..."
             keytool -genkeypair -alias androiddebugkey -keypass android -keystore debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
           fi
           cp -f debug.keystore app/debug.keystore || true
-          ls -lh debug.keystore
+
+          if [ -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
+            echo "Using repository RELEASE_KEYSTORE_BASE64 secret..."
+            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > release-upload.jks
+            echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/release-upload.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          else
+            echo "No RELEASE_KEYSTORE_BASE64 secret found; generating signed CI release keystore (alias=upload)..."
+            keytool -genkeypair -alias upload -keypass zver_ci_rel_2026 -keystore release-upload.jks -storepass zver_ci_rel_2026 -dname "CN=Zver Release,O=Zver,C=UA" -keyalg RSA -keysize 2048 -validity 10000
+            echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/release-upload.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=zver_ci_rel_2026" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=zver_ci_rel_2026" >> "$GITHUB_ENV"
+          fi
           if [ -f "./gradlew" ]; then
             chmod +x gradlew
           fi
 
-      - name: Run Unit Tests
+      - name: Run Unit & Robolectric Tests
         run: |
           if [ -f "./gradlew" ]; then
             ./gradlew :app:testDebugUnitTest --no-daemon
@@ -84,25 +98,32 @@ jobs:
             gradle :app:testDebugUnitTest --no-daemon
           fi
 
-      - name: Build Debug APK (Installable Direct APK)
+      - name: Build Debug & R8 Release APKs
         run: |
           if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug --no-daemon --stacktrace
+            ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
           else
-            gradle assembleDebug --no-daemon --stacktrace
+            gradle assembleDebug assembleRelease --no-daemon --stacktrace
           fi
           mkdir -p release_apks
-          cp app/build/outputs/apk/debug/app-debug.apk "release_apks/${{ steps.meta.outputs.apk_name }}"
+          cp app/build/outputs/apk/debug/app-debug.apk "release_apks/${{ steps.meta.outputs.apk_debug }}"
+          cp app/build/outputs/apk/release/app-release.apk "release_apks/${{ steps.meta.outputs.apk_release }}"
+          if [ -f "app/build/outputs/mapping/release/mapping.txt" ]; then
+            cp app/build/outputs/mapping/release/mapping.txt "release_apks/mapping-${{ steps.meta.outputs.tag }}.txt"
+          fi
+          if [ -f "app/build/outputs/logs/manifest-merger-release-report.txt" ]; then
+            cp app/build/outputs/logs/manifest-merger-release-report.txt "release_apks/manifest-merger-release-${{ steps.meta.outputs.tag }}.txt"
+          fi
           ls -lh release_apks/
 
-      - name: Upload APK Artifact
+      - name: Upload APKs & R8 Mapping Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ZverCamera-${{ steps.meta.outputs.tag }}
-          path: release_apks/${{ steps.meta.outputs.apk_name }}
+          path: release_apks/
           if-no-files-found: error
 
-      - name: Publish Versioned GitHub Release (Direct APK)
+      - name: Publish Versioned GitHub Release (Debug + Release APKs)
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
@@ -111,15 +132,19 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: release_apks/${{ steps.meta.outputs.apk_name }}
+          files: |
+            release_apks/${{ steps.meta.outputs.apk_release }}
+            release_apks/${{ steps.meta.outputs.apk_debug }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Attach APK to Manual Release Event
+      - name: Attach APKs to Manual Release Event
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: release_apks/${{ steps.meta.outputs.apk_name }}
+          files: |
+            release_apks/${{ steps.meta.outputs.apk_release }}
+            release_apks/${{ steps.meta.outputs.apk_debug }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

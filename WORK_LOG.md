@@ -279,3 +279,35 @@
 - **Сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
 - **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** живая синхронизация звука и GPU-видео по `GlVisorPtsNormalizer`, визуальное качество 4×4 CLAHE LUT в режиме `Анти-Туман` на Mali-G52 и замер поэтапного времени сохранения WebP в статусе — `UNVERIFIED` до проверки на телефоне.
 
+---
+
+## 2026-11-21 — P7 (Золотая середина А–В: Release APK R8/CI + Голос Бурундук/Демон + Стилизованные Маски + Симбиоз Координатора)
+
+### 1. Реализованные изменения
+- **Подписанный Release APK + R8 + GitHub Actions (`gradle/libs.versions.toml`, `app/build.gradle.kts`, `app/proguard-rules.pro`, `.github/workflows/build.yml`):**
+  - В `buildTypes.release` включены `isMinifyEnabled = true` и `isShrinkResources = true` (без изменения `signingConfigs` / `debug.keystore`).
+  - Добавлены R8-правила в `app/proguard-rules.pro` для CameraX/Camera2/Extensions, ML Kit JNI и `@UsedByNative`, Media3 `SonicAudioProcessor`/`Sonic`, RootBeer JNI, OkHttp 4.10 и Coroutines.
+  - В `.github/workflows/build.yml` добавлена сборка `assembleRelease` наряду с `assembleDebug`: при наличии GitHub Secrets (`RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_PASSWORD`) используется постоянный ключ загрузки, иначе генерируется CI `release-upload.jks` (`alias=upload`); в артефакты и GitHub Release прикладываются `ZverCamera-<tag>-release.apk`, `ZverCamera-<tag>-debug.apk` и `mapping-<tag>.txt`.
+- **Апгрейд офлайн-войсченджера (`OfflineVoiceChanger.kt`, `GhostVaultDialog.kt`):**
+  - Подключён `androidx.media3:media3-common:1.5.1` (`SonicAudioProcessor` WSOLA — изменение высоты тона без сдвига темпа/длительности и роботизированного фазового смазывания, с автоматическим fallback на чистый Kotlin OLA).
+  - Добавлены пресеты **`CHIPMUNK` (`"Бурундук 🐿"`, pitch `1.70x`)** и **`DEMON` (`"Демон 👹"`, pitch `0.56x`, кольцевая sub-модуляция `26 Гц`, мягкое насыщение `1.45x`)**; в `GhostVaultDialog` пресетом по умолчанию поставлен `CHIPMUNK`.
+  - В `processMp4Offline` таймстампы AAC считаются строго от суммарного числа выходных сэмплов (`keepExactLength = false`), а в `transformPcm16Samples` сохранена обратная совместимость режима `keepExactLength = true`.
+- **Стилизованные маски приватности и своя PNG-маска (`OfflinePrivacyEngine.kt`, `PrivacyEditorDialog.kt`):**
+  - В `OfflinePrivacyEngine` добавлены `MaskPreset` (`CLOWN`, `WOLF`, `FOX`, `CAT`, `BEAR`, `SKULL`, `CUSTOM_PNG`), поле `rollDeg` из `Face.headEulerAngleZ` и `computeScaledMaskBounds(...)`.
+  - Вместо старого чёрного прямоугольника с полоской реализован векторный полнолицевой Canvas-рендер (клоун с кудрями/колпаком/красным носом, волк, лиса, кот с усами, медведь, кибер-череп) и наложение прозрачной PNG-маски с сохранением пропорций и наклона головы.
+  - В `PrivacyEditorDialog` подключён zero-permission `ActivityResultContracts.PickVisualMedia()` для выбора своей картинки/PNG (даунскейл `<= 1024px`, `ARGB_8888`, проверка альфа-канала), панель выбора масок и слайдер масштаба `60%–220%` с кнопками `−`/`+`.
+- **Архитектурный симбиоз стабильности (`CameraBindingCoordinator.kt`, `CaptureManager.kt`, `GlVisorDualRenderer.kt`, `CameraOverlayComponents.kt`, `GhostCameraScreen.kt`):**
+  - Создан `CameraBindingCoordinator.kt`: `CameraTab` и `CameraUiState` (единая изоляция оверлеев), `ThermalThrottleController` (слушатель `PowerManager.OnThermalStatusChangedListener` с динамическим интервалом анализа `230 / 350 / 650 / 1400 / 1800 мс` для MT6769Z), и `CameraBindingCoordinator` (`androidx.camera:camera-extensions:1.5.0` строго только для режима `NIGHT` без GPU-визора, генерационный токен и 1500 мс first-frame watchdog с безопасным откатом на базовый `CameraSelector`).
+  - В `CaptureManager.kt` запись в 1 ГБ `MonoVaultEngine.appendRecord(...)` вынесена в сериализованную фоновую очередь `Dispatchers.IO.limitedParallelism(1)` с клонированием и последующим обнулением копии буфера, чтобы `fd.sync()` монолита не тормозил съёмку фото.
+  - В `GlVisorDualRenderer.kt` поднят таймаут `detachEncoderSurfaceBlocking()` с `400 мс` до `1500 мс` и добавлен сигнал первого кадра `onFirstFrameRendered` для watchdog.
+  - В `GhostCameraScreen.kt` и `CameraOverlayComponents.kt` подключены `CameraBindingCoordinator`, `ThermalThrottleController`, `CameraUiState`, наблюдение `PreviewView.previewStreamState == STREAMING` и фоновая отправка в `MonoVaultEngine`.
+- **Тесты (`P7SymbiosisAndFeaturesTest.kt`):**
+  - Добавлено 4 Robolectric-теста (`Media3 Sonic CHIPMUNK/DEMON`, нативный `@GraphicsMode(NATIVE)` рендер всех `MaskPreset` + `CUSTOM_PNG` + `computeScaledMaskBounds`, `CameraUiState` + допустимость `ExtensionsManager`, `ThermalThrottleController`).
+
+### 2. Верификация P7
+- **Команда:** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL**, **70/70 PASS** (`0 failures, 0 errors, 0 skipped` по 16 тестовым классам, включая `P7SymbiosisAndFeaturesTest`: 4/4 PASS).
+- **Debug-сборка:** `compile_applet` -> **Build succeeded - the applet is compiled**.
+- **Release R8-сборка:** `KEYSTORE_PATH=/tmp/ci_test.jks ... gradle :app:assembleRelease --console=plain` -> **BUILD SUCCESSFUL in 4m 54s** (`minifyReleaseWithR8` + `shrinkResources` пройдены без ошибок, временный `/tmp/ci_test.jks` удалён).
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15) и в GitHub Actions:** реальная работа Night Extension на HAL MT6769Z, качество звука Sonic на роликах из Сейфа, наложение стилизованных масок на реальных фото и выпуск артефактов на GitHub — `UNVERIFIED` до проверки пользователем.
+
+

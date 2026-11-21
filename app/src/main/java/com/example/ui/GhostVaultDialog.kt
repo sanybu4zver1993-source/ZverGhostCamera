@@ -113,7 +113,7 @@ fun GhostVaultDialog(
     var isDecrypting by remember { mutableStateOf(false) }
 
     // Offline Voice Changer states for decrypted MP4 playback & saving
-    var selectedVoicePreset by remember { mutableStateOf(OfflineVoiceChanger.VoicePreset.DEEP_ANON) }
+    var selectedVoicePreset by remember { mutableStateOf(OfflineVoiceChanger.VoicePreset.CHIPMUNK) }
     var voicePreviewFile by remember { mutableStateOf<File?>(null) }
     var isTransformingVoice by remember { mutableStateOf(false) }
     var voiceTransformProgress by remember { mutableStateOf(0f) }
