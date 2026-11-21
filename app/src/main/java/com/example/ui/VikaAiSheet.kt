@@ -82,6 +82,7 @@ fun VikaAiSheet(
     val chatFeed by ByokManager.chatHistoryFlow.collectAsState()
     val aiStats by ByokManager.sessionStatsFlow.collectAsState()
     val httpLogs by ByokManager.httpLogsFlow.collectAsState()
+    val transportConfig by ByokManager.transportConfigFlow.collectAsState()
 
     val hasMediaSource = externalBitmap != null || externalVideoFile != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null
     var frameMode by remember {
@@ -166,12 +167,16 @@ fun VikaAiSheet(
     suspend fun runOfflineSymbiosisFallback(
         userTask: String,
         fallbackReason: String?,
-        precomputedReport: LocalSymbiosisCvEngine.SymbiosisReport? = null
+        precomputedReport: LocalSymbiosisCvEngine.SymbiosisReport? = null,
+        systemOverride: String? = null
     ) {
         val t0 = System.currentTimeMillis()
         var capturedOfflineBmp: Bitmap? = null
         try {
+            val intent = LocalSymbiosisCvEngine.classifyOfflineIntent(userTask, systemOverride)
+            val needFrameAnalysis = intent != LocalSymbiosisCvEngine.OfflineTaskIntent.STATS_AUDIT
             val report: LocalSymbiosisCvEngine.SymbiosisReport? = when {
+                !needFrameAnalysis -> null
                 precomputedReport != null -> precomputedReport
                 externalBitmap != null -> withContext(Dispatchers.Default) {
                     LocalSymbiosisCvEngine.analyzeSymbiosis(
@@ -202,9 +207,9 @@ fun VikaAiSheet(
 
             val textOut = withContext(Dispatchers.Default) {
                 if (report != null) {
-                    LocalSymbiosisCvEngine.buildOfflineVikaReport(report, userTask, fallbackReason)
+                    LocalSymbiosisCvEngine.buildOfflineVikaReport(report, userTask, fallbackReason, systemOverride)
                 } else {
-                    "⚡ РЕЖИМ МАЛЫШЕЙ ОФЛАЙН: кадра нет под рукой, а текстовый запрос без сети в облако не уйдёт.\n\n${VaultAnalytics.buildTelemetrySummaryForAi(context)}"
+                    LocalSymbiosisCvEngine.buildOfflineTextOnlyReply(context, userTask, systemOverride)
                 }
             }
 
@@ -256,7 +261,7 @@ fun VikaAiSheet(
 
             try {
                 if (forceLocalOnly) {
-                    runOfflineSymbiosisFallback(userTask, fallbackReason = null)
+                    runOfflineSymbiosisFallback(userTask, fallbackReason = null, systemOverride = systemOverride)
                     return@launch
                 }
 
@@ -265,7 +270,7 @@ fun VikaAiSheet(
                 if (keyChars == null || keyChars.isEmpty() || !online) {
                     keyChars?.let { Arrays.fill(it, '0') }
                     val why = if (!online) "нет сети" else "ключ не задан"
-                    runOfflineSymbiosisFallback(userTask, fallbackReason = why)
+                    runOfflineSymbiosisFallback(userTask, fallbackReason = why, systemOverride = systemOverride)
                     return@launch
                 }
 
@@ -472,7 +477,8 @@ fun VikaAiSheet(
                         userPrompt = fullTask,
                         imageBytes = imageBytes,
                         imageMimeType = mimeType,
-                        extraImages = extraCrops
+                        extraImages = extraCrops,
+                        transportConfig = transportConfig
                     )
 
                     res.onSuccess { ok ->
@@ -485,7 +491,7 @@ fun VikaAiSheet(
                                 latencyMs = ok.latencyMs,
                                 totalTokens = ok.totalTokens,
                                 isError = false,
-                                engineBadge = engineBadge
+                                engineBadge = "$engineBadge • ${transportConfig.describeShort()}"
                             )
                         )
                     }.onFailure { err ->
@@ -494,7 +500,8 @@ fun VikaAiSheet(
                             runOfflineSymbiosisFallback(
                                 userTask = userTask,
                                 fallbackReason = "Gemini недоступен: ${msg.take(45)}",
-                                precomputedReport = cachedLocalReport
+                                precomputedReport = cachedLocalReport,
+                                systemOverride = systemOverride
                             )
                             return@launch
                         } else {
@@ -620,7 +627,7 @@ fun VikaAiSheet(
                         }
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = if (hasKey) "МОДЕЛЬ: $selectedModel" else "КЛЮЧ НЕ ЗАДАН (ЛОКАЛЬНАЯ СТАТА ДОСТУПНА)",
+                            text = if (hasKey) "МОДЕЛЬ: $selectedModel • ${transportConfig.describeShort()}" else "КЛЮЧ НЕ ЗАДАН (${transportConfig.describeShort()})",
                             color = if (hasKey) CyberCyan else CyberAmber,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp,
@@ -771,6 +778,7 @@ fun VikaAiSheet(
                             selectedModel = selectedModel,
                             discoveredModels = discoveredModels,
                             customPrompt = customPrompt,
+                            transportConfig = transportConfig,
                             isFetchingModels = isFetchingModels,
                             modelStatusText = modelStatusText,
                             httpLogs = httpLogs,

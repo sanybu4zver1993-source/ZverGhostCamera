@@ -88,10 +88,35 @@ class MainActivity : ComponentActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            val callback = onVolumeShutterTrigger
-            if (callback != null) {
-                callback.invoke()
-                return true
+            when (ZverPrefs.getVolumeKeyAction(this)) {
+                ZverPrefs.VolumeKeyAction.SHUTTER_OR_VIDEO -> {
+                    onVolumeShutterTrigger?.let {
+                        it.invoke()
+                        return true
+                    }
+                }
+                ZverPrefs.VolumeKeyAction.STEALTH_BLACKOUT -> {
+                    onBlackoutToggleTrigger?.let {
+                        it.invoke()
+                        return true
+                    }
+                }
+                ZverPrefs.VolumeKeyAction.PANIC_LOCK_GATE -> {
+                    GhostCryptoVault.lockSession()
+                    ByokManager.clearSessionMemory()
+                    SentinelEngine.clearSession()
+                    com.example.security.SecureClipboard.clearIfOwned(this)
+                    onLockGateTrigger?.let {
+                        it.invoke()
+                        return true
+                    }
+                }
+                ZverPrefs.VolumeKeyAction.TORCH_TOGGLE -> {
+                    onTorchToggleTrigger?.let {
+                        it.invoke()
+                        return true
+                    }
+                }
             }
         }
         return super.onKeyDown(keyCode, event)

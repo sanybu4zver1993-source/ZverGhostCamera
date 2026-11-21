@@ -63,6 +63,7 @@ fun GhostSettingsDialog(
     onSelectMode: (String) -> Unit = {},
     onOpenPinSetup: () -> Unit = {},
     onOpenVikaSheet: () -> Unit = {},
+    onOpenSelfTest: () -> Unit = {},
     onCamouflageChanged: (CamouflageManager.CamouflageMode) -> Unit = {},
     boundUseCasesSummary: String = "N/A"
 ) {
@@ -98,6 +99,8 @@ fun GhostSettingsDialog(
     var zebraThreshold by remember { mutableStateOf(ZverPrefs.getZebraThreshold(context)) }
     var smartCompression by remember { mutableStateOf(ZverPrefs.isSmartCompressionEnabled(context)) }
     var currentCamo by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
+    var volumeAction by remember { mutableStateOf(ZverPrefs.getVolumeKeyAction(context)) }
+    val transportConfig by ByokManager.transportConfigFlow.collectAsState()
     val strongBoxCapable = remember { ByokManager.isStrongBoxSupported(context) }
     val cameraDiagReport = remember(boundUseCasesSummary) {
         CameraDiagnostics.buildTextReport(context, boundUseCasesSummary)
@@ -413,17 +416,65 @@ fun GhostSettingsDialog(
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Button(
-                                onClick = {
-                                    onDismiss()
-                                    onOpenPinSetup()
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
-                                shape = RoundedCornerShape(6.dp),
-                                modifier = Modifier.fillMaxWidth()
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("АППАРАТНЫЕ КНОПКИ ГРОМКОСТИ (±):", color = CyberMuted, fontSize = 10.sp)
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(vertical = 4.dp)
                             ) {
-                                Text("НАСТРОИТЬ 3 PIN (DURESS)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                ZverPrefs.VolumeKeyAction.values().forEach { act ->
+                                    val sel = volumeAction == act
+                                    Text(
+                                        text = act.labelRu,
+                                        color = if (sel) Color.Black else Color.White,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) NeonCyan else CyberSurface)
+                                            .border(1.dp, if (sel) NeonCyan else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                volumeAction = act
+                                                ZverPrefs.setVolumeKeyAction(context, act)
+                                                onStatusMessage("ГРОМКОСТЬ (±): ${act.labelRu}")
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                                            .testTag("settings_vol_${act.name.lowercase()}")
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        onDismiss()
+                                        onOpenPinSetup()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).heightIn(min = 44.dp)
+                                ) {
+                                    Text("3 PIN (DURESS)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Button(
+                                    onClick = {
+                                        onDismiss()
+                                        onOpenSelfTest()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan.copy(alpha = 0.2f)),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("settings_open_selftest_btn")
+                                ) {
+                                    Text("🧪 SELF-TEST", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(6.dp))
@@ -487,10 +538,10 @@ fun GhostSettingsDialog(
 
                             Spacer(modifier = Modifier.height(10.dp))
 
-                            // Section 1: API Key
+                            // Section 1: API Key & Encrypted Channel
                             Text("1. КЛЮЧ API GEMINI (BYOK)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "Ключ шифруется в ${if (strongBoxCapable) "StrongBox" else "Hardware TEE"} KeyStore. После сохранения подтянет реальные модели твоего ключа.",
+                                "Канал: ${transportConfig.describeShort()} (TLS 1.3/1.2). Ключ шифруется в ${if (strongBoxCapable) "StrongBox" else "Hardware TEE"} KeyStore.",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
                                 modifier = Modifier.padding(vertical = 4.dp)

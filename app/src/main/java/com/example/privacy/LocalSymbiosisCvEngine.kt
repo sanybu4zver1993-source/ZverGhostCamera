@@ -204,84 +204,258 @@ object LocalSymbiosisCvEngine {
         }
     }
 
+    enum class OfflineTaskIntent {
+        OCR_TEXT,
+        OSINT_AUDIT,
+        SENTINEL_DOZOR,
+        OPTICS_FORENSIC,
+        STATS_AUDIT,
+        SCENE_GENERAL
+    }
+
+    fun classifyOfflineIntent(userTask: String, systemPrompt: String? = null): OfflineTaskIntent {
+        val t = userTask.lowercase()
+        val s = systemPrompt.orEmpty().lowercase()
+        return when {
+            t.contains("ocr") || t.contains("текст") || t.contains("прочит") || t.contains("бумаг") ||
+                t.contains("документ") || t.contains("печат") || t.contains("таблиц") || t.contains("сумм") ||
+                s.contains("строгий ocr") -> OfflineTaskIntent.OCR_TEXT
+
+            t.contains("osint") || t.contains("палев") || t.contains("утеч") || t.contains("риск") ||
+                t.contains("номер") || t.contains("вывеск") || t.contains("отражен") ||
+                s.contains("режим osint") -> OfflineTaskIntent.OSINT_AUDIT
+
+            t.contains("дозор") || t.contains("угроз") || t.contains("опасн") || t.contains("форма") ||
+                t.contains("шеврон") || t.contains("кто в") || t.contains("порог") ||
+                s.contains("кибер-дозор") -> OfflineTaskIntent.SENTINEL_DOZOR
+
+            t.contains("форенз") || t.contains("резкост") || t.contains("смаз") || t.contains("мыл") ||
+                t.contains("свет") || t.contains("экспозиц") || t.contains("шум") ||
+                s.contains("форензик") -> OfflineTaskIntent.OPTICS_FORENSIC
+
+            t.contains("стат") || t.contains("сейф") || t.contains("телеметр") ||
+                t.contains("защит") || s.contains("аналитик телеметрии") -> OfflineTaskIntent.STATS_AUDIT
+
+            else -> OfflineTaskIntent.SCENE_GENERAL
+        }
+    }
+
     /**
-     * Builds an honest, concise, Vika-styled offline report when internet is unavailable,
-     * no API key is configured, Gemini 429 quota is exhausted, or user runs "Малыши Офлайн".
+     * Builds an honest, task-specific report from all 6 local bundled ML Kit + CV analyzers
+     * when internet is unavailable, API key is unset, quota is exhausted, or offline mode is chosen.
      */
     fun buildOfflineVikaReport(
         report: SymbiosisReport,
         userTask: String,
-        fallbackReason: String? = null
+        fallbackReason: String? = null,
+        systemPrompt: String? = null
     ): String = buildString {
-        if (!fallbackReason.isNullOrBlank()) {
-            append("⚡ АВТО-ПЕРЕКЛЮЧЕНИЕ НА МАЛЫШЕЙ ОФЛАЙН ($fallbackReason)\n")
+        val intent = classifyOfflineIntent(userTask, systemPrompt)
+        val headerPrefix = if (!fallbackReason.isNullOrBlank()) {
+            "⚡ 6 МАЛЫШЕЙ ОФЛАЙН (АВТО-ПЕРЕКЛЮЧЕНИЕ: $fallbackReason)"
         } else {
-            append("⚡ ЛОКАЛЬНЫЙ СИМБИОЗ 6-NN (0 БАЙТ В СЕТЬ, ${report.inferenceMs} мс)\n")
+            "⚡ 6 МАЛЫШЕЙ ОФЛАЙН (0 БАЙТ В СЕТЬ • ${report.inferenceMs} мс)"
         }
+        append(headerPrefix)
+        append(" • [${intent.name}]\n")
         if (userTask.isNotBlank()) {
-            append("Задача: ${userTask.take(90)}\n")
+            append("Запрос: «${userTask.trim().take(90)}»\n")
         }
 
-        append("\n• [ЧЁ ПО КАДРУ]: ")
-        val summaryParts = mutableListOf<String>()
-        if (report.faces.isNotEmpty()) {
-            val yaw = report.faces.first().yawDeg.toInt()
-            summaryParts.add("лиц: ${report.faces.size} (ракурс ${yaw}°)")
-        }
-        if (report.pose.detected) {
-            summaryParts.add("силуэт/поза: ${report.pose.postureRu}")
-        }
-        report.skinMetrics?.takeIf { it.isCoherentSkinPresent }?.let { sm ->
-            val pct = (sm.skinFraction * 100f).toInt()
-            val extra = if (report.faces.isEmpty()) " — открытая кожа/силуэт без лица в анфас" else ""
-            summaryParts.add("кожа YCbCr $pct%$extra")
-        }
-        if (report.objects.isNotEmpty()) {
-            summaryParts.add(
-                "объекты: " + report.objects.take(4).joinToString {
-                    "${it.label} ${(it.confidence * 100).toInt()}%"
+        when (intent) {
+            OfflineTaskIntent.OCR_TEXT -> {
+                append("\n📝 [OCR ЭКСТРАКТОР]:\n")
+                if (report.extractedText.isNotBlank()) {
+                    append(report.extractedText.trim().take(700))
+                    append("\n")
+                } else {
+                    append("Текст в кадре не распознан.\n")
                 }
-            )
-        }
-        if (summaryParts.isEmpty()) {
-            append("крупных лиц/объектов не выделено")
-        } else {
-            append(summaryParts.joinToString(" | "))
-        }
-        append("\n")
+                append("\n• [ЧИТАЕМОСТЬ]: свет ${report.quality.avgLuma}/255, резкость ${report.quality.sharpnessScore}")
+                if (report.quality.isBlurry) append(" — сильный смаз, сними ближе/ровнее")
+                if (report.quality.isLowLight) append(" — темно, включи фонарик или Ч/Б Документ")
+                append("\n")
+                if (report.osintReport.warnings.isNotEmpty()) {
+                    append("• [НАЙДЕННЫЕ ДАННЫЕ В ТЕКСТЕ]: ${report.osintReport.warnings.joinToString("; ")}\n")
+                }
+            }
 
-        if (report.sceneTags.isNotEmpty()) {
-            append("• [ТЕГИ СЦЕНЫ]: ")
-            append(report.sceneTags.take(7).joinToString(", ") { "${it.label} ${(it.confidence * 100).toInt()}%" })
-            append("\n")
+            OfflineTaskIntent.OSINT_AUDIT -> {
+                append("\n🕵️ [OSINT-ПАЛЕВО: ${report.osintReport.riskScore}/100]:\n")
+                if (report.osintReport.warnings.isNotEmpty()) {
+                    report.osintReport.warnings.forEach { w -> append("• ⚠ $w\n") }
+                } else {
+                    append("• Явных координат, документов или читаемых номеров локально не найдено.\n")
+                }
+                if (report.faces.isNotEmpty()) {
+                    append("• Лиц в кадре: ${report.faces.size} (углы: ${report.faces.joinToString { "${it.yawDeg.toInt()}°" }}) — рекомендуется маска.\n")
+                }
+                if (report.extractedText.isNotBlank()) {
+                    append("• Засвеченный текст: «${report.extractedText.replace('\n', ' ').trim().take(200)}»\n")
+                }
+                if (report.sceneTags.isNotEmpty()) {
+                    append("• Окружение по тегам: ${report.sceneTags.take(5).joinToString { it.label }}\n")
+                }
+                append("• [ДЕЙСТВИЕ]: ")
+                append(
+                    if (report.osintReport.riskScore >= 40 || report.faces.isNotEmpty()) {
+                        "Открой снимок в Сейфе -> «МАСКА» и затри лица/надписи до отправки."
+                    } else {
+                        "Критичных зацепок малыши не увидели; перед публикацией всё равно прогони АУДИТ."
+                    }
+                )
+            }
+
+            OfflineTaskIntent.SENTINEL_DOZOR -> {
+                append("\n🛡️ [КИБЕР-ДОЗОР 6-NN]:\n")
+                val peopleHint = buildList {
+                    if (report.faces.isNotEmpty()) add("лиц: ${report.faces.size}")
+                    if (report.pose.detected) add("скелет: ${report.pose.postureRu}")
+                    report.foregroundCoveragePct?.let { add("фигура в кадре ~${it.toInt()}%") }
+                    report.skinMetrics?.takeIf { it.isCoherentSkinPresent && report.faces.isEmpty() }?.let {
+                        add("кожа YCbCr ${(it.skinFraction * 100f).toInt()}% (лицо отвёрнуто/скрыто)")
+                    }
+                }
+                if (peopleHint.isEmpty()) {
+                    append("• В кадре людей, поз и лиц не обнаружено.\n")
+                } else {
+                    append("• Обнаружено: ${peopleHint.joinToString(" • ")}\n")
+                }
+                if (report.objects.isNotEmpty()) {
+                    append("• Объекты рядом: ${report.objects.take(4).joinToString { "${it.label} (${(it.confidence * 100).toInt()}%)" }}\n")
+                }
+                append("• Освещённость: ${report.quality.avgLuma}/255")
+                append(if (report.quality.isLowLight) " (ТЕМНО — рекомендуется CLAHE анти-блик)\n" else " (норма)\n")
+                append("• [ЧЕСТНЫЙ СТАТУС]: Локальные модели не угадывают цвет/тип формы (пиксель vs гражданка) по размытым силуэтам — для точного опознания нужен Gemini по тексту/кропу.")
+            }
+
+            OfflineTaskIntent.OPTICS_FORENSIC -> {
+                append("\n🔬 [ОПТИКА И ФОРЕНЗИК]:\n")
+                append("• Яркость кадра: ${report.quality.avgLuma}/255 ")
+                append(if (report.quality.isLowLight) "(недосвет)\n" else "(норм)\n")
+                append("• Резкость (edge-градиент): ${report.quality.sharpnessScore} ")
+                append(if (report.quality.isBlurry) "(МЫЛО/СМАЗ — ниже порога 14)\n" else "(резко)\n")
+                report.foregroundCoveragePct?.let {
+                    append("• Заполнение передним планом: ${it.toInt()}%\n")
+                }
+                append("• [СОВЕТ КАМЕРЕ]: ")
+                when {
+                    report.quality.isLowLight && report.quality.isBlurry ->
+                        append("Увеличь свет/фонарик, включи Anti-Blur или профиль NIGHT + CLAHE.")
+                    report.quality.isBlurry ->
+                        append("Тапни по экрану для фокуса, держи телефон двумя руками или включи Focus Peaking.")
+                    report.quality.isLowLight ->
+                        append("Подними +0.5/+1.0 EV в PRO-панели или сними через NIGHT/Мульти-стек.")
+                    else ->
+                        append("Экспозиция и резкость в норме, кадр пригоден для OCR/OSINT и архива.")
+                }
+            }
+
+            OfflineTaskIntent.STATS_AUDIT,
+            OfflineTaskIntent.SCENE_GENERAL -> {
+                val summaryParts = buildList {
+                    if (report.faces.isNotEmpty()) {
+                        add("лиц: ${report.faces.size} (ракурс ${report.faces.first().yawDeg.toInt()}°)")
+                    }
+                    if (report.pose.detected) add("поза: ${report.pose.postureRu}")
+                    report.foregroundCoveragePct?.takeIf { it >= 3f }?.let { add("силуэт: ${it.toInt()}%") }
+                    report.skinMetrics?.takeIf { it.isCoherentSkinPresent && report.faces.isEmpty() }?.let { sm ->
+                        add("кожа YCbCr ${(sm.skinFraction * 100f).toInt()}%")
+                    }
+                    if (report.objects.isNotEmpty()) {
+                        add("объекты: ${report.objects.take(4).joinToString { "${it.label} ${(it.confidence * 100).toInt()}%" }}")
+                    }
+                }
+                append("\n• [ЧЁ ПО КАДРУ]: ")
+                append(if (summaryParts.isEmpty()) "крупных лиц/объектов не выделено" else summaryParts.joinToString(" | "))
+                append("\n")
+
+                if (report.sceneTags.isNotEmpty()) {
+                    append("• [ТЕГИ 400-NN]: ${report.sceneTags.take(7).joinToString(", ") { "${it.label} ${(it.confidence * 100).toInt()}%" }}\n")
+                }
+                append("• [ОПТИКА]: свет ${report.quality.avgLuma}/255")
+                if (report.quality.isLowLight) append(" (темновато)")
+                append(", резкость ${report.quality.sharpnessScore}")
+                if (report.quality.isBlurry) append(" (смаз!)")
+                append("\n")
+
+                if (report.extractedText.isNotBlank()) {
+                    append("• [OCR]: ${report.extractedText.trim().take(280)}\n")
+                }
+                if (report.osintReport.warnings.isNotEmpty()) {
+                    append("• [ПАЛЕВО ${report.osintReport.riskScore}/100]: ${report.osintReport.warnings.joinToString("; ")}\n")
+                }
+                append("• [ВЕРДИКТ]: ")
+                when {
+                    report.quality.isBlurry && report.quality.isLowLight ->
+                        append("Темно и мыльно — сними ближе со светом или CLAHE.")
+                    report.osintReport.riskScore >= 50 ->
+                        append("Есть риск засвета (палево ${report.osintReport.riskScore}/100) — прогони «МАСКА» в Сейфе.")
+                    summaryParts.isEmpty() && report.sceneTags.isEmpty() && report.extractedText.isBlank() ->
+                        append("Сцена без явных объектов для локальных ML Kit весов; для детального описания подключи BYOK ключ + сеть.")
+                    else ->
+                        append("Все активные локальные модели отработали чисто (0 байт в сеть).")
+                }
+            }
         }
+    }
 
-        append("• [ОПТИКА]: свет ${report.quality.avgLuma}/255")
-        if (report.quality.isLowLight) append(" (темновато, включай CLAHE)")
-        append(", резкость ${report.quality.sharpnessScore}")
-        if (report.quality.isBlurry) append(" (есть смаз!)")
-        append("\n")
+    /**
+     * Text-only offline fallback when no image is attached and cloud Gemini is unavailable:
+     * produces focused, context-aware answers instead of one static template string.
+     */
+    fun buildOfflineTextOnlyReply(
+        context: android.content.Context,
+        userTask: String,
+        systemPrompt: String? = null
+    ): String {
+        val t = userTask.lowercase()
+        val intent = classifyOfflineIntent(userTask, systemPrompt)
+        return when {
+            intent == OfflineTaskIntent.STATS_AUDIT || t.contains("стат") || t.contains("защит") ->
+                "📊 ЛОКАЛЬНЫЙ АУДИТ (ОФЛАЙН)\n\n${com.example.security.VaultAnalytics.buildTelemetrySummaryForAi(context)}"
 
-        if (report.extractedText.isNotBlank()) {
-            append("• [OCR ТЕКСТ]: ${report.extractedText.trim().take(280)}\n")
-        }
+            t.contains("ключ") || t.contains("tor") || t.contains("orbot") || t.contains("прокси") || t.contains("слив") || t.contains("api") -> {
+                val cfg = com.example.assist.ByokManager.getTransportConfig(context)
+                val hasKey = com.example.assist.ByokManager.hasKey(context)
+                val strongBox = com.example.assist.ByokManager.isStrongBoxSupported(context)
+                buildString {
+                    appendLine("🔐 BYOK-КАНАЛ ВИКИ (ОФЛАЙН-СПРАВКА):")
+                    appendLine("• Ключ в KeyStore: ${if (hasKey) "СОХРАНЁН" else "НЕ ЗАДАН"} (${if (strongBox) "StrongBox" else "Hardware TEE"})")
+                    appendLine("• Канал: ${cfg.describeShort()} • TLS 1.3/1.2 • HTTP-кеш = 0")
+                    appendLine("• В облако идут ТОЛЬКО очищенные от EXIF/GPS байты и твой запрос; аналитика Google/Clearcut вырезана.")
+                    append("• Для работы через Tor/Orbot включи SOCKS5 (127.0.0.1:9050) во вкладке «Ключ и Модели».")
+                }
+            }
 
-        if (report.osintReport.warnings.isNotEmpty()) {
-            append("• [ПАЛЕВО ${report.osintReport.riskScore}/100]: ${report.osintReport.warnings.joinToString("; ")}\n")
-        } else {
-            append("• [ПАЛЕВО]: явных лиц/номеров/координат локально не засвечено.\n")
-        }
+            t.contains("бэкап") || t.contains("zvb") || t.contains("перенос") || t.contains("сейф") || t.contains("gcf") -> {
+                val filesCount = com.example.crypto.GhostCryptoVault.listVaultFiles(context).size
+                val ramCount = com.example.crypto.GhostCryptoVault.listRamShots().size
+                buildString {
+                    appendLine("📦 СЕЙФ И ПЕРЕНОС ДАННЫХ:")
+                    appendLine("• В активном профиле: $filesCount файлов (.gcf) + $ramCount в ОЗУ.")
+                    appendLine("• Новые видео шифруются чанковым потоком GCF2 (256 КБ чанки, воспроизведение через MediaDataSource без забивания 4 ГБ ОЗУ).")
+                    append("• Для переноса между debug/release APK или на новый телефон открой Сейф → «.ZVB ЭКСПОРТ» с мастер-паролем.")
+                }
+            }
 
-        append("• [ВЕРДИКТ ВИКИ]: ")
-        when {
-            report.quality.isBlurry && report.quality.isLowLight ->
-                append("Темно и мыльновато — пересними ближе или вруби CLAHE, иначе даже облако гадать начнёт.")
-            report.osintReport.riskScore >= 50 ->
-                append("Жирное палево в кадре, перед выгрузкой прогони через «МАСКА» в Сейфе!")
-            report.faces.isEmpty() && report.objects.isEmpty() && report.sceneTags.isEmpty() ->
-                append("Локальные малыши в замешательстве — тут нужна тяжёлая артиллерия Gemini, когда появится сеть/лимит.")
-            else ->
-                append("Картина ясная: локальный конвейер всё разложил без единого байта трафика.")
+            t.contains("камер") || t.contains("размы") || t.contains("темно") || t.contains("голос") || t.contains("маск") -> {
+                buildString {
+                    appendLine("📸 ПОДСКАЗКА ПО СЪЁМКЕ (ОФЛАЙН):")
+                    appendLine("• В темноте без смаза: включай «НОЧЬ» / CLAHE или Anti-Blur.")
+                    appendLine("• Скрыть лицо/фон перед отправкой: открой кадр в Сейфе → «МАСКА» (маски клоуна/зверей/пиксели или своя PNG).")
+                    append("• Заменить голос на уже снятом видео: открой видео в Сейфе → «Бурундук» / «Демон» (Media3 WSOLA офлайн).")
+                }
+            }
+
+            else -> {
+                buildString {
+                    appendLine("⚡ ВИКА ОФЛАЙН (БЕЗ СЕТИ / КЛЮЧА):")
+                    appendLine("Текстовый запрос «${userTask.trim().take(70)}» не отправлен в сеть.")
+                    appendLine("• Для фото/видео переключись в режим «🖼️ ВСЯ» или «🎯 +КРОП» и нажми «⚡ Малыши Офлайн» — 6 локальных нейронок разберут кадр полностью на устройстве.")
+                    append("• Для свободного диалога с Gemini API вставь BYOK-ключ во вкладке «🔑 Ключ и Модели» (можно через Orbot SOCKS5).")
+                }
+            }
         }
     }
 

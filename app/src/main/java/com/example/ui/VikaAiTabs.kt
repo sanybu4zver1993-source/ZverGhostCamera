@@ -571,6 +571,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
     selectedModel: String,
     discoveredModels: List<ByokManager.DiscoveredModel>,
     customPrompt: String,
+    transportConfig: ByokManager.ProxyTransportConfig,
     isFetchingModels: Boolean,
     modelStatusText: String?,
     httpLogs: List<ByokManager.SanitizedHttpLog>,
@@ -581,6 +582,8 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
     var apiKeyInput by remember { mutableStateOf("") }
     var manualModelInput by remember { mutableStateOf("") }
     var modelFilter by remember { mutableStateOf("ALL") }
+    var proxyHostInput by remember(transportConfig.host) { mutableStateOf(transportConfig.host) }
+    var proxyPortInput by remember(transportConfig.port) { mutableStateOf(transportConfig.port.toString()) }
 
     Column(
         modifier = Modifier
@@ -655,6 +658,99 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
 
         modelStatusText?.let { status ->
             Text(status, color = TabCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+        }
+
+        HorizontalDivider(color = TabBorder)
+
+        Text("1B. ЗАШИФРОВАННЫЙ КАНАЛ (TLS 1.3 / TOR SOCKS5)", color = TabCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text(
+            "Все запросы идут только по TLS 1.3/1.2, без HTTP-кеша и с анонимным User-Agent. При желании заверни трафик в локальный Orbot (127.0.0.1:9050).",
+            color = TabMuted,
+            fontSize = 10.sp
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            ByokManager.TransportMode.values().forEach { tm ->
+                val sel = transportConfig.mode == tm
+                Text(
+                    text = tm.badgeRu,
+                    color = if (sel) Color.Black else TabMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (sel) TabGreen else TabCard)
+                        .border(1.dp, if (sel) TabGreen else TabBorder, RoundedCornerShape(8.dp))
+                        .clickable {
+                            val next = when (tm) {
+                                ByokManager.TransportMode.DIRECT_TLS -> transportConfig.copy(mode = tm)
+                                ByokManager.TransportMode.TOR_ORBOT_SOCKS5 -> ByokManager.ProxyTransportConfig(
+                                    mode = tm,
+                                    host = ByokManager.DEFAULT_TOR_HOST,
+                                    port = ByokManager.DEFAULT_TOR_PORT
+                                )
+                                ByokManager.TransportMode.CUSTOM_SOCKS5 -> transportConfig.copy(mode = tm)
+                            }
+                            ByokManager.saveTransportConfig(context, next)
+                            onStatusMessage("КАНАЛ: ${next.describeShort()}")
+                        }
+                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                        .testTag("byok_transport_${tm.name.lowercase()}")
+                )
+            }
+        }
+        if (transportConfig.mode != ByokManager.TransportMode.DIRECT_TLS) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = proxyHostInput,
+                    onValueChange = { proxyHostInput = it },
+                    label = { Text("Хост SOCKS5", fontSize = 10.sp) },
+                    singleLine = true,
+                    modifier = Modifier.weight(1.4f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = TabCyan,
+                        unfocusedBorderColor = TabBorder,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+                OutlinedTextField(
+                    value = proxyPortInput,
+                    onValueChange = { proxyPortInput = it.filter { ch -> ch.isDigit() }.take(5) },
+                    label = { Text("Порт", fontSize = 10.sp) },
+                    singleLine = true,
+                    modifier = Modifier.weight(0.8f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = TabCyan,
+                        unfocusedBorderColor = TabBorder,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+                Button(
+                    onClick = {
+                        val p = proxyPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: ByokManager.DEFAULT_TOR_PORT
+                        val updated = transportConfig.copy(
+                            host = proxyHostInput.trim().ifEmpty { ByokManager.DEFAULT_TOR_HOST },
+                            port = p
+                        )
+                        ByokManager.saveTransportConfig(context, updated)
+                        onStatusMessage("ПРОКСИ: ${updated.describeShort()}")
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TabCyan),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Text("ОК", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                }
+            }
         }
 
         HorizontalDivider(color = TabBorder)

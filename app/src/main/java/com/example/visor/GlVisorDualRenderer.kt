@@ -575,6 +575,9 @@ class GlVisorDualRenderer(
     @Volatile
     var onFirstFrameRendered: (() -> Unit)? = null
 
+    @Volatile
+    var eglRecordableOk: Boolean? = null
+
     private val firstFrameNotified = AtomicBoolean(false)
     private var onEncoderFramePushed: (() -> Unit)? = null
 
@@ -883,11 +886,13 @@ class GlVisorDualRenderer(
         try {
             val dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
             if (dpy == EGL14.EGL_NO_DISPLAY) {
+                eglRecordableOk = false
                 onGpuUnavailable("EGL display unavailable")
                 return
             }
             val version = IntArray(2)
             if (!EGL14.eglInitialize(dpy, version, 0, version, 1)) {
+                eglRecordableOk = false
                 onGpuUnavailable("EGL init failed")
                 return
             }
@@ -897,6 +902,7 @@ class GlVisorDualRenderer(
             if (!es3) {
                 val es2 = setupContext(dpy, clientVersion = 2)
                 if (!es2) {
+                    eglRecordableOk = false
                     onGpuUnavailable("EGL ES2/ES3 context failed")
                     return
                 }
@@ -904,6 +910,7 @@ class GlVisorDualRenderer(
             } else {
                 isEs3 = true
             }
+            eglRecordableOk = true
 
             // Compile shader (prefer 300 es, fall back to 100 if ES3 shader fails to compile)
             var prog = if (isEs3) buildProgram(GlVisorShaders.VERTEX_300, GlVisorShaders.FRAGMENT_300) else 0

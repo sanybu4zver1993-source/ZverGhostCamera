@@ -154,6 +154,7 @@ fun GhostCameraScreen(
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showCamouflageDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showSelfTestDialog by remember { mutableStateOf(false) }
     var isToolsDrawerOpen by remember { mutableStateOf(false) }
     var isTopOverflowMenuOpen by remember { mutableStateOf(false) }
     var showVikaSheet by remember { mutableStateOf(false) }
@@ -240,9 +241,60 @@ fun GhostCameraScreen(
     LaunchedEffect(isRecordingVideo) {
         if (isRecordingVideo) {
             telemetry.recordingDurationSeconds = 0
+            var tick = 0
             while (isRecordingVideo) {
                 delay(1000)
                 telemetry.recordingDurationSeconds++
+                tick++
+                if (tick % 2 == 0) {
+                    val storage = withContext(Dispatchers.IO) {
+                        com.example.camera.StorageWatchdog.evaluateAppStorage(context)
+                    }
+                    if (storage.shouldStopRecording) {
+                        if (visorVideoRecorder.isRecording) {
+                            isRecordingVideo = false
+                            val stoppedMsg = withContext(Dispatchers.IO) {
+                                val rawMp4 = visorVideoRecorder.stopAndFinalize(
+                                    onBeforeSignalEos = { glRenderer.detachEncoderSurfaceBlocking() }
+                                )
+                                telemetry.recordingBytesWritten = 0L
+                                if (rawMp4 != null && rawMp4.exists() && rawMp4.length() > 0L) {
+                                    val safeHeadroom = rawMp4.length() + 16L * 1024L * 1024L
+                                    if (storage.availableBytes > safeHeadroom) {
+                                        try {
+                                            if (ZverPrefs.isRamOnlyMode(context)) {
+                                                GhostCryptoVault.addRamShot(rawMp4.readBytes(), isVideo = true)
+                                            } else {
+                                                GhostCryptoVault.encryptFileToVault(
+                                                    context,
+                                                    rawMp4,
+                                                    prefix = GhostCryptoVault.MEDIA_VIDEO
+                                                )
+                                            }
+                                            GhostCryptoVault.shredFile(rawMp4)
+                                            "⛔ ДИСК < 250 МБ (${storage.availableMb} МБ) — ЗАПИСЬ ОСТАНОВЛЕНА И СОХРАНЕНА"
+                                        } catch (_: Exception) {
+                                            GhostCryptoVault.shredFile(rawMp4)
+                                            "⛔ ДИСК < 250 МБ (${storage.availableMb} МБ) — ЗАПИСЬ ОСТАНОВЛЕНА"
+                                        }
+                                    } else {
+                                        GhostCryptoVault.shredFile(rawMp4)
+                                        "⛔ ДИСК КРИТИЧЕСКИ МАЛ (${storage.availableMb} МБ) — БУФЕР ОЧИЩЕН"
+                                    }
+                                } else {
+                                    "⛔ ДИСК < 250 МБ (${storage.availableMb} МБ) — ЗАПИСЬ ОСТАНОВЛЕНА"
+                                }
+                            }
+                            vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                            lastStatusMessage = stoppedMsg
+                        } else if (activeRecording != null) {
+                            try { activeRecording?.stop() } catch (_: Exception) {}
+                            activeRecording = null
+                            isRecordingVideo = false
+                            lastStatusMessage = "⛔ ДИСК < 250 МБ (${storage.availableMb} МБ) — ЗАПИСЬ ОСТАНОВЛЕНА"
+                        }
+                    }
+                }
             }
         }
     }
@@ -786,6 +838,11 @@ fun GhostCameraScreen(
                 lastStatusMessage = "СБОЙ ОСТАНОВКИ: ${e.message}"
             }
         } else {
+            val storage = com.example.camera.StorageWatchdog.evaluateAppStorage(context)
+            if (!storage.canRecord) {
+                lastStatusMessage = "⛔ МАЛО ПАМЯТИ (${storage.availableMb} МБ < 250 МБ) — ЗАПИСЬ ОТМЕНЕНА"
+                return
+            }
             val videoStageDir = GhostCryptoVault.getVideoStageDir(context)
             val tempVideoFile = File(videoStageDir, "raw_video_${System.currentTimeMillis()}.mp4")
             val outputOptions = FileOutputOptions.Builder(tempVideoFile).build()
@@ -910,6 +967,12 @@ fun GhostCameraScreen(
                     }
                 }
             }
+            return
+        }
+
+        val storage = com.example.camera.StorageWatchdog.evaluateAppStorage(context)
+        if (!storage.canRecord) {
+            lastStatusMessage = "⛔ МАЛО ПАМЯТИ (${storage.availableMb} МБ < 250 МБ) — ВИЗОР НЕ ЗАПИСАТЬ"
             return
         }
 
@@ -2048,6 +2111,8 @@ fun GhostCameraScreen(
             vikaSheetInitialTab = vikaSheetInitialTab,
             showPcbLabDialog = showPcbLabDialog,
             showPanicConfirm = showPanicConfirm,
+            showSelfTestDialog = showSelfTestDialog,
+            eglRecordableOk = if (gpuVisorFailed) false else glRenderer.eglRecordableOk,
             imageCapture = imageCapture,
             captureExecutor = captureExecutor,
             isDcpDehazeActive = isDcpDehazeActive,
@@ -2080,6 +2145,12 @@ fun GhostCameraScreen(
             onOpenVikaFromSettings = {
                 vikaSheetInitialTab = VikaSheetTab.TASKS
                 showVikaSheet = true
+            },
+            onOpenSelfTestFromSettings = {
+                showSelfTestDialog = true
+            },
+            onDismissSelfTest = {
+                showSelfTestDialog = false
             },
             onCamouflageChangedFromSettings = { mode -> currentCamouflage = mode },
             onSelectModeFromSettings = { modeKey ->

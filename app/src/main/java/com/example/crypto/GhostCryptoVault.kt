@@ -95,7 +95,8 @@ object GhostCryptoVault {
         val hasValidMagic: Boolean,
         val ivHex: String,
         val ciphertextBytes: Long,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        val formatVersion: String = "GCF1"
     )
 
     data class FileKeyDiagnostic(
@@ -552,8 +553,36 @@ object GhostCryptoVault {
         return targetFile
     }
 
+    fun isGcf2File(file: File): Boolean {
+        if (!file.exists() || file.length() < GcfChunkedCodec.HEADER_SIZE) return false
+        return try {
+            val head = ByteArray(4)
+            FileInputStream(file).use { fis ->
+                if (fis.read(head) != 4) return false
+            }
+            GcfChunkedCodec.isGcf2HeaderBytes(head)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun openGcf2DataSource(context: Context, file: File): EncryptedMediaDataSource? {
+        if (!isGcf2File(file)) return null
+        return EncryptedMediaDataSource(file, getActiveVaultKey(context))
+    }
+
     fun encryptFileToVault(context: Context, sourceFile: File, prefix: String = MEDIA_VIDEO): File {
         try {
+            val useGcf2 = prefix == MEDIA_VIDEO || sourceFile.length() > 1024L * 1024L
+            if (useGcf2) {
+                val vaultDir = activeProfile.getDirectory(context)
+                val targetFile = File(
+                    vaultDir,
+                    "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.gcf"
+                )
+                GcfChunkedCodec.encryptFileAtomically(sourceFile, targetFile, getActiveVaultKey(context))
+                return targetFile
+            }
             return writeEncryptedAtomically(context, prefix) { out ->
                 FileInputStream(sourceFile).use { input ->
                     input.copyTo(out)
@@ -568,7 +597,20 @@ object GhostCryptoVault {
      * Standard strict decryption: NEVER performs silent fallback to another key on AEADBadTagException.
      */
     fun decryptToRam(context: Context, file: File): ByteArray {
-        if (!file.exists() || file.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)) {
+        if (!file.exists()) {
+            throw IOException("Invalid or corrupted GCF file")
+        }
+        if (isGcf2File(file)) {
+            return try {
+                GcfChunkedCodec.decryptToBytes(file, getActiveVaultKey(context))
+            } catch (e: AEADBadTagException) {
+                val activeLabel = getActiveVaultKeySourceLabel(context)
+                throw AEADBadTagException(
+                    "Несовпадение ключа GCM (активен: $activeLabel). Оригинал не изменён; запустите read-only диагностику."
+                ).apply { initCause(e) }
+            }
+        }
+        if (file.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)) {
             throw IOException("Invalid or corrupted GCF file")
         }
 
@@ -622,6 +664,21 @@ object GhostCryptoVault {
             return GcfHeaderInfo(file.name, 0L, false, "", 0L, "Файл не найден")
         }
         val size = file.length()
+        if (isGcf2File(file)) {
+            val h = GcfChunkedCodec.readHeader(file)
+                ?: return GcfHeaderInfo(file.name, size, false, "", 0L, "Повреждён заголовок GCF2", "GCF2")
+            val ivHex = h.baseNonce.joinToString("") { "%02x".format(it) }
+            val ctLen = (size - GcfChunkedCodec.HEADER_SIZE).coerceAtLeast(0L)
+            return GcfHeaderInfo(
+                fileName = file.name,
+                sizeBytes = size,
+                hasValidMagic = true,
+                ivHex = ivHex,
+                ciphertextBytes = ctLen,
+                errorMessage = null,
+                formatVersion = "GCF2 (${h.chunkCount}ч)"
+            )
+        }
         val minSize = (MAGIC_HEADER.size + GCM_IV_LEN + 16).toLong()
         if (size < minSize) {
             return GcfHeaderInfo(file.name, size, false, "", 0L, "Файл меньше минимального размера GCF ($size < $minSize)")
@@ -645,7 +702,8 @@ object GhostCryptoVault {
                 hasValidMagic = validMagic,
                 ivHex = ivHex,
                 ciphertextBytes = ctLen,
-                errorMessage = if (validMagic) null else "Отсутствует заголовок GCF1"
+                errorMessage = if (validMagic) null else "Отсутствует заголовок GCF1/GCF2",
+                formatVersion = "GCF1"
             )
         } catch (e: Exception) {
             GcfHeaderInfo(file.name, size, false, "", 0L, e.message ?: e.javaClass.simpleName)
@@ -653,7 +711,7 @@ object GhostCryptoVault {
     }
 
     /**
-     * Strictly read-only: identifies which key class authenticates a GCF file without altering
+     * Strictly read-only: identifies which key class authenticates a GCF1/GCF2 file without altering
      * originals or creating new KeyStore aliases.
      */
     fun diagnoseDecryptKeySource(context: Context, file: File): FileKeyDiagnostic {
@@ -676,6 +734,40 @@ object GhostCryptoVault {
             getExistingHardwareKeystoreKeyOrNull("Ghost_Vault_DECOY")?.let {
                 add(KeySourceKind.KEYSTORE_DECOY_FALLBACK to it)
             }
+        }
+
+        if (isGcf2File(file)) {
+            val gcf2Header = GcfChunkedCodec.readHeader(file)
+            if (gcf2Header == null || gcf2Header.chunkCount <= 0) {
+                return FileKeyDiagnostic(file, header, KeySourceKind.UNKNOWN_OR_CORRUPTED, errorDetail = "Невалидный заголовок GCF2")
+            }
+            var lastError: String? = null
+            try {
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    for ((kind, key) in candidates) {
+                        try {
+                            val probe = GcfChunkedCodec.decryptChunk(raf, gcf2Header, 0, key)
+                            Arrays.fill(probe, 0.toByte())
+                            return FileKeyDiagnostic(
+                                file = file,
+                                headerInfo = header,
+                                matchedKeyKind = kind,
+                                plaintextBytesLength = gcf2Header.totalPlainSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                            )
+                        } catch (e: Exception) {
+                            lastError = "${kind.name}: ${e.javaClass.simpleName}"
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                lastError = e.message ?: e.javaClass.simpleName
+            }
+            return FileKeyDiagnostic(
+                file = file,
+                headerInfo = header,
+                matchedKeyKind = KeySourceKind.UNKNOWN_OR_CORRUPTED,
+                errorDetail = if (candidates.isEmpty()) "Нет доступных ключей в сессии/KeyStore" else lastError
+            )
         }
 
         val fileBytes = FileInputStream(file).use { it.readBytes() }
@@ -804,6 +896,28 @@ object GhostCryptoVault {
             KeySourceKind.UNKNOWN_OR_CORRUPTED -> null
         } ?: throw AEADBadTagException("Не найден подходящий ключ для ${sourceEncryptedFile.name}: ${diag.errorDetail}")
 
+        if (isGcf2File(sourceEncryptedFile)) {
+            if (reencryptTargetKey == null) {
+                FileOutputStream(outputCopyFile).use { fos ->
+                    GcfChunkedCodec.decryptToStream(sourceEncryptedFile, matchedKey, fos)
+                    fos.fd.sync()
+                }
+            } else {
+                val stageDir = getVideoStageDir(context)
+                val tempPlain = File(stageDir, "recover_${UUID.randomUUID().toString().take(8)}.tmp")
+                try {
+                    FileOutputStream(tempPlain).use { fos ->
+                        GcfChunkedCodec.decryptToStream(sourceEncryptedFile, matchedKey, fos)
+                        fos.fd.sync()
+                    }
+                    GcfChunkedCodec.encryptFileAtomically(tempPlain, outputCopyFile, reencryptTargetKey)
+                } finally {
+                    shredFile(tempPlain)
+                }
+            }
+            return diag.matchedKeyKind
+        }
+
         val fileBytes = FileInputStream(sourceEncryptedFile).use { it.readBytes() }
         val iv = ByteArray(GCM_IV_LEN)
         var plain: ByteArray? = null
@@ -885,6 +999,10 @@ object GhostCryptoVault {
         for (f in files) {
             shredFile(f)
         }
+        val idxFile = File(profile.getDirectory(context), VaultIndexEngine.INDEX_FILE_NAME)
+        if (idxFile.exists()) shredFile(idxFile)
+        val idxTmp = File(profile.getDirectory(context), "${VaultIndexEngine.INDEX_FILE_NAME}.tmp")
+        if (idxTmp.exists()) shredFile(idxTmp)
         return files.size
     }
 
@@ -986,6 +1104,30 @@ object GhostCryptoVault {
         val ext = if (isVideo) "mp4" else "bin"
         val tmpFile = File(shareDir, "ephemeral_${UUID.randomUUID().toString().take(8)}.$ext")
 
+        if (isGcf2File(sourceFile)) {
+            try {
+                FileOutputStream(tmpFile).use { fos ->
+                    GcfChunkedCodec.decryptToStream(sourceFile, getActiveVaultKey(context), fos)
+                    fos.fd.sync()
+                }
+                if (!isVideo) {
+                    val headPeek = ByteArray(12)
+                    val read = FileInputStream(tmpFile).use { it.read(headPeek) }
+                    if (read >= 12) {
+                        val realExt = detectMediaExtension(headPeek, isVideo = false)
+                        val renamed = File(shareDir, tmpFile.nameWithoutExtension + "." + realExt)
+                        if (tmpFile.renameTo(renamed)) {
+                            return renamed
+                        }
+                    }
+                }
+                return tmpFile
+            } catch (e: Exception) {
+                shredFile(tmpFile)
+                throw e
+            }
+        }
+
         var headPeek = ByteArray(0)
         FileInputStream(sourceFile).use { fis ->
             val header = ByteArray(MAGIC_HEADER.size)
@@ -1035,8 +1177,12 @@ object GhostCryptoVault {
         return tmpFile
     }
 
-    private fun fileLengthInvalid(file: File): Boolean =
-        file.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)
+    private fun fileLengthInvalid(file: File): Boolean {
+        if (isGcf2File(file)) {
+            return file.length() < (GcfChunkedCodec.HEADER_SIZE + GcfChunkedCodec.GCM_TAG_BYTES)
+        }
+        return file.length() < (MAGIC_HEADER.size + GCM_IV_LEN + 16)
+    }
 
     fun createEphemeralShareFile(context: Context, sourceFile: File): File {
         return decryptToEphemeralFile(context, sourceFile)
@@ -1204,7 +1350,7 @@ object GhostCryptoVault {
             val dir = File(context.filesDir, profile.dirName)
             if (!dir.exists()) continue
             dir.listFiles()?.forEach { f ->
-                val isOrphanTemp = f.name.endsWith(".gcf.tmp") || (f.name.endsWith(".gcf") && f.length() == 0L)
+                val isOrphanTemp = f.name.endsWith(".tmp") || (f.name.endsWith(".gcf") && f.length() == 0L)
                 val oldEnough = minAgeMs <= 0L || (now - f.lastModified()) >= minAgeMs
                 if (isOrphanTemp && oldEnough && shredFile(f)) {
                     count++

@@ -34,6 +34,29 @@ object ZverPrefs {
     private const val KEY_ZEBRA_THRESHOLD = "zebra_luma_threshold"
     private const val KEY_SMART_COMPRESSION = "smart_compression_enabled"
     private const val KEY_MULTI_FRAME_MODE = "multi_frame_stack_mode"
+    private const val KEY_VOLUME_KEY_ACTION = "volume_key_action"
+
+    enum class VolumeKeyAction(val labelRu: String) {
+        SHUTTER_OR_VIDEO("Кадр / Видео"),
+        STEALTH_BLACKOUT("Стелс-экран"),
+        PANIC_LOCK_GATE("Блок / Скрыть"),
+        TORCH_TOGGLE("Фонарик")
+    }
+
+    fun getVolumeKeyAction(context: Context): VolumeKeyAction {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_VOLUME_KEY_ACTION, VolumeKeyAction.SHUTTER_OR_VIDEO.name)
+        return try {
+            VolumeKeyAction.valueOf(raw ?: VolumeKeyAction.SHUTTER_OR_VIDEO.name)
+        } catch (_: Exception) {
+            VolumeKeyAction.SHUTTER_OR_VIDEO
+        }
+    }
+
+    fun setVolumeKeyAction(context: Context, action: VolumeKeyAction) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(KEY_VOLUME_KEY_ACTION, action.name).apply()
+    }
 
     fun isSmartCompressionEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

@@ -37,9 +37,32 @@ object ByokManager {
     private const val KEY_PROMPT = "byok_custom_prompt"
     private const val KEY_MODEL = "byok_model_name"
     private const val KEY_DISCOVERED_MODELS = "byok_discovered_models_json"
+    private const val KEY_TRANSPORT_MODE = "byok_transport_mode"
+    private const val KEY_PROXY_HOST = "byok_proxy_host"
+    private const val KEY_PROXY_PORT = "byok_proxy_port"
     private const val AES_GCM = "AES/GCM/NoPadding"
 
     const val DEFAULT_MODEL_FALLBACK = "gemini-2.5-flash"
+    const val DEFAULT_TOR_HOST = "127.0.0.1"
+    const val DEFAULT_TOR_PORT = 9050
+
+    enum class TransportMode(val labelRu: String, val badgeRu: String) {
+        DIRECT_TLS("Прямой TLS 1.3 (без кеша)", "🔒 TLS 1.3"),
+        TOR_ORBOT_SOCKS5("Orbot / Tor SOCKS5 (127.0.0.1:9050)", "🧅 TOR SOCKS5"),
+        CUSTOM_SOCKS5("Свой SOCKS5 прокси", "🛡️ SOCKS5")
+    }
+
+    data class ProxyTransportConfig(
+        val mode: TransportMode = TransportMode.DIRECT_TLS,
+        val host: String = DEFAULT_TOR_HOST,
+        val port: Int = DEFAULT_TOR_PORT
+    ) {
+        fun describeShort(): String = when (mode) {
+            TransportMode.DIRECT_TLS -> mode.badgeRu
+            TransportMode.TOR_ORBOT_SOCKS5 -> "🧅 TOR ${host}:${port}"
+            TransportMode.CUSTOM_SOCKS5 -> "🛡️ SOCKS5 ${host}:${port}"
+        }
+    }
 
     const val DEFAULT_PROMPT =
         "Ты — Вика, дерзкая, острая на язык кибер-напарница Сани (Мега Пупсика). " +
@@ -151,6 +174,9 @@ object ByokManager {
     private val _httpLogsFlow = MutableStateFlow<List<SanitizedHttpLog>>(emptyList())
     val httpLogsFlow: StateFlow<List<SanitizedHttpLog>> = _httpLogsFlow.asStateFlow()
 
+    private val _transportConfigFlow = MutableStateFlow(ProxyTransportConfig())
+    val transportConfigFlow: StateFlow<ProxyTransportConfig> = _transportConfigFlow.asStateFlow()
+
     private val apiKeyRegex = Regex("""AIza[0-9A-Za-z\-_]{8,}""")
     private val queryKeyRegex = Regex("""([?&](?:key|api_key|x-goog-api-key)=)[^&\s]+""", RegexOption.IGNORE_CASE)
 
@@ -198,6 +224,33 @@ object ByokManager {
         _selectedModelFlow.value = getModelName(appCtx)
         _discoveredModelsFlow.value = getDiscoveredModels(appCtx)
         _customPromptFlow.value = getCustomPrompt(appCtx)
+        _transportConfigFlow.value = getTransportConfig(appCtx)
+    }
+
+    fun getTransportConfig(context: Context): ProxyTransportConfig {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val rawMode = prefs.getString(KEY_TRANSPORT_MODE, TransportMode.DIRECT_TLS.name)
+        val mode = try {
+            TransportMode.valueOf(rawMode ?: TransportMode.DIRECT_TLS.name)
+        } catch (_: Exception) {
+            TransportMode.DIRECT_TLS
+        }
+        val host = prefs.getString(KEY_PROXY_HOST, DEFAULT_TOR_HOST)?.trim().orEmpty().ifEmpty { DEFAULT_TOR_HOST }
+        val port = prefs.getInt(KEY_PROXY_PORT, DEFAULT_TOR_PORT).coerceIn(1, 65535)
+        return ProxyTransportConfig(mode = mode, host = host, port = port)
+    }
+
+    fun saveTransportConfig(context: Context, config: ProxyTransportConfig) {
+        val cleanHost = config.host.trim().ifEmpty { DEFAULT_TOR_HOST }
+        val cleanPort = config.port.coerceIn(1, 65535)
+        val normalized = config.copy(host = cleanHost, port = cleanPort)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_TRANSPORT_MODE, normalized.mode.name)
+            .putString(KEY_PROXY_HOST, normalized.host)
+            .putInt(KEY_PROXY_PORT, normalized.port)
+            .apply()
+        _transportConfigFlow.value = normalized
     }
 
     fun refreshModelsInBackground(
@@ -220,8 +273,9 @@ object ByokManager {
                 _modelFetchStatusFlow.value = "Ключ не найден в KeyStore"
                 return@launch
             }
+            val transportCfg = getTransportConfig(appCtx)
             val result = try {
-                GeminiByokClient.fetchAvailableModels(keyToUse)
+                GeminiByokClient.fetchAvailableModels(keyToUse, transportConfig = transportCfg)
             } finally {
                 Arrays.fill(keyToUse, '0')
             }

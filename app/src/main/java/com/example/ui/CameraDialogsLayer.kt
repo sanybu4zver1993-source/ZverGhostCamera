@@ -57,6 +57,8 @@ internal fun CameraDialogsLayer(
     vikaSheetInitialTab: VikaSheetTab,
     showPcbLabDialog: Boolean,
     showPanicConfirm: Boolean,
+    showSelfTestDialog: Boolean,
+    eglRecordableOk: Boolean?,
     imageCapture: ImageCapture?,
     captureExecutor: ExecutorService,
     isDcpDehazeActive: Boolean,
@@ -69,6 +71,8 @@ internal fun CameraDialogsLayer(
     onStatusMessage: (String) -> Unit,
     onOpenPinSetup: () -> Unit,
     onOpenVikaFromSettings: () -> Unit,
+    onOpenSelfTestFromSettings: () -> Unit,
+    onDismissSelfTest: () -> Unit,
     onCamouflageChangedFromSettings: (CamouflageManager.CamouflageMode) -> Unit,
     onSelectModeFromSettings: (String) -> Unit,
     onDismissVika: () -> Unit,
@@ -143,9 +147,19 @@ internal fun CameraDialogsLayer(
             onStatusMessage = onStatusMessage,
             onOpenPinSetup = onOpenPinSetup,
             onOpenVikaSheet = onOpenVikaFromSettings,
+            onOpenSelfTest = onOpenSelfTestFromSettings,
             onCamouflageChanged = onCamouflageChangedFromSettings,
             boundUseCasesSummary = boundUseCasesSummary,
             onSelectMode = onSelectModeFromSettings
+        )
+    }
+
+    if (showSelfTestDialog) {
+        SelfTestDialog(
+            boundUseCasesSummary = boundUseCasesSummary,
+            eglRecordableOk = eglRecordableOk,
+            onStatusMessage = onStatusMessage,
+            onDismiss = onDismissSelfTest
         )
     }
 

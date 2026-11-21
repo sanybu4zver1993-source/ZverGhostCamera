@@ -6,32 +6,75 @@ import android.net.NetworkCapabilities
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionSpec
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.util.Arrays
 import java.util.concurrent.TimeUnit
 
 /**
  * GeminiByokClient:
  * Direct user-initiated REST client to Google Gemini API (v1beta) using user's own BYOK key.
- * - Zero disk HTTP cache, zero logging of headers/keys.
+ * - Strict TLS 1.3 / 1.2 ConnectionSpecs, zero HTTP disk cache, zero logging of headers/keys.
+ * - Optional Orbot/Tor SOCKS5 (127.0.0.1:9050) or custom SOCKS5 transport.
  * - Key is passed exclusively via `x-goog-api-key` header and wiped immediately.
  */
 object GeminiByokClient {
     private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    private const val ANONYMOUS_USER_AGENT = "Zver/1.0"
 
-    private val client: OkHttpClient by lazy {
+    private val directClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .connectionSpecs(listOf(ConnectionSpec.RESTRICTED_TLS, ConnectionSpec.MODERN_TLS))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(50, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .cache(null)
             .build()
+    }
+
+    @Volatile
+    private var cachedProxyKey: String = ""
+
+    @Volatile
+    private var cachedProxyClient: OkHttpClient? = null
+
+    fun resolveEffectiveProxy(config: ByokManager.ProxyTransportConfig): Proxy? {
+        return when (config.mode) {
+            ByokManager.TransportMode.DIRECT_TLS -> null
+            ByokManager.TransportMode.TOR_ORBOT_SOCKS5,
+            ByokManager.TransportMode.CUSTOM_SOCKS5 -> {
+                val host = config.host.trim().ifEmpty { ByokManager.DEFAULT_TOR_HOST }
+                val port = config.port.coerceIn(1, 65535)
+                Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved(host, port))
+            }
+        }
+    }
+
+    internal fun buildClientForTransport(config: ByokManager.ProxyTransportConfig): OkHttpClient {
+        if (config.mode == ByokManager.TransportMode.DIRECT_TLS) return directClient
+        val cacheId = "${config.mode.name}:${config.host}:${config.port}"
+        val existing = cachedProxyClient
+        if (existing != null && cachedProxyKey == cacheId) return existing
+        val proxy = resolveEffectiveProxy(config)
+        val built = OkHttpClient.Builder()
+            .connectionSpecs(listOf(ConnectionSpec.RESTRICTED_TLS, ConnectionSpec.MODERN_TLS))
+            .proxy(proxy)
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(80, TimeUnit.SECONDS)
+            .writeTimeout(45, TimeUnit.SECONDS)
+            .cache(null)
+            .build()
+        cachedProxyKey = cacheId
+        cachedProxyClient = built
+        return built
     }
 
     data class GenerationResponse(
@@ -44,8 +87,10 @@ object GeminiByokClient {
     )
 
     suspend fun fetchAvailableModels(
-        apiKeyChars: CharArray
+        apiKeyChars: CharArray,
+        transportConfig: ByokManager.ProxyTransportConfig = ByokManager.ProxyTransportConfig()
     ): Result<List<ByokManager.DiscoveredModel>> = withContext(Dispatchers.IO) {
+        val activeClient = buildClientForTransport(transportConfig)
         val keyCopy = apiKeyChars.clone()
         val keyString = String(keyCopy).trim()
         try {
@@ -69,10 +114,11 @@ object GeminiByokClient {
                 val req = Request.Builder()
                     .url(url)
                     .get()
+                    .header("User-Agent", ANONYMOUS_USER_AGENT)
                     .addHeader("x-goog-api-key", keyString)
                     .build()
 
-                client.newCall(req).execute().use { resp ->
+                activeClient.newCall(req).execute().use { resp ->
                     val latency = System.currentTimeMillis() - pageStart
                     val bodyStr = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
@@ -182,8 +228,10 @@ object GeminiByokClient {
         userPrompt: String,
         imageBytes: ByteArray? = null,
         imageMimeType: String = "image/webp",
-        extraImages: List<Pair<ByteArray, String>> = emptyList()
+        extraImages: List<Pair<ByteArray, String>> = emptyList(),
+        transportConfig: ByokManager.ProxyTransportConfig = ByokManager.ProxyTransportConfig()
     ): Result<GenerationResponse> = withContext(Dispatchers.IO) {
+        val activeClient = buildClientForTransport(transportConfig)
         val keyCopy = apiKeyChars.clone()
         val keyString = String(keyCopy).trim()
         val startMs = System.currentTimeMillis()
@@ -260,10 +308,11 @@ object GeminiByokClient {
             val req = Request.Builder()
                 .url("$BASE_URL/models/$cleanModel:generateContent")
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .header("User-Agent", ANONYMOUS_USER_AGENT)
                 .addHeader("x-goog-api-key", keyString)
                 .build()
 
-            client.newCall(req).execute().use { resp ->
+            activeClient.newCall(req).execute().use { resp ->
                 val latency = System.currentTimeMillis() - startMs
                 val bodyStr = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {

@@ -3,7 +3,13 @@ package com.example.ui
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaPlayer
+import android.net.Uri
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.WindowManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,7 +36,9 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -40,8 +48,11 @@ import androidx.core.content.FileProvider
 import com.example.audio.OfflineVoiceChanger
 import com.example.camera.ExifStripper
 import com.example.camera.Mp4Sanitizer
+import com.example.crypto.EncryptedMediaDataSource
 import com.example.crypto.GhostCryptoVault
 import com.example.crypto.MonoVaultEngine
+import com.example.crypto.VaultIndexEngine
+import com.example.crypto.ZverBackupEngine
 import com.example.security.ZverPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -100,6 +111,9 @@ fun GhostVaultDialog(
     }
 
     var vaultFiles by remember { mutableStateOf(emptyList<File>()) }
+    var vaultIndexMap by remember { mutableStateOf(emptyMap<String, VaultIndexEngine.VaultItemMeta>()) }
+    var searchQuery by remember { mutableStateOf("") }
+    var filterType by remember { mutableStateOf(VaultIndexEngine.VaultFilterType.ALL) }
     var ramShots by remember { mutableStateOf(GhostCryptoVault.listRamShots()) }
     var monoRecords by remember { mutableStateOf(emptyList<MonoVaultEngine.StoredRecord>()) }
 
@@ -109,6 +123,7 @@ fun GhostVaultDialog(
     var selectedMonoSigValid by remember { mutableStateOf<Boolean?>(null) }
     var decryptedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var decryptedVideoFile by remember { mutableStateOf<File?>(null) }
+    var streamingVideoDataSource by remember { mutableStateOf<EncryptedMediaDataSource?>(null) }
     var decryptedRawBytes by remember { mutableStateOf<ByteArray?>(null) }
     var isDecrypting by remember { mutableStateOf(false) }
 
@@ -123,6 +138,10 @@ fun GhostVaultDialog(
     var showPhotoEditor by remember { mutableStateOf(false) }
     var showPcbLab by remember { mutableStateOf(false) }
     var showVikaAi by remember { mutableStateOf(false) }
+    var showMetaTtlDialog by remember { mutableStateOf(false) }
+    var zvbPasswordPromptMode by remember { mutableStateOf<String?>(null) } // "EXPORT" | "IMPORT" | null
+    var pendingZvbPassword by remember { mutableStateOf(charArrayOf()) }
+    var isZvbBusy by remember { mutableStateOf(false) }
     var auditDialogReport by remember { mutableStateOf<ExifStripper.AuditReport?>(null) }
     var proofVerifyResult by remember { mutableStateOf<GhostCryptoVault.ProofVerificationResult?>(null) }
     var vaultDiagReportText by remember { mutableStateOf<String?>(null) }
@@ -149,22 +168,11 @@ fun GhostVaultDialog(
         }
     }
 
-    LaunchedEffect(unlockedProfile) {
-        if (unlockedProfile != null) {
-            val vol = if (unlockedProfile == GhostCryptoVault.VaultProfile.MAIN) {
-                MonoVaultEngine.VolumeType.MASTER
-            } else {
-                MonoVaultEngine.VolumeType.DECOY
-            }
-            monoRecords = withContext(Dispatchers.IO) {
-                MonoVaultEngine.listRecords(context, vol)
-            }
-        }
-    }
-
     fun cleanupPreviewMedia() {
         decryptedBitmap?.recycle()
         decryptedBitmap = null
+        try { streamingVideoDataSource?.close() } catch (_: Exception) {}
+        streamingVideoDataSource = null
         voicePreviewFile?.let { GhostCryptoVault.shredFile(it) }
         voicePreviewFile = null
         decryptedVideoFile?.let { GhostCryptoVault.shredFile(it) }
@@ -175,21 +183,109 @@ fun GhostVaultDialog(
 
     fun refreshFiles() {
         scope.launch {
-            val (files, ram, mono) = withContext(Dispatchers.IO) {
-                val f = GhostCryptoVault.listVaultFiles(context)
+            val (files, idxMap, ram, monoPurged) = withContext(Dispatchers.IO) {
+                val prof = GhostCryptoVault.activeProfile
+                val purged = VaultIndexEngine.purgeExpiredFiles(context, prof)
+                val f = GhostCryptoVault.listVaultFiles(context, prof)
+                val idx = VaultIndexEngine.loadIndex(context, prof)
                 val r = GhostCryptoVault.listRamShots()
-                val vol = if (GhostCryptoVault.activeProfile == GhostCryptoVault.VaultProfile.MAIN) {
+                val vol = if (prof == GhostCryptoVault.VaultProfile.MAIN) {
                     MonoVaultEngine.VolumeType.MASTER
                 } else {
                     MonoVaultEngine.VolumeType.DECOY
                 }
                 val m = MonoVaultEngine.listRecords(context, vol)
-                Triple(f, r, m)
+                listOf(f, idx, r, Pair(m, purged))
             }
-            vaultFiles = files
-            ramShots = ram
-            monoRecords = mono
+            @Suppress("UNCHECKED_CAST")
+            vaultFiles = files as List<File>
+            @Suppress("UNCHECKED_CAST")
+            vaultIndexMap = idxMap as Map<String, VaultIndexEngine.VaultItemMeta>
+            @Suppress("UNCHECKED_CAST")
+            ramShots = ram as List<GhostCryptoVault.RamShot>
+            @Suppress("UNCHECKED_CAST")
+            val pair = monoPurged as Pair<List<MonoVaultEngine.StoredRecord>, Int>
+            monoRecords = pair.first
+            if (pair.second > 0) {
+                statusMessage = "⏳ АВТО-ШРЕДЕР TTL: УНИЧТОЖЕНО ${pair.second} ФАЙЛ(ОВ)"
+            }
             onVaultUpdated()
+        }
+    }
+
+    val exportZvbLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri: Uri? ->
+        val pwd = pendingZvbPassword.clone()
+        pendingZvbPassword.fill('\u0000')
+        pendingZvbPassword = charArrayOf()
+        if (uri == null || pwd.isEmpty()) {
+            pwd.fill('\u0000')
+            return@rememberLauncherForActivityResult
+        }
+        isZvbBusy = true
+        statusMessage = "⏳ ЭКСПОРТ .ZVB АРХИВА..."
+        scope.launch {
+            try {
+                val res = withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.use { os ->
+                        ZverBackupEngine.exportProfileBackup(
+                            context = context,
+                            profile = GhostCryptoVault.activeProfile,
+                            masterPassword = pwd,
+                            outStream = os
+                        )
+                    } ?: throw IllegalStateException("Не удалось открыть файл для записи")
+                }
+                statusMessage = "✅ ЭКСПОРТ .ZVB: ${res.fileCount} ФАЙЛ(ОВ) (${res.archiveBytes / 1024} КБ)"
+            } catch (e: Exception) {
+                pwd.fill('\u0000')
+                statusMessage = "ОШИБКА ЭКСПОРТА .ZVB: ${e.message}"
+            } finally {
+                isZvbBusy = false
+            }
+        }
+    }
+
+    val importZvbLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        val pwd = pendingZvbPassword.clone()
+        pendingZvbPassword.fill('\u0000')
+        pendingZvbPassword = charArrayOf()
+        if (uri == null || pwd.isEmpty()) {
+            pwd.fill('\u0000')
+            return@rememberLauncherForActivityResult
+        }
+        isZvbBusy = true
+        statusMessage = "⏳ ИМПОРТ .ZVB АРХИВА..."
+        scope.launch {
+            try {
+                val res = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { ins ->
+                        ZverBackupEngine.importProfileBackup(
+                            context = context,
+                            targetProfile = GhostCryptoVault.activeProfile,
+                            masterPassword = pwd,
+                            inStream = ins
+                        )
+                    } ?: throw IllegalStateException("Не удалось прочитать файл .zvb")
+                }
+                val skippedNote = if (res.skippedExpiredCount > 0) ", просрочено TTL: ${res.skippedExpiredCount}" else ""
+                statusMessage = "✅ ИМПОРТ .ZVB: ${res.importedFilesCount} ФАЙЛ(ОВ)$skippedNote"
+                refreshFiles()
+            } catch (e: Exception) {
+                pwd.fill('\u0000')
+                statusMessage = "ОШИБКА ИМПОРТА .ZVB: ${e.message}"
+            } finally {
+                isZvbBusy = false
+            }
+        }
+    }
+
+    LaunchedEffect(unlockedProfile) {
+        if (unlockedProfile != null) {
+            refreshFiles()
         }
     }
 
@@ -689,9 +785,28 @@ fun GhostVaultDialog(
                                     }
                                 }
 
-                                if (decryptedBitmap != null || decryptedVideoFile != null) {
+                                val isSelectedDiskVideo = selectedFile != null && GhostCryptoVault.isVideoFile(selectedFile!!)
+                                if (decryptedBitmap != null || decryptedVideoFile != null || isSelectedDiskVideo) {
                                     Button(
-                                        onClick = { showVikaAi = true },
+                                        onClick = {
+                                            if (decryptedVideoFile == null && selectedFile != null && isSelectedDiskVideo) {
+                                                scope.launch {
+                                                    isDecrypting = true
+                                                    try {
+                                                        decryptedVideoFile = withContext(Dispatchers.IO) {
+                                                            GhostCryptoVault.decryptToEphemeralFile(context, selectedFile!!)
+                                                        }
+                                                        showVikaAi = true
+                                                    } catch (e: Exception) {
+                                                        statusMessage = "ОШИБКА ПОДГОТОВКИ ВИДЕО: ${e.message}"
+                                                    } finally {
+                                                        isDecrypting = false
+                                                    }
+                                                }
+                                            } else {
+                                                showVikaAi = true
+                                            }
+                                        },
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberGreen.copy(alpha = 0.18f)),
                                         shape = RoundedCornerShape(6.dp),
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
@@ -700,6 +815,20 @@ fun GhostVaultDialog(
                                         Icon(Icons.Default.Psychology, contentDescription = "Вика AI", modifier = Modifier.size(14.dp), tint = CyberGreen)
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text("ВИКА AI", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
+                                    }
+                                }
+
+                                if (selectedFile != null) {
+                                    Button(
+                                        onClick = { showMetaTtlDialog = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberAmber.copy(alpha = 0.18f)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_meta_ttl_btn")
+                                    ) {
+                                        Icon(Icons.Default.Label, contentDescription = "Теги и TTL", modifier = Modifier.size(14.dp), tint = CyberAmber)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("ТЕГИ/TTL", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberAmber)
                                     }
                                 }
 
@@ -794,9 +923,10 @@ fun GhostVaultDialog(
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     CircularProgressIndicator(color = CyberGreen, strokeWidth = 2.dp)
                                 }
-                            } else if (decryptedVideoFile != null) {
-                                val origVideoFile = decryptedVideoFile!!
+                            } else if (decryptedVideoFile != null || streamingVideoDataSource != null) {
+                                val origVideoFile = decryptedVideoFile
                                 val activeVideo = voicePreviewFile ?: origVideoFile
+                                val activeDataSource = streamingVideoDataSource
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
@@ -806,22 +936,30 @@ fun GhostVaultDialog(
                                         .background(Color.Black),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    key(activeVideo.absolutePath) {
-                                        androidx.compose.ui.viewinterop.AndroidView(
-                                            factory = { ctx ->
-                                                android.widget.VideoView(ctx).apply {
-                                                    val controller = android.widget.MediaController(ctx)
-                                                    controller.setAnchorView(this)
-                                                    setMediaController(controller)
-                                                    setVideoPath(activeVideo.absolutePath)
-                                                    setOnPreparedListener { mp ->
-                                                        mp.isLooping = false
-                                                        start()
-                                                    }
-                                                }
-                                            },
+                                    if (voicePreviewFile == null && activeDataSource != null) {
+                                        Gcf2StreamingVideoPlayer(
+                                            dataSource = activeDataSource,
+                                            onError = { msg -> statusMessage = msg },
                                             modifier = Modifier.fillMaxSize()
                                         )
+                                    } else if (activeVideo != null) {
+                                        key(activeVideo.absolutePath) {
+                                            androidx.compose.ui.viewinterop.AndroidView(
+                                                factory = { ctx ->
+                                                    android.widget.VideoView(ctx).apply {
+                                                        val controller = android.widget.MediaController(ctx)
+                                                        controller.setAnchorView(this)
+                                                        setMediaController(controller)
+                                                        setVideoPath(activeVideo.absolutePath)
+                                                        setOnPreparedListener { mp ->
+                                                            mp.isLooping = false
+                                                            start()
+                                                        }
+                                                    }
+                                                },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
                                     }
                                 }
 
@@ -899,13 +1037,16 @@ fun GhostVaultDialog(
                                                 statusMessage = "ОБРАБОТКА ГОЛОСА (${selectedVoicePreset.badgeRu})..."
                                                 scope.launch {
                                                     try {
+                                                        val inputMp4 = origVideoFile ?: withContext(Dispatchers.IO) {
+                                                            GhostCryptoVault.decryptToEphemeralFile(context, selectedFile!!)
+                                                        }.also { decryptedVideoFile = it }
                                                         val outStage = File(
                                                             GhostCryptoVault.getVideoStageDir(context),
                                                             "voice_${selectedVoicePreset.name.lowercase()}_${System.currentTimeMillis()}.mp4"
                                                         )
                                                         val res = withContext(Dispatchers.IO) {
                                                             OfflineVoiceChanger.processMp4Offline(
-                                                                inputMp4 = origVideoFile,
+                                                                inputMp4 = inputMp4,
                                                                 outputMp4 = outStage,
                                                                 preset = selectedVoicePreset,
                                                                 onProgress = { p -> voiceTransformProgress = p }
@@ -1250,13 +1391,72 @@ fun GhostVaultDialog(
                             }
                         }
                     } else {
-                        if (vaultFiles.isEmpty()) {
+                        // Search & Filter Bar for Disk Vault
+                        if (vaultFiles.isNotEmpty()) {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                placeholder = { Text("Поиск по тегам, заметке, имени...", fontSize = 11.sp, color = CyberMuted) },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Поиск", tint = CyberCyan, modifier = Modifier.size(16.dp)) },
+                                trailingIcon = {
+                                    if (searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = { searchQuery = "" }) {
+                                            Icon(Icons.Default.Clear, contentDescription = "Очистить", tint = CyberMuted, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp).testTag("vault_search_input"),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = CyberCyan,
+                                    unfocusedBorderColor = CyberBorder,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(bottom = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                VaultIndexEngine.VaultFilterType.values().forEach { ft ->
+                                    val sel = filterType == ft
+                                    Text(
+                                        text = ft.labelRu,
+                                        color = if (sel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) CyberCyan else CyberSurface)
+                                            .border(1.dp, if (sel) CyberCyan else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable { filterType = ft }
+                                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        val filteredVaultFiles = remember(vaultFiles, vaultIndexMap, searchQuery, filterType) {
+                            vaultFiles.filter { f ->
+                                VaultIndexEngine.matchesFilter(f, vaultIndexMap[f.name], searchQuery, filterType)
+                            }
+                        }
+
+                        if (filteredVaultFiles.isEmpty()) {
                             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Icon(Icons.Default.Shield, contentDescription = "Empty", tint = CyberMuted, modifier = Modifier.size(40.dp))
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY) "ЛОЖНЫЙ СХРОН ПУСТ" else "В СЕЙФЕ ПОКА НЕТ ФАЙЛОВ",
+                                        when {
+                                            vaultFiles.isNotEmpty() -> "ПО ФИЛЬТРУ НИЧЕГО НЕ НАЙДЕНО"
+                                            unlockedProfile == GhostCryptoVault.VaultProfile.DECOY -> "ЛОЖНЫЙ СХРОН ПУСТ"
+                                            else -> "В СЕЙФЕ ПОКА НЕТ ФАЙЛОВ"
+                                        },
                                         color = CyberMuted,
                                         fontFamily = FontFamily.Monospace,
                                         fontSize = 13.sp
@@ -1265,18 +1465,21 @@ fun GhostVaultDialog(
                             }
                         } else {
                             LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                                items(vaultFiles, key = { it.name }) { file ->
+                                items(filteredVaultFiles, key = { it.name }) { file ->
                                     val dateStr = remember(file) {
                                         SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(file.lastModified()))
                                     }
                                     val sizeKb = remember(file) { file.length() / 1024 }
                                     val isVideo = remember(file) { GhostCryptoVault.isVideoFile(file) }
+                                    val isGcf2 = remember(file) { GhostCryptoVault.isGcf2File(file) }
+                                    val meta = vaultIndexMap[file.name]
+                                    val ttlText = meta?.takeIf { it.hasTtl() }?.formatRemainingRu() ?: ""
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(vertical = 3.dp)
                                             .background(CyberSurface, RoundedCornerShape(6.dp))
-                                            .border(1.dp, CyberBorder, RoundedCornerShape(6.dp))
+                                            .border(1.dp, if (ttlText.isNotEmpty()) CyberAmber.copy(alpha = 0.5f) else CyberBorder, RoundedCornerShape(6.dp))
                                             .clickable {
                                                 selectedFile = file
                                                 isDecrypting = true
@@ -1284,10 +1487,22 @@ fun GhostVaultDialog(
                                                     try {
                                                         cleanupPreviewMedia()
                                                         if (isVideo) {
-                                                            val vidTmp = withContext(Dispatchers.IO) {
-                                                                GhostCryptoVault.decryptToEphemeralFile(context, file)
+                                                            if (GhostCryptoVault.isGcf2File(file)) {
+                                                                val ds = withContext(Dispatchers.IO) {
+                                                                    GhostCryptoVault.openGcf2DataSource(context, file)
+                                                                }
+                                                                if (ds != null) {
+                                                                    streamingVideoDataSource = ds
+                                                                } else {
+                                                                    decryptedVideoFile = withContext(Dispatchers.IO) {
+                                                                        GhostCryptoVault.decryptToEphemeralFile(context, file)
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                decryptedVideoFile = withContext(Dispatchers.IO) {
+                                                                    GhostCryptoVault.decryptToEphemeralFile(context, file)
+                                                                }
                                                             }
-                                                            decryptedVideoFile = vidTmp
                                                         } else {
                                                             val raw = withContext(Dispatchers.IO) {
                                                                 GhostCryptoVault.decryptToRam(context, file)
@@ -1308,7 +1523,7 @@ fun GhostVaultDialog(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                                             Icon(
                                                 imageVector = if (isVideo) Icons.Default.Videocam else Icons.Default.Photo,
                                                 contentDescription = if (isVideo) "Видео" else "Фото",
@@ -1316,14 +1531,35 @@ fun GhostVaultDialog(
                                                 modifier = Modifier.size(18.dp)
                                             )
                                             Spacer(modifier = Modifier.width(8.dp))
-                                            Column {
+                                            Column(modifier = Modifier.weight(1f)) {
                                                 Text(
                                                     text = if (isVideo) "🎥 ${file.name}" else "📸 ${file.name}",
                                                     color = Color.White,
                                                     fontFamily = FontFamily.Monospace,
-                                                    fontSize = 11.sp
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
-                                                Text("$dateStr | $sizeKb КБ", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                                val containerLabel = if (isGcf2) "GCF2-STREAM" else "GCF1"
+                                                val ttlPart = if (ttlText.isNotEmpty()) " | ⏳$ttlText" else ""
+                                                Text(
+                                                    text = "$dateStr | $sizeKb КБ | $containerLabel$ttlPart",
+                                                    color = if (ttlText.isNotEmpty()) CyberAmber else CyberMuted,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 9.sp
+                                                )
+                                                if (meta != null && (meta.tags.isNotEmpty() || meta.note.isNotEmpty())) {
+                                                    val tagStr = meta.tags.joinToString(" ") { "#$it" }
+                                                    val notePart = if (meta.note.isNotEmpty()) " • ${meta.note}" else ""
+                                                    Text(
+                                                        text = "$tagStr$notePart".trim(),
+                                                        color = CyberCyan,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        fontSize = 9.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
                                             }
                                         }
                                         Icon(
@@ -1363,7 +1599,7 @@ fun GhostVaultDialog(
                                                     }
                                                     appendLine()
                                                     list.take(35).forEach { d ->
-                                                        appendLine("- ${d.file.name}: ${d.matchedKeyKind.labelRu} (${d.headerInfo.sizeBytes / 1024} КБ)")
+                                                        appendLine("- ${d.file.name} [${d.headerInfo.formatVersion}]: ${d.matchedKeyKind.labelRu} (${d.headerInfo.sizeBytes / 1024} КБ)")
                                                     }
                                                 }
                                             }
@@ -1371,7 +1607,7 @@ fun GhostVaultDialog(
                                     },
                                     enabled = !isRunningVaultDiag,
                                     shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(44.dp).testTag("vault_diagnose_all_btn")
+                                    modifier = Modifier.weight(1f).height(42.dp).testTag("vault_diagnose_all_btn")
                                 ) {
                                     Text(
                                         if (isRunningVaultDiag) "СКАН..." else "🩺 КЛЮЧИ (${vaultFiles.size})",
@@ -1397,10 +1633,10 @@ fun GhostVaultDialog(
                                         }
                                     },
                                     shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(44.dp).testTag("vault_backup_readonly_btn")
+                                    modifier = Modifier.weight(1f).height(42.dp).testTag("vault_backup_readonly_btn")
                                 ) {
                                     Text(
-                                        "📦 БЭКАП",
+                                        "📦 ЛОК.БЭКАП",
                                         color = CyberGreen,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold,
@@ -1435,7 +1671,7 @@ fun GhostVaultDialog(
                                         }
                                     },
                                     shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(44.dp).testTag("vault_export_chain_manifest_btn")
+                                    modifier = Modifier.weight(1f).height(42.dp).testTag("vault_export_chain_manifest_btn")
                                 ) {
                                     Text(
                                         "⛓️ ЦЕПЬ",
@@ -1445,6 +1681,42 @@ fun GhostVaultDialog(
                                         fontSize = 10.sp
                                     )
                                 }
+                            }
+                        }
+
+                        // Portable Encrypted .ZVB Backup/Restore Row (available even on empty vault for Restore!)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            OutlinedButton(
+                                enabled = !isZvbBusy && vaultFiles.isNotEmpty(),
+                                onClick = { zvbPasswordPromptMode = "EXPORT" },
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.weight(1f).height(42.dp).testTag("vault_zvb_export_btn")
+                            ) {
+                                Text(
+                                    "🔐 ЭКСПОРТ .ZVB",
+                                    color = if (vaultFiles.isNotEmpty()) CyberGreen else CyberMuted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
+                            }
+                            OutlinedButton(
+                                enabled = !isZvbBusy,
+                                onClick = { zvbPasswordPromptMode = "IMPORT" },
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.weight(1f).height(42.dp).testTag("vault_zvb_import_btn")
+                            ) {
+                                Text(
+                                    "📥 ИМПОРТ .ZVB",
+                                    color = CyberCyan,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
                             }
                         }
 
@@ -1517,7 +1789,10 @@ fun GhostVaultDialog(
                                 pendingSingleShred = false
                                 scope.launch {
                                     withContext(Dispatchers.IO) {
-                                        targetF?.let { GhostCryptoVault.shredFile(it) }
+                                        targetF?.let {
+                                            GhostCryptoVault.shredFile(it)
+                                            VaultIndexEngine.removeMeta(context, GhostCryptoVault.activeProfile, it.name)
+                                        }
                                         targetRam?.let { GhostCryptoVault.shredRamShot(it) }
                                     }
                                     cleanupPreviewMedia()
@@ -1742,6 +2017,350 @@ fun GhostVaultDialog(
                     containerColor = CyberSurface
                 )
             }
+            if (showMetaTtlDialog && selectedFile != null) {
+                val targetFile = selectedFile!!
+                val existingMeta = remember(targetFile.name, vaultIndexMap) {
+                    vaultIndexMap[targetFile.name] ?: VaultIndexEngine.VaultItemMeta(fileName = targetFile.name)
+                }
+                var tagsInput by remember { mutableStateOf(existingMeta.tags.joinToString(", ")) }
+                var noteInput by remember { mutableStateOf(existingMeta.note) }
+                AlertDialog(
+                    onDismissRequest = { showMetaTtlDialog = false },
+                    title = {
+                        Text(
+                            "ТЕГИ, ЗАМЕТКА И TTL-ШРЕДЕР",
+                            color = CyberAmber,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = tagsInput,
+                                onValueChange = { tagsInput = it },
+                                label = { Text("Теги через запятую (напр. док, плата)", fontSize = 10.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = CyberCyan,
+                                    unfocusedBorderColor = CyberBorder,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
+                            )
+                            OutlinedTextField(
+                                value = noteInput,
+                                onValueChange = { noteInput = it },
+                                label = { Text("Заметка", fontSize = 10.sp) },
+                                maxLines = 3,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = CyberCyan,
+                                    unfocusedBorderColor = CyberBorder,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
+                            )
+                            Text("Таймер авто-уничтожения (TTL):", color = CyberMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                VaultIndexEngine.TtlPreset.values().forEach { preset ->
+                                    Text(
+                                        text = preset.labelRu,
+                                        color = CyberAmber,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(CyberBlack)
+                                            .border(1.dp, CyberAmber.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                scope.launch {
+                                                    withContext(Dispatchers.IO) {
+                                                        VaultIndexEngine.setTtl(
+                                                            context,
+                                                            GhostCryptoVault.activeProfile,
+                                                            targetFile.name,
+                                                            preset.durationMs
+                                                        )
+                                                    }
+                                                    statusMessage = "⏳ TTL УСТАНОВЛЕН: ${preset.labelRu}"
+                                                    refreshFiles()
+                                                }
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val parsed = VaultIndexEngine.parseTagsInput(tagsInput)
+                                val cleanNote = noteInput
+                                showMetaTtlDialog = false
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        VaultIndexEngine.setTagsAndNote(
+                                            context,
+                                            GhostCryptoVault.activeProfile,
+                                            targetFile.name,
+                                            parsed,
+                                            cleanNote
+                                        )
+                                    }
+                                    statusMessage = "🏷️ ТЕГИ И ЗАМЕТКА СОХРАНЕНЫ"
+                                    refreshFiles()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberGreen)
+                        ) {
+                            Text("СОХРАНИТЬ", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showMetaTtlDialog = false }) {
+                            Text("ЗАКРЫТЬ", color = CyberMuted, fontFamily = FontFamily.Monospace)
+                        }
+                    },
+                    containerColor = CyberSurface
+                )
+            }
+
+            zvbPasswordPromptMode?.let { mode ->
+                var pwdText by remember(mode) { mutableStateOf("") }
+                var pwdConfirm by remember(mode) { mutableStateOf("") }
+                val isExport = mode == "EXPORT"
+                val canProceed = pwdText.length >= 4 && (!isExport || pwdText == pwdConfirm)
+                AlertDialog(
+                    onDismissRequest = { zvbPasswordPromptMode = null },
+                    title = {
+                        Text(
+                            text = if (isExport) "ЭКСПОРТ ПОРТАТИВНОГО .ZVB" else "ИМПОРТ ПОРТАТИВНОГО .ZVB",
+                            color = if (isExport) CyberGreen else CyberCyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = if (isExport) {
+                                    "Задай мастер-пароль для шифрования архива (PBKDF2 300k + AES-256-GCM). Подойдёт для переноса между debug/release и разными телефонами."
+                                } else {
+                                    "Введи мастер-пароль от файла .zvb. Файлы и теги будут перешифрованы под текущий сейф (${GhostCryptoVault.activeProfile.name})."
+                                },
+                                color = Color.White,
+                                fontSize = 11.sp
+                            )
+                            OutlinedTextField(
+                                value = pwdText,
+                                onValueChange = { pwdText = it },
+                                label = { Text("Мастер-пароль (мин. 4 символа)", fontSize = 10.sp) },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().testTag("zvb_password_input"),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = CyberGreen,
+                                    unfocusedBorderColor = CyberBorder,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
+                            )
+                            if (isExport) {
+                                OutlinedTextField(
+                                    value = pwdConfirm,
+                                    onValueChange = { pwdConfirm = it },
+                                    label = { Text("Повтори мастер-пароль", fontSize = 10.sp) },
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = CyberGreen,
+                                        unfocusedBorderColor = CyberBorder,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    )
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            enabled = canProceed,
+                            onClick = {
+                                pendingZvbPassword.fill('\u0000')
+                                pendingZvbPassword = pwdText.toCharArray()
+                                pwdText = ""
+                                pwdConfirm = ""
+                                zvbPasswordPromptMode = null
+                                if (isExport) {
+                                    val ts = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                                    exportZvbLauncher.launch("zver_vault_${GhostCryptoVault.activeProfile.name.lowercase()}_$ts.zvb")
+                                } else {
+                                    importZvbLauncher.launch(arrayOf("*/*"))
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = if (isExport) CyberGreen else CyberCyan)
+                        ) {
+                            Text(if (isExport) "ВЫБРАТЬ ФАЙЛ" else "ОТКРЫТЬ .ZVB", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { zvbPasswordPromptMode = null }) {
+                            Text("ОТМЕНА", color = CyberMuted, fontFamily = FontFamily.Monospace)
+                        }
+                    },
+                    containerColor = CyberSurface
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Gcf2StreamingVideoPlayer(
+    dataSource: EncryptedMediaDataSource,
+    onError: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var mediaPlayer by remember(dataSource) { mutableStateOf<MediaPlayer?>(null) }
+    var isPlaying by remember(dataSource) { mutableStateOf(false) }
+    var durationMs by remember(dataSource) { mutableStateOf(0) }
+    var positionMs by remember(dataSource) { mutableStateOf(0) }
+    var isPrepared by remember(dataSource) { mutableStateOf(false) }
+
+    LaunchedEffect(mediaPlayer, isPlaying, isPrepared) {
+        while (isPlaying && isPrepared) {
+            try {
+                positionMs = mediaPlayer?.currentPosition ?: 0
+            } catch (_: Exception) {}
+            delay(250)
+        }
+    }
+
+    DisposableEffect(dataSource) {
+        onDispose {
+            try {
+                mediaPlayer?.stop()
+                mediaPlayer?.release()
+            } catch (_: Exception) {}
+            mediaPlayer = null
+        }
+    }
+
+    Box(modifier = modifier.background(Color.Black)) {
+        androidx.compose.ui.viewinterop.AndroidView(
+            factory = { ctx ->
+                SurfaceView(ctx).apply {
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            try {
+                                val mp = MediaPlayer().apply {
+                                    setSurface(holder.surface)
+                                    setDataSource(dataSource)
+                                    setOnPreparedListener { readyMp ->
+                                        isPrepared = true
+                                        durationMs = readyMp.duration.coerceAtLeast(1)
+                                        readyMp.start()
+                                        isPlaying = true
+                                    }
+                                    setOnCompletionListener {
+                                        isPlaying = false
+                                    }
+                                    setOnErrorListener { _, what, extra ->
+                                        onError("GCF2 ПЛЕЕР: код $what/$extra")
+                                        true
+                                    }
+                                    prepareAsync()
+                                }
+                                mediaPlayer = mp
+                            } catch (e: Exception) {
+                                onError("GCF2 STREAM ОШИБКА: ${e.message}")
+                            }
+                        }
+
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            try {
+                                mediaPlayer?.setSurface(null)
+                                mediaPlayer?.release()
+                            } catch (_: Exception) {}
+                            mediaPlayer = null
+                            isPrepared = false
+                            isPlaying = false
+                        }
+                    })
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.72f))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            IconButton(
+                onClick = {
+                    val mp = mediaPlayer ?: return@IconButton
+                    if (!isPrepared) return@IconButton
+                    if (mp.isPlaying) {
+                        mp.pause()
+                        isPlaying = false
+                    } else {
+                        mp.start()
+                        isPlaying = true
+                    }
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = CyberGreen
+                )
+            }
+
+            if (durationMs > 0) {
+                Slider(
+                    value = positionMs.toFloat().coerceIn(0f, durationMs.toFloat()),
+                    onValueChange = { v ->
+                        positionMs = v.toInt()
+                        if (isPrepared) {
+                            try { mediaPlayer?.seekTo(v.toInt()) } catch (_: Exception) {}
+                        }
+                    },
+                    valueRange = 0f..durationMs.toFloat(),
+                    modifier = Modifier.weight(1f),
+                    colors = SliderDefaults.colors(
+                        thumbColor = CyberGreen,
+                        activeTrackColor = CyberGreen,
+                        inactiveTrackColor = CyberBorder
+                    )
+                )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+            }
+
+            Text(
+                text = "GCF2 • ${positionMs / 1000}/${durationMs / 1000}с",
+                color = CyberCyan,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp
+            )
         }
     }
 }
