@@ -25,7 +25,7 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class P2BurstAndPrivacyTest {
 
     private lateinit var context: Context

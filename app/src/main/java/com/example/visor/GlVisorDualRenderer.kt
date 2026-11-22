@@ -721,7 +721,14 @@ void main() {
 class GlVisorDualRenderer(
     private val onGpuUnavailable: (String) -> Unit
 ) {
-    private val glThread = HandlerThread("ZverGlVisor").apply { start() }
+    private val glThread = HandlerThread("ZverGlVisor").apply {
+        uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, throwable ->
+            if (!released.get()) {
+                onGpuUnavailable(throwable.localizedMessage ?: throwable.javaClass.simpleName)
+            }
+        }
+        start()
+    }
     private val glHandler = Handler(glThread.looper)
     private val released = AtomicBoolean(false)
     private val initialized = AtomicBoolean(false)
@@ -1304,44 +1311,44 @@ class GlVisorDualRenderer(
             }
             st.updateTexImage()
             st.getTransformMatrix(stMatrix)
+
+            val activeMode = shaderModeId.coerceAtLeast(0)
+            if (activeMode == 13 && lastActiveModeId != 13) {
+                eulerResetNeeded = true
+                eulerHasState = false
+            }
+            lastActiveModeId = activeMode
+            if (activeMode == 13) {
+                updateEulerStatePass()
+            }
+
+            val ptsNs = st.timestamp
+            if (firstFrameNotified.compareAndSet(false, true)) {
+                onFirstFrameRendered?.invoke()
+            }
+
+            if (displaySurface != EGL14.EGL_NO_SURFACE && displayWidth > 0 && displayHeight > 0) {
+                if (EGL14.eglMakeCurrent(eglDisplay, displaySurface, displaySurface, eglContext)) {
+                    drawQuadAndPose(displayWidth, displayHeight, flipVertical = false)
+                    EGL14.eglSwapBuffers(eglDisplay, displaySurface)
+                }
+            }
+
+            if (encoderSurface != EGL14.EGL_NO_SURFACE && encoderWidth > 0 && encoderHeight > 0) {
+                if (EGL14.eglMakeCurrent(eglDisplay, encoderSurface, encoderSurface, eglContext)) {
+                    drawQuadAndPose(encoderWidth, encoderHeight, flipVertical = false)
+                    val normalizedPtsNs = ptsNormalizer.nextRelativePtsNs(ptsNs, System.nanoTime())
+                    EGLExt.eglPresentationTimeANDROID(
+                        eglDisplay,
+                        encoderSurface,
+                        normalizedPtsNs
+                    )
+                    EGL14.eglSwapBuffers(eglDisplay, encoderSurface)
+                    onEncoderFramePushed?.invoke()
+                }
+            }
         } catch (_: Throwable) {
             return
-        }
-
-        val activeMode = shaderModeId.coerceAtLeast(0)
-        if (activeMode == 13 && lastActiveModeId != 13) {
-            eulerResetNeeded = true
-            eulerHasState = false
-        }
-        lastActiveModeId = activeMode
-        if (activeMode == 13) {
-            updateEulerStatePass()
-        }
-
-        val ptsNs = st.timestamp
-        if (firstFrameNotified.compareAndSet(false, true)) {
-            onFirstFrameRendered?.invoke()
-        }
-
-        if (displaySurface != EGL14.EGL_NO_SURFACE && displayWidth > 0 && displayHeight > 0) {
-            if (EGL14.eglMakeCurrent(eglDisplay, displaySurface, displaySurface, eglContext)) {
-                drawQuadAndPose(displayWidth, displayHeight, flipVertical = false)
-                EGL14.eglSwapBuffers(eglDisplay, displaySurface)
-            }
-        }
-
-        if (encoderSurface != EGL14.EGL_NO_SURFACE && encoderWidth > 0 && encoderHeight > 0) {
-            if (EGL14.eglMakeCurrent(eglDisplay, encoderSurface, encoderSurface, eglContext)) {
-                drawQuadAndPose(encoderWidth, encoderHeight, flipVertical = false)
-                val normalizedPtsNs = ptsNormalizer.nextRelativePtsNs(ptsNs, System.nanoTime())
-                EGLExt.eglPresentationTimeANDROID(
-                    eglDisplay,
-                    encoderSurface,
-                    normalizedPtsNs
-                )
-                EGL14.eglSwapBuffers(eglDisplay, encoderSurface)
-                onEncoderFramePushed?.invoke()
-            }
         }
     }
 

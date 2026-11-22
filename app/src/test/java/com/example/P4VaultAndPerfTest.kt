@@ -23,7 +23,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class P4VaultAndPerfTest {
 
     @Test

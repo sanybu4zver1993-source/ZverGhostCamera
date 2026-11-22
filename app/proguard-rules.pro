@@ -20,7 +20,26 @@
 -dontwarn androidx.media3.**
 
 # RootBeer JNI
--keep class com.scottyab.rootbeer.RootBeerNative { *; }
+-keep class com.scottyab.rootbeer.** { *; }
+-dontwarn com.scottyab.rootbeer.**
+
+# AndroidX Startup, WorkManager, Room, ProcessLifecycle, Emoji2, ProfileInstaller
+-keep class androidx.startup.** { *; }
+-keep class * implements androidx.startup.Initializer { *; }
+-keep class androidx.work.** { *; }
+-keep class * extends androidx.work.ListenableWorker { public <init>(android.content.Context, androidx.work.WorkerParameters); }
+-keep class * extends androidx.work.WorkerFactory { *; }
+-keep class androidx.room.** { *; }
+-keep class * extends androidx.room.RoomDatabase { *; }
+-keep class * extends androidx.room.RoomOpenHelper$Delegate { *; }
+-keep class androidx.lifecycle.ProcessLifecycleInitializer { *; }
+-keep class androidx.lifecycle.ProcessLifecycleOwner** { *; }
+-keep class androidx.emoji2.** { *; }
+-keep class androidx.profileinstaller.** { *; }
+
+# Firebase Components (ML Kit registrar discovery)
+-keep class com.google.firebase.components.** { *; }
+-keep class * implements com.google.firebase.components.ComponentRegistrar { *; }
 
 # OkHttp 4.10
 -dontwarn org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement
@@ -36,3 +55,4 @@
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
 -keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
 -keepattributes Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable
+

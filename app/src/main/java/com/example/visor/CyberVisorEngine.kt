@@ -24,7 +24,7 @@ import kotlin.math.sqrt
 
 enum class VisorMode(val title: String, val badgeRu: String, val hintRu: String) {
     NORMAL("Обычный", "КАМЕРА", "Обычный режим камеры без наворотов"),
-    BIO_RPPG("Пульс (Лицо/Палец)", "ПУЛЬС", "Приложи палец к камере или держи лицо (6–8с): меряет удар в минуту и стресс без сети"),
+    BIO_RPPG("Пульс (Лицо/Палец)", "ПУЛЬС", "Приложи палец к камере или держи лицо (6–8с): ориентировочный расчёт ЧСС без сети (не медизделие)"),
     SKIN_CHROMA("Тепло-Кожа", "КОЖА", "Выделяет живого человека по цвету кожи и подсвечивает тех, кто шевелится"),
     EULER_AMP("Дрожь / Пульс", "ТРЯСКА", "Усиливает в 20 раз малейшие движения кожи, дыхание и пульс"),
     VEIN_HEMO("Веновизор", "ВЕНЫ", "Вытягивает контраст вен и кровеносных сосудов под кожей"),
@@ -407,9 +407,14 @@ class CyberVisorEngine {
                     }
 
                     VisorMode.DERMA_UV_SIM -> {
-                        val uvContrast = ((b * 1.35f) - (r * 0.35f)).roundToInt().coerceIn(0, 255)
-                        val dr = (uvContrast * 0.45f).toInt()
-                        val dg = (uvContrast * 0.65f).toInt()
+                        val minChan = min(r, min(g, b))
+                        val glareFactor = if (minChan > 188) {
+                            (1f - ((minChan - 188) / 67f).coerceIn(0f, 1f) * 0.38f)
+                        } else 1f
+                        val baseUvc = ((b * 1.40f) - (r * 0.45f)).coerceIn(0f, 255f)
+                        val uvContrast = (baseUvc * glareFactor).roundToInt().coerceIn(0, 255)
+                        val dr = (uvContrast * 0.42f).toInt()
+                        val dg = (uvContrast * 0.62f).toInt()
                         val db = min(255, (uvContrast * 1.25f + 15).toInt())
                         (0xFF shl 24) or (dr shl 16) or (dg shl 8) or db
                     }
@@ -968,6 +973,19 @@ class CyberVisorEngine {
         var irMaxY = -1
         var edgeHits = 0
         var prevRowLuma = 0
+        var rppgSkinR = 0.0
+        var rppgSkinG = 0.0
+        var rppgSkinB = 0.0
+        var rppgSkinCnt = 0
+        var rppgRoiR = 0.0
+        var rppgRoiG = 0.0
+        var rppgRoiB = 0.0
+        var rppgRoiCnt = 0
+        var rppgRedTouchCnt = 0
+        val roiX0 = (dstW * 0.34f).toInt()
+        val roiX1 = (dstW * 0.66f).toInt()
+        val roiY0 = (dstH * 0.28f).toInt()
+        val roiY1 = (dstH * 0.70f).toInt()
 
         for (sy in 0 until subH) {
             val oy = sy * step
@@ -991,6 +1009,30 @@ class CyberVisorEngine {
                 val b = (yVal + ((454 * uVal) shr 8)).coerceIn(0, 255)
 
                 when (mode) {
+                    VisorMode.BIO_RPPG -> {
+                        var dx: Int
+                        var dy: Int
+                        when (rot) {
+                            90 -> { dx = subH - 1 - sy; dy = sx }
+                            180 -> { dx = subW - 1 - sx; dy = subH - 1 - sy }
+                            270 -> { dx = sy; dy = subW - 1 - sx }
+                            else -> { dx = sx; dy = sy }
+                        }
+                        if (isFrontCamera) dx = dstW - 1 - dx
+                        if (dx in roiX0..roiX1 && dy in roiY0..roiY1) {
+                            rppgRoiR += r
+                            rppgRoiG += g
+                            rppgRoiB += b
+                            rppgRoiCnt++
+                            if (r > 125 && r > g + 35 && r > b + 45) rppgRedTouchCnt++
+                            if (YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(yVal, uRaw, vRaw) && isWarmHumanSkinRgbGuard(r, g, b)) {
+                                rppgSkinR += r
+                                rppgSkinG += g
+                                rppgSkinB += b
+                                rppgSkinCnt++
+                            }
+                        }
+                    }
                     VisorMode.SKIN_CHROMA -> {
                         if (YcbcrSkinAnalyzer.isHumanSkinYCbCrFast(yVal, uRaw, vRaw) && isWarmHumanSkinRgbGuard(r, g, b)) {
                             skinCnt++
@@ -1032,6 +1074,55 @@ class CyberVisorEngine {
         }
 
         return when (mode) {
+            VisorMode.BIO_RPPG -> {
+                val isFingerTouch = rppgRoiCnt > 0 && (rppgRedTouchCnt.toFloat() / rppgRoiCnt) > 0.55f
+                val meanR: Double
+                val meanG: Double
+                val meanB: Double
+                val validSample: Boolean
+                val sourceTag: String
+                when {
+                    isFingerTouch -> {
+                        meanR = rppgRoiR / max(1, rppgRoiCnt)
+                        meanG = rppgRoiG / max(1, rppgRoiCnt)
+                        meanB = rppgRoiB / max(1, rppgRoiCnt)
+                        validSample = true
+                        sourceTag = "Контакт пальца (PPG)"
+                    }
+                    rppgSkinCnt >= 18 -> {
+                        meanR = rppgSkinR / rppgSkinCnt
+                        meanG = rppgSkinG / rppgSkinCnt
+                        meanB = rppgSkinB / rppgSkinCnt
+                        validSample = true
+                        sourceTag = "ROI Кожа лица ($rppgSkinCnt пикс)"
+                    }
+                    else -> {
+                        meanR = rppgRoiR / max(1, rppgRoiCnt)
+                        meanG = rppgRoiG / max(1, rppgRoiCnt)
+                        meanB = rppgRoiB / max(1, rppgRoiCnt)
+                        validSample = false
+                        sourceTag = "Наведите на лицо или палец"
+                    }
+                }
+                val (bpm, hrvMs, qual) = if (validSample) {
+                    rppgTracker.pushSample(
+                        timestampNs = System.nanoTime(),
+                        meanR = meanR,
+                        meanG = meanG,
+                        meanB = meanB,
+                        greenFallback = isFingerTouch
+                    )
+                } else {
+                    Triple(null, null, 0f)
+                }
+                VisorTelemetry(
+                    mode = mode,
+                    estimatedBpm = bpm,
+                    estimatedHrvMs = hrvMs,
+                    signalQuality = qual,
+                    rppgSourceLabel = sourceTag
+                )
+            }
             VisorMode.SKIN_CHROMA -> VisorTelemetry(
                 mode = mode,
                 skinPercent = ((skinCnt * 100f) / max(1, total)).roundToInt().coerceIn(0, 100),
@@ -1206,9 +1297,14 @@ class CyberVisorEngine {
                                     (veinBoost shl 8) or min(255, (veinBoost * 0.90f + 20).toInt())
                             }
                             VisorMode.DERMA_UV_SIM -> {
-                                val uvContrast = ((b * 1.35f) - (r * 0.35f)).roundToInt().coerceIn(0, 255)
-                                (0xFF shl 24) or ((uvContrast * 0.45f).toInt() shl 16) or
-                                    ((uvContrast * 0.65f).toInt() shl 8) or min(255, (uvContrast * 1.25f + 15).toInt())
+                                val minChan = min(r, min(g, b))
+                                val glareFactor = if (minChan > 188) {
+                                    (1f - ((minChan - 188) / 67f).coerceIn(0f, 1f) * 0.38f)
+                                } else 1f
+                                val baseUvc = ((b * 1.40f) - (r * 0.45f)).coerceIn(0f, 255f)
+                                val uvContrast = (baseUvc * glareFactor).roundToInt().coerceIn(0, 255)
+                                (0xFF shl 24) or ((uvContrast * 0.42f).toInt() shl 16) or
+                                    ((uvContrast * 0.62f).toInt() shl 8) or min(255, (uvContrast * 1.25f + 15).toInt())
                             }
                             VisorMode.THERMAL_LUT -> {
                                 val luma = (r * 77 + g * 150 + b * 29) shr 8
@@ -1932,31 +2028,33 @@ internal class PosRppgTracker(private val windowSize: Int = 240) {
             }
         }
 
-        val t0 = timesSec[oldestIdx]
-        var bestBpm = 70
-        var maxPower = 0.0
-        var totalBandPower = 0.0
-
-        for (bpm in 48..180 step 2) {
-            val omega = 2.0 * PI * (bpm / 60.0)
-            var re = 0.0
-            var im = 0.0
-            for (i in 0 until n) {
-                val dt = timesSec[(oldestIdx + i) % windowSize] - t0
-                val angle = omega * dt
-                re += windowedPulse[i] * cos(angle)
-                im -= windowedPulse[i] * sin(angle)
-            }
-            val power = re * re + im * im
-            totalBandPower += power
-            if (power > maxPower) {
-                maxPower = power
-                bestBpm = bpm
-            }
+        val tChrono = DoubleArray(n)
+        val vChrono = DoubleArray(n)
+        for (i in 0 until n) {
+            tChrono[i] = timesSec[(oldestIdx + i) % windowSize]
+            vChrono[i] = rawPulse[i]
         }
 
-        val snrRatio = if (totalBandPower > 1e-9) (maxPower / (totalBandPower / 67.0)) else 0.0
-        val quality = ((snrRatio - 2.0) / 8.0).toFloat().coerceIn(0f, 1f)
+        val uniformBuf = DoubleArray(256)
+        val uniformLen = FftProcessor.resampleLinear(
+            timesSec = tChrono,
+            values = vChrono,
+            count = n,
+            targetSampleRateHz = 30.0,
+            outBuf = uniformBuf
+        )
+        if (uniformLen < 48) return Triple(null, null, 0f)
+
+        val peak = FftProcessor.findPeakFrequencyWithSnr(
+            signal = uniformBuf,
+            validLength = uniformLen,
+            sampleRateHz = 30.0,
+            minFreqHz = 0.75,
+            maxFreqHz = 3.0,
+            fftSize = 256
+        )
+        val bestBpm = (peak.peakFreqHz * 60.0).roundToInt().coerceIn(45, 180)
+        val quality = ((peak.snrRatio - 1.8) / 7.5).toFloat().coerceIn(0f, 1f)
         if (quality < 0.35f) return Triple(null, null, quality)
 
         val hrvMs = estimateRmssdMs(rawPulse, oldestIdx, n)

@@ -23,7 +23,7 @@ import java.security.MessageDigest
 import javax.crypto.AEADBadTagException
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class P0DiagnosticsAndFixesTest {
 
     private lateinit var context: Context

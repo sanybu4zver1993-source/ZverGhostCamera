@@ -20,9 +20,17 @@ object AntiForensicsGuard {
     )
 
     fun assessDeviceSecurity(context: Context): SecurityStatus {
-        val debugger = Debug.isDebuggerConnected() || Debug.waitingForDebugger()
-        val rootBeer = RootBeer(context)
-        val rooted = rootBeer.isRooted || checkSuBinaryPaths()
+        val debugger = try {
+            Debug.isDebuggerConnected() || Debug.waitingForDebugger()
+        } catch (_: Throwable) {
+            false
+        }
+        val rootBeerOk = try {
+            RootBeer(context).isRooted
+        } catch (_: Throwable) {
+            false
+        }
+        val rooted = rootBeerOk || checkSuBinaryPaths()
         val testKeys = Build.TAGS?.contains("test-keys") == true
 
         return SecurityStatus(
@@ -48,7 +56,7 @@ object AntiForensicsGuard {
         return paths.any { path ->
             try {
                 File(path).exists()
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 false
             }
         }

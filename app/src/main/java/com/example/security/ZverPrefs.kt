@@ -37,6 +37,7 @@ object ZverPrefs {
     private const val KEY_VOLUME_KEY_ACTION = "volume_key_action"
     private const val KEY_GYRO_EIS_ENABLED = "gyro_eis_lite_enabled"
     private const val KEY_TIMELAPSE_INTERVAL_MS = "timelapse_interval_ms"
+    private const val KEY_LAST_CRASH_BREADCRUMB = "last_crash_breadcrumb"
 
     enum class VolumeKeyAction(val labelRu: String) {
         SHUTTER_OR_VIDEO("Кадр / Видео"),
@@ -324,5 +325,33 @@ object ZverPrefs {
             .putInt(KEY_LAST_HRV_MS, 0)
             .putLong(KEY_LAST_PULSE_TS, 0L)
             .apply()
+    }
+
+    fun recordLastCrashBreadcrumb(context: Context, summary: String) {
+        try {
+            val safe = summary.take(360)
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_CRASH_BREADCRUMB, safe)
+                .commit()
+        } catch (_: Throwable) {}
+    }
+
+    fun getLastCrashBreadcrumb(context: Context): String? =
+        try {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_LAST_CRASH_BREADCRUMB, null)
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+
+    fun clearLastCrashBreadcrumb(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_LAST_CRASH_BREADCRUMB)
+                .apply()
+        } catch (_: Throwable) {}
     }
 }

@@ -1,6 +1,11 @@
 package com.example.camera
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.hardware.camera2.CaptureRequest
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.core.CameraControl
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -14,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -27,6 +33,7 @@ import java.util.Arrays
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.max
 
 /**
  * CaptureManager v3.0:
@@ -106,7 +113,8 @@ class CaptureManager(
         zoomRatio: Float = 1.0f,
         photoIqOverride: PhotoIqEngine.PhotoIqProfile? = null,
         visorMode: VisorMode = VisorMode.NORMAL,
-        visorEngine: CyberVisorEngine? = null
+        visorEngine: CyberVisorEngine? = null,
+        gpuSnapshotProvider: (() -> Bitmap?)? = null
     ): CaptureResult = captureMutex.withLock {
         val startTime = System.currentTimeMillis()
         val preset = if (forceDocumentBw) {
@@ -124,9 +132,9 @@ class CaptureManager(
         }
         val effectiveZoomIq = if (ZverPrefs.isZoomIqEnabled(appContext) && zoomRatio >= 1.8f) zoomRatio else 1.0f
 
-        // Temporal Bio-Visor modes (EULER_AMP, BIO_RPPG) preserve live pulse/motion state from active analyzer frame
+        // Temporal Bio-Visor modes (EULER_AMP, BIO_RPPG) preserve live pulse/motion state from GPU FBO or analyzer frame
         if (!forceDocumentBw && (visorMode == VisorMode.EULER_AMP || visorMode == VisorMode.BIO_RPPG)) {
-            val liveSnap = visorEngine?.snapshotLatestBitmapCopy()
+            val liveSnap = gpuSnapshotProvider?.invoke() ?: visorEngine?.snapshotLatestBitmapCopy()
             if (liveSnap != null) {
                 var snapClean: ByteArray? = null
                 try {
@@ -408,6 +416,140 @@ class CaptureManager(
         } finally {
             decodedFrames.forEach { if (!it.isRecycled) it.recycle() }
             stackedBitmap?.let { if (!it.isRecycled) it.recycle() }
+            visorBitmap?.let { if (!it.isRecycled) it.recycle() }
+            cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
+        }
+    }
+
+    data class FocusBracketCaptureResult(
+        val captureResult: CaptureResult,
+        val stackOutput: FocusStackEngine.FocusStackOutput
+    )
+
+    /**
+     * Hardware Focus Bracketing & All-in-Focus Laplacian Fusion (Part B):
+     * Locks AE/AWB, sweeps `CaptureRequest.LENS_FOCUS_DISTANCE` across diopter steps (when supported),
+     * aligns frames, fuses sharpest 16x16 tiles via [FocusStackEngine], strips EXIF, and encrypts into Vault/RAM.
+     */
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+    suspend fun captureFocusBracketStack(
+        cameraControl: CameraControl?,
+        proProfile: CameraCapabilityProfiler.CameraProProfile,
+        steps: Int = 3,
+        applyDehaze: Boolean = false,
+        zoomRatio: Float = 1.0f,
+        visorMode: VisorMode = VisorMode.NORMAL,
+        visorEngine: CyberVisorEngine? = null
+    ): FocusBracketCaptureResult = captureMutex.withLock {
+        val startTime = System.currentTimeMillis()
+        val preset = ZverPrefs.getCompressionPreset(appContext)
+        val antiPrnu = ZverPrefs.isAntiPrnuEnabled(appContext)
+        val ramOnly = ZverPrefs.isRamOnlyMode(appContext)
+        val effectiveZoomIq = if (ZverPrefs.isZoomIqEnabled(appContext) && zoomRatio >= 1.8f) zoomRatio else 1.0f
+
+        val diopterRatios = FocusStackEngine.buildDiopterSteps(steps)
+        val canSweepFocus = cameraControl != null && proProfile.isManualFocusSupported && proProfile.minFocusDiopters > 0.05f
+        val decodedFrames = ArrayList<Bitmap>(diopterRatios.size)
+        var fusedBitmap: Bitmap? = null
+        var visorBitmap: Bitmap? = null
+        var cleanBytes: ByteArray? = null
+
+        val c2Ctrl = cameraControl?.let {
+            try { Camera2CameraControl.from(it) } catch (_: Exception) { null }
+        }
+
+        try {
+            val maxPixelsPerFrame = (5_400_000L / max(1, diopterRatios.size)).coerceAtLeast(800_000L)
+            val rawCaptureStart = System.currentTimeMillis()
+            for (ratio in diopterRatios) {
+                if (c2Ctrl != null && canSweepFocus) {
+                    try {
+                        val opts = CaptureRequestOptions.Builder()
+                            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+                            .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+                            .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                            .setCaptureRequestOption(
+                                CaptureRequest.LENS_FOCUS_DISTANCE,
+                                (ratio.coerceIn(0f, 1f) * proProfile.minFocusDiopters)
+                            )
+                            .build()
+                        c2Ctrl.setCaptureRequestOptions(opts)
+                        delay(160)
+                    } catch (_: Exception) {}
+                }
+                val shot = captureRawJpeg()
+                try {
+                    val bmp = withContext(Dispatchers.Default) {
+                        decodeBoundedUprightBitmap(shot.bytes, shot.rotationDegrees, maxPixelsPerFrame)
+                    }
+                    if (bmp != null) decodedFrames.add(bmp)
+                } finally {
+                    Arrays.fill(shot.bytes, 0.toByte())
+                }
+            }
+            val captureRawMs = (System.currentTimeMillis() - rawCaptureStart).coerceAtLeast(0L)
+
+            if (decodedFrames.isEmpty()) {
+                throw IOException("Не удалось захватить кадры для фокус-стекинга")
+            }
+
+            return@withLock withContext(Dispatchers.IO) {
+                val procStart = System.currentTimeMillis()
+                val fused = FocusStackEngine.fuseFocusStack(
+                    frames = decodedFrames,
+                    usedManualFocusSweep = canSweepFocus,
+                    recycleInputs = true
+                )
+                decodedFrames.clear()
+                fusedBitmap = fused.bitmap
+
+                val exportBmp = if (visorMode != VisorMode.NORMAL) {
+                    val engine = visorEngine ?: CyberVisorEngine()
+                    val applied = engine.applyVisorEffectToBitmap(fusedBitmap!!, visorMode)
+                    fusedBitmap?.let { if (!it.isRecycled) it.recycle() }
+                    fusedBitmap = null
+                    visorBitmap = applied
+                    applied
+                } else {
+                    fusedBitmap!!
+                }
+
+                val proc = ExifStripper.processBitmapClean(
+                    sourceBitmap = exportBmp,
+                    recycleSource = true,
+                    preset = preset,
+                    antiPrnu = antiPrnu,
+                    applyDehaze = (visorMode == VisorMode.NORMAL && applyDehaze),
+                    photoIqProfile = PhotoIqEngine.PhotoIqProfile.OFF,
+                    zoomRatio = effectiveZoomIq
+                )
+                fusedBitmap = null
+                visorBitmap = null
+                cleanBytes = proc.cleanBytes
+                val processEncodeMs = (System.currentTimeMillis() - procStart).coerceAtLeast(0L)
+
+                val tag = buildList {
+                    add("ФОКУС×${fused.frameCount}")
+                    if (fused.sharpnessGainPct > 0) add("+${fused.sharpnessGainPct}%")
+                    if (visorMode != VisorMode.NORMAL) add("ВИЗОР:${visorMode.badgeRu}")
+                }.joinToString("+")
+
+                val capRes = persistEncryptedCaptureResult(
+                    payload = cleanBytes!!,
+                    ramOnly = ramOnly,
+                    strippedCount = fused.frameCount,
+                    startTime = startTime,
+                    audit = proc.audit,
+                    iqTag = tag,
+                    captureRawMs = captureRawMs,
+                    processEncodeMs = processEncodeMs
+                )
+                FocusBracketCaptureResult(captureResult = capRes, stackOutput = fused)
+            }
+        } finally {
+            try { c2Ctrl?.clearCaptureRequestOptions() } catch (_: Exception) {}
+            decodedFrames.forEach { if (!it.isRecycled) it.recycle() }
+            fusedBitmap?.let { if (!it.isRecycled) it.recycle() }
             visorBitmap?.let { if (!it.isRecycled) it.recycle() }
             cleanBytes?.let { Arrays.fill(it, 0.toByte()) }
         }

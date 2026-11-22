@@ -66,13 +66,15 @@ class MainActivity : ComponentActivity() {
     private var forceVaultSecureOverride: Boolean = false
 
     private fun applyScreenCapturePolicy() {
-        val blockEnabled = forceVaultSecureOverride || ZverPrefs.isScreenRecBlockEnabled(this)
-        if (blockEnabled) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        } else {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            isScreenBeingRecorded.value = false
-        }
+        try {
+            val blockEnabled = forceVaultSecureOverride || ZverPrefs.isScreenRecBlockEnabled(this)
+            if (blockEnabled) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                isScreenBeingRecorded.value = false
+            }
+        } catch (_: Throwable) {}
     }
 
     private val externalCommandReceiver = object : android.content.BroadcastReceiver() {
@@ -136,7 +138,10 @@ class MainActivity : ComponentActivity() {
                 isScreenBeingRecorded.value =
                     (initialState == WindowManager.SCREEN_RECORDING_STATE_VISIBLE) &&
                         (forceVaultSecureOverride || ZverPrefs.isScreenRecBlockEnabled(this))
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {
+                screenRecCallback = null
+                isScreenBeingRecorded.value = false
+            }
         }
     }
 
@@ -145,16 +150,18 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             try {
                 screenRecCallback?.let { windowManager.removeScreenRecordingCallback(it) }
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
             screenRecCallback = null
             isScreenBeingRecorded.value = false
         }
-        if (ZverPrefs.isAutoLockOnBackground(this)) {
-            GhostCryptoVault.lockSession()
-            ByokManager.clearSessionMemory()
-            SentinelEngine.clearSession()
-            com.example.security.SecureClipboard.clearIfOwned(this)
-        }
+        try {
+            if (ZverPrefs.isAutoLockOnBackground(this)) {
+                GhostCryptoVault.lockSession()
+                ByokManager.clearSessionMemory()
+                SentinelEngine.clearSession()
+                com.example.security.SecureClipboard.clearIfOwned(this)
+            }
+        } catch (_: Throwable) {}
     }
 
     override fun onResume() {
@@ -194,31 +201,57 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var receiverRegistered = false
+
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            unregisterReceiver(externalCommandReceiver)
-        } catch (_: Exception) {}
+        if (receiverRegistered) {
+            try {
+                unregisterReceiver(externalCommandReceiver)
+            } catch (_: Throwable) {}
+            receiverRegistered = false
+        }
         if (isFinishing) {
-            GhostCryptoVault.clearRamShots()
-            ByokManager.clearSessionMemory()
-            SentinelEngine.clearSession()
-            com.example.security.SecureClipboard.clearIfOwned(this)
+            try {
+                GhostCryptoVault.clearRamShots()
+                ByokManager.clearSessionMemory()
+                SentinelEngine.clearSession()
+                com.example.security.SecureClipboard.clearIfOwned(this)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun installOfflineCrashBreadcrumbRecorder() {
+        val appCtx = applicationContext ?: return
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        if (prev?.javaClass?.name?.startsWith("com.example.") == true) return
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val topFrames = throwable.stackTrace.take(3).joinToString(" <- ") {
+                    "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+                }
+                val summary = "[${thread.name}] ${throwable.javaClass.simpleName}: ${throwable.message.orEmpty()} @ $topFrames"
+                ZverPrefs.recordLastCrashBreadcrumb(appCtx, summary)
+            } catch (_: Throwable) {}
+            prev?.uncaughtException(thread, throwable)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installOfflineCrashBreadcrumbRecorder()
         super.onCreate(savedInstanceState)
 
         // Prevent Android Recents task snapshots in /data/system_ce/0/snapshots/ without blocking user screenshots
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
                 setRecentsScreenshotEnabled(false)
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
 
         // Enforce Dead-Man Switch before presenting any UI
-        GhostCryptoVault.checkDeadManSwitch(this)
+        try {
+            GhostCryptoVault.checkDeadManSwitch(this)
+        } catch (_: Throwable) {}
 
         val filter = android.content.IntentFilter().apply {
             addAction("com.example.camera.TRIGGER_CAPTURE")
@@ -226,12 +259,25 @@ class MainActivity : ComponentActivity() {
             addAction("com.example.camera.TOGGLE_TORCH")
             addAction("com.example.camera.TOGGLE_BLACKOUT")
         }
-        ContextCompat.registerReceiver(
-            this,
-            externalCommandReceiver,
-            filter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                externalCommandReceiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            receiverRegistered = true
+        } catch (_: Throwable) {
+            try {
+                ContextCompat.registerReceiver(
+                    this,
+                    externalCommandReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                receiverRegistered = true
+            } catch (_: Throwable) {}
+        }
 
         applyScreenCapturePolicy()
         onScreenCapturePolicyChanged = {
@@ -243,11 +289,21 @@ class MainActivity : ComponentActivity() {
                 applyScreenCapturePolicy()
             }
         }
-        handleCustomUri(intent)
-        enableEdgeToEdge()
+        try {
+            handleCustomUri(intent)
+        } catch (_: Throwable) {}
+        try {
+            enableEdgeToEdge()
+        } catch (_: Throwable) {}
 
         setContent {
-            val activeCamo = remember { CamouflageManager.getCurrentCamouflage(this) }
+            val activeCamo = remember {
+                try {
+                    CamouflageManager.getCurrentCamouflage(this)
+                } catch (_: Throwable) {
+                    CamouflageManager.CamouflageMode.ZVER
+                }
+            }
             var isGateUnlocked by remember {
                 mutableStateOf(activeCamo != CamouflageManager.CamouflageMode.CALCULATOR)
             }

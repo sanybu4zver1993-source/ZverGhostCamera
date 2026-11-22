@@ -26,7 +26,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class P5PolishAndGpuTest {
 
     private fun leInt(v: Int): ByteArray = ByteBuffer.allocate(4)
@@ -142,20 +142,20 @@ class P5PolishAndGpuTest {
         val gpuModes = VisorMode.values().filter { it.supportsGpuShader() }
         val cpuTemporalModes = VisorMode.values().filterNot { it.supportsGpuShader() }
 
-        assertEquals(setOf(VisorMode.BIO_RPPG, VisorMode.EULER_AMP), cpuTemporalModes.toSet())
-        assertEquals(12, gpuModes.size)
+        assertTrue(cpuTemporalModes.isEmpty())
+        assertEquals(14, gpuModes.size)
 
         val ids = gpuModes.map { it.shaderModeId() }
-        assertEquals(12, ids.distinct().size)
-        assertTrue(ids.all { it in 0..11 })
-        assertEquals(-1, VisorMode.BIO_RPPG.shaderModeId())
-        assertEquals(-1, VisorMode.EULER_AMP.shaderModeId())
+        assertEquals(14, ids.distinct().size)
+        assertTrue(ids.all { it in 0..13 })
+        assertEquals(12, VisorMode.BIO_RPPG.shaderModeId())
+        assertEquals(13, VisorMode.EULER_AMP.shaderModeId())
 
         assertTrue(GlVisorShaders.VERTEX_300.contains("#version 300 es"))
         assertTrue(GlVisorShaders.FRAGMENT_300.contains("GL_OES_EGL_image_external_essl3"))
         assertTrue(GlVisorShaders.FRAGMENT_100.contains("GL_OES_EGL_image_external"))
         assertTrue(GlVisorShaders.POSE_VERTEX.contains("uPointSize"))
-        for (modeId in 1..11) {
+        for (modeId in 1..13) {
             assertTrue("FRAGMENT_300 missing uMode == $modeId", GlVisorShaders.FRAGMENT_300.contains("uMode == $modeId"))
             assertTrue("FRAGMENT_100 missing uMode == $modeId", GlVisorShaders.FRAGMENT_100.contains("uMode == $modeId"))
         }

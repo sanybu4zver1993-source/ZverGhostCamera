@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -98,6 +99,14 @@ class CameraTelemetryState {
     var sentinelAvgLuma by mutableIntStateOf(128)
     var sentinelIsNight by mutableStateOf(false)
     var sentinelStepLabel by mutableStateOf("ОЖИДАНИЕ")
+
+    var retroHotspots by mutableStateOf<List<com.example.camera.RetroReflectionDetector.RetroHotspot>>(emptyList())
+    var retroSummaryLabel by mutableStateOf("")
+    var isRetroScanning by mutableStateOf(false)
+
+    var isTimeLapseRecording by mutableStateOf(false)
+    var timeLapseFrames by mutableIntStateOf(0)
+    var timeLapseElapsedSec by mutableIntStateOf(0)
 }
 
 @Composable
@@ -461,5 +470,95 @@ internal fun CountdownOverlay(countdownRemaining: Int?) {
             fontWeight = FontWeight.Bold,
             fontSize = 96.sp
         )
+    }
+}
+
+@Composable
+internal fun RetroReflectionOverlay(
+    isScanning: Boolean,
+    hotspots: List<com.example.camera.RetroReflectionDetector.RetroHotspot>,
+    summaryLabel: String,
+    modifier: Modifier = Modifier
+) {
+    if (!isScanning && hotspots.isEmpty() && summaryLabel.isBlank()) return
+    val infiniteTransition = rememberInfiniteTransition(label = "retroPulse")
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0.72f,
+        targetValue = 1.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(650, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "retroPulseScale"
+    )
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("retro_reflection_overlay")
+    ) {
+        if (hotspots.isNotEmpty()) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                for (spot in hotspots) {
+                    val cx = (spot.normX * size.width).coerceIn(16f, size.width - 16f)
+                    val cy = (spot.normY * size.height).coerceIn(16f, size.height - 16f)
+                    val baseR = max(18.dp.toPx(), spot.radiusPx * 3.2f)
+                    val r = baseR * pulse
+                    drawCircle(
+                        color = CyberRed.copy(alpha = 0.25f),
+                        radius = r * 1.15f,
+                        center = Offset(cx, cy)
+                    )
+                    drawCircle(
+                        color = CyberRed,
+                        radius = r,
+                        center = Offset(cx, cy),
+                        style = Stroke(width = 2.5.dp.toPx())
+                    )
+                    drawCircle(
+                        color = NeonCyan,
+                        radius = max(5.dp.toPx(), baseR * 0.35f),
+                        center = Offset(cx, cy),
+                        style = Stroke(width = 1.6.dp.toPx())
+                    )
+                    val arm = r * 1.4f
+                    drawLine(
+                        color = NeonCyan,
+                        start = Offset(cx - arm, cy),
+                        end = Offset(cx + arm, cy),
+                        strokeWidth = 1.4.dp.toPx()
+                    )
+                    drawLine(
+                        color = NeonCyan,
+                        start = Offset(cx, cy - arm),
+                        end = Offset(cx, cy + arm),
+                        strokeWidth = 1.4.dp.toPx()
+                    )
+                }
+            }
+        }
+        val badgeText = when {
+            isScanning -> "🔦 СКАН АНТИ-ОПТИКИ (ВСПЫШКА OFF/ON)..."
+            summaryLabel.isNotBlank() -> summaryLabel
+            else -> ""
+        }
+        if (badgeText.isNotBlank()) {
+            Text(
+                text = badgeText,
+                color = if (hotspots.isNotEmpty()) CyberRed else NeonCyan,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 10.sp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(top = 230.dp)
+                    .background(CyberBlack.copy(alpha = 0.80f))
+                    .border(
+                        1.dp,
+                        if (hotspots.isNotEmpty()) CyberRed else NeonCyan
+                    )
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            )
+        }
     }
 }

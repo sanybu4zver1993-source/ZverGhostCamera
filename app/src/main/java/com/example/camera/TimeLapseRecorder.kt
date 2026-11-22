@@ -163,7 +163,7 @@ class TimeLapseRecorder {
                     if (!endOfStream) break
                 }
                 status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    if (!muxerGuard.isStarted) {
+                    if (!muxerGuard.started) {
                         videoTrackIndex = mx.addTrack(mc.outputFormat)
                         mx.start()
                         muxerGuard.markStarted()
@@ -172,7 +172,7 @@ class TimeLapseRecorder {
                 status >= 0 -> {
                     val outBuf = mc.getOutputBuffer(status)
                     val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-                    if (outBuf != null && bufferInfo.size > 0 && !isConfig && muxerGuard.isStarted && videoTrackIndex >= 0) {
+                    if (outBuf != null && bufferInfo.size > 0 && !isConfig && muxerGuard.started && videoTrackIndex >= 0) {
                         outBuf.position(bufferInfo.offset)
                         outBuf.limit(bufferInfo.offset + bufferInfo.size)
                         val frameIdx = max(0, capturedCount.get() - 1)

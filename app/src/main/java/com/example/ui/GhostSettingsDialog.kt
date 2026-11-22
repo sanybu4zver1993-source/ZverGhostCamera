@@ -30,6 +30,7 @@ import com.example.assist.ByokManager
 import com.example.camera.CameraDiagnostics
 import com.example.camera.ExifStripper
 import com.example.camera.PhotoIqEngine
+import com.example.camera.TimeLapseRecorder
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
 import com.example.security.SecureClipboard
@@ -98,6 +99,9 @@ fun GhostSettingsDialog(
     var zoomIqEnabled by remember { mutableStateOf(ZverPrefs.isZoomIqEnabled(context)) }
     var zebraThreshold by remember { mutableStateOf(ZverPrefs.getZebraThreshold(context)) }
     var smartCompression by remember { mutableStateOf(ZverPrefs.isSmartCompressionEnabled(context)) }
+    var gyroEisEnabled by remember { mutableStateOf(ZverPrefs.isGyroEisEnabled(context)) }
+    var timeLapseIntervalMs by remember { mutableStateOf(ZverPrefs.getTimeLapseIntervalMs(context)) }
+    var lastCrashBreadcrumb by remember { mutableStateOf(ZverPrefs.getLastCrashBreadcrumb(context)) }
     var currentCamo by remember { mutableStateOf(CamouflageManager.getCurrentCamouflage(context)) }
     var volumeAction by remember { mutableStateOf(ZverPrefs.getVolumeKeyAction(context)) }
     val transportConfig by ByokManager.transportConfigFlow.collectAsState()
@@ -270,6 +274,47 @@ fun GhostSettingsDialog(
                                 smartCompression = it
                                 ZverPrefs.setSmartCompressionEnabled(context, it)
                                 onStatusMessage(if (it) "SMART СЖАТИЕ: ВКЛ" else "SMART СЖАТИЕ: ФИКС. ПРЕСЕТ")
+                            }
+                            SecurityToggleRow(
+                                title = "Gyro-EIS Lite (Визор)",
+                                subtitle = "Гироскопическая стабилизация кадра визора через GPU MVP-матрицу (1.10x кроп)",
+                                checked = gyroEisEnabled,
+                                testTag = "settings_eis_switch"
+                            ) {
+                                gyroEisEnabled = it
+                                ZverPrefs.setGyroEisEnabled(context, it)
+                                onStatusMessage(if (it) "GYRO-EIS LITE: ВКЛ" else "GYRO-EIS LITE: ВЫКЛ")
+                            }
+                            Text("Интервал Таймлапса (интервалометр):", color = CyberMuted, fontSize = 10.sp)
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                TimeLapseRecorder.SUPPORTED_INTERVALS_MS.forEach { ms ->
+                                    val sel = timeLapseIntervalMs == ms
+                                    val label = if (ms < 1000L) "${ms}мс" else "${ms / 1000L}с"
+                                    Text(
+                                        text = label,
+                                        color = if (sel) Color.Black else CyberMuted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (sel) NeonCyan else CyberSurface)
+                                            .border(1.dp, if (sel) NeonCyan else CyberBorder, RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                timeLapseIntervalMs = ms
+                                                ZverPrefs.setTimeLapseIntervalMs(context, ms)
+                                                onStatusMessage("ТАЙМЛАПС ИНТЕРВАЛ: $label")
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                            .testTag("settings_timelapse_interval_$ms")
+                                    )
+                                }
                             }
                             Text("Порог пересвета Zebra (яркость Y): $zebraThreshold", color = CyberMuted, fontSize = 10.sp)
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 4.dp)) {
@@ -509,6 +554,32 @@ fun GhostSettingsDialog(
                                     modifier = Modifier.height(40.dp).testTag("copy_camera_diag_button")
                                 ) {
                                     Text("КОПИРОВАТЬ ОТЧЁТ HAL", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                }
+                            }
+
+                            lastCrashBreadcrumb?.let { crashText ->
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(CyberSurface, RoundedCornerShape(8.dp))
+                                        .border(1.dp, CyberRed.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                        .padding(8.dp)
+                                ) {
+                                    Text("ПОСЛЕДНИЙ ОФФЛАЙН-КРАШ (ЛОГ):", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(crashText, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 9.sp, lineHeight = 13.sp)
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    OutlinedButton(
+                                        onClick = {
+                                            ZverPrefs.clearLastCrashBreadcrumb(context)
+                                            lastCrashBreadcrumb = null
+                                        },
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier.height(36.dp).testTag("clear_crash_breadcrumb_button")
+                                    ) {
+                                        Text("ОЧИСТИТЬ ЛОГ", color = CyberRed, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                    }
                                 }
                             }
                         }
@@ -1041,11 +1112,13 @@ private fun SecurityToggleRow(
     title: String,
     subtitle: String,
     checked: Boolean,
+    testTag: String? = null,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .let { if (testTag != null) it.testTag(testTag) else it }
             .padding(vertical = 3.dp)
             .background(CyberSurface, RoundedCornerShape(8.dp))
             .border(1.dp, if (checked) CyberGreen.copy(alpha = 0.4f) else CyberBorder, RoundedCornerShape(8.dp))

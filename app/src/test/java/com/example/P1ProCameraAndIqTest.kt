@@ -22,7 +22,7 @@ import org.robolectric.annotation.Config
 import java.nio.ByteBuffer
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class P1ProCameraAndIqTest {
 
     private lateinit var context: Context

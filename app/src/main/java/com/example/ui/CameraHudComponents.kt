@@ -41,8 +41,10 @@ import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.filled.Exposure
 import androidx.compose.material.icons.filled.FilterHdr
+import androidx.compose.material.icons.filled.Flare
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlipCameraAndroid
@@ -58,8 +60,10 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ShutterSpeed
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Timelapse
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VideoStable
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -139,6 +143,10 @@ internal fun CameraTopHudAndDrawer(
     showPcbLabDialog: Boolean,
     isAudioWatcherActive: Boolean,
     audioThresholdDbfs: Double,
+    isGyroEisEnabled: Boolean,
+    isRetroScanning: Boolean,
+    isTimeLapseRecording: Boolean,
+    timeLapseIntervalMs: Long,
     isCapturing: Boolean,
     isRecordingVideo: Boolean,
     lastStatusMessage: String?,
@@ -168,6 +176,10 @@ internal fun CameraTopHudAndDrawer(
     onCycleMultiFrame: () -> Unit,
     onOpenPcbLab: () -> Unit,
     onToggleAudioWatcher: () -> Unit,
+    onToggleGyroEis: () -> Unit,
+    onTriggerRetroScan: () -> Unit,
+    onToggleTimeLapse: () -> Unit,
+    onOpenSelfTest: () -> Unit,
     onOpenVikaSheet: () -> Unit,
     onOpenPanicShred: () -> Unit,
     onDismissStatus: () -> Unit = {}
@@ -327,6 +339,10 @@ internal fun CameraTopHudAndDrawer(
             showPcbLabDialog = showPcbLabDialog,
             isAudioWatcherActive = isAudioWatcherActive,
             audioThresholdDbfs = audioThresholdDbfs,
+            isGyroEisEnabled = isGyroEisEnabled,
+            isRetroScanning = isRetroScanning,
+            isTimeLapseRecording = isTimeLapseRecording,
+            timeLapseIntervalMs = timeLapseIntervalMs,
             onToggleFocusPeaking = onToggleFocusPeaking,
             onToggleFalseColor = onToggleFalseColor,
             onToggleDocumentMode = onToggleDocumentMode,
@@ -346,6 +362,10 @@ internal fun CameraTopHudAndDrawer(
             onCycleMultiFrame = onCycleMultiFrame,
             onOpenPcbLab = onOpenPcbLab,
             onToggleAudioWatcher = onToggleAudioWatcher,
+            onToggleGyroEis = onToggleGyroEis,
+            onTriggerRetroScan = onTriggerRetroScan,
+            onToggleTimeLapse = onToggleTimeLapse,
+            onOpenSelfTest = onOpenSelfTest,
             onOpenPanicShred = onOpenPanicShred,
             onCloseDrawer = onCloseDrawer
         )
@@ -353,6 +373,7 @@ internal fun CameraTopHudAndDrawer(
         RecordingAndStatusBanner(
             isCapturing = isCapturing,
             isRecordingVideo = isRecordingVideo,
+            isTimeLapseRecording = isTimeLapseRecording,
             lastStatusMessage = lastStatusMessage,
             telemetry = telemetry,
             onDismissStatus = onDismissStatus
@@ -501,6 +522,10 @@ private fun CameraToolsDrawer(
     showPcbLabDialog: Boolean,
     isAudioWatcherActive: Boolean,
     audioThresholdDbfs: Double,
+    isGyroEisEnabled: Boolean,
+    isRetroScanning: Boolean,
+    isTimeLapseRecording: Boolean,
+    timeLapseIntervalMs: Long,
     onToggleFocusPeaking: () -> Unit,
     onToggleFalseColor: () -> Unit,
     onToggleDocumentMode: () -> Unit,
@@ -520,6 +545,10 @@ private fun CameraToolsDrawer(
     onCycleMultiFrame: () -> Unit,
     onOpenPcbLab: () -> Unit,
     onToggleAudioWatcher: () -> Unit,
+    onToggleGyroEis: () -> Unit,
+    onTriggerRetroScan: () -> Unit,
+    onToggleTimeLapse: () -> Unit,
+    onOpenSelfTest: () -> Unit,
     onOpenPanicShred: () -> Unit,
     onCloseDrawer: () -> Unit
 ) {
@@ -717,6 +746,42 @@ private fun CameraToolsDrawer(
                 )
             }
 
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val intervalLabel = if (timeLapseIntervalMs < 1000L) "${timeLapseIntervalMs}мс" else "${timeLapseIntervalMs / 1000L}с"
+                DrawerTileButton(
+                    icon = Icons.Default.VideoStable,
+                    label = "Gyro-EIS\nLite",
+                    active = isGyroEisEnabled,
+                    accent = NeonCyan,
+                    modifier = Modifier.weight(1f).testTag("drawer_eis_toggle"),
+                    onClick = onToggleGyroEis
+                )
+                DrawerTileButton(
+                    icon = Icons.Default.Flare,
+                    label = if (isRetroScanning) "Скан...\nОптика" else "Анти-\nОптика",
+                    active = isRetroScanning,
+                    accent = CyberRed,
+                    modifier = Modifier.weight(1f).testTag("drawer_retro_scan_btn"),
+                    onClick = onTriggerRetroScan
+                )
+                DrawerTileButton(
+                    icon = Icons.Default.Timelapse,
+                    label = if (isTimeLapseRecording) "Стоп\nТаймлапс" else "Таймлапс\n$intervalLabel",
+                    active = isTimeLapseRecording,
+                    accent = NeonYellow,
+                    modifier = Modifier.weight(1f).testTag("drawer_timelapse_toggle"),
+                    onClick = onToggleTimeLapse
+                )
+                DrawerTileButton(
+                    icon = Icons.AutoMirrored.Filled.FactCheck,
+                    label = "Self-\nTest",
+                    active = false,
+                    accent = CyberGreen,
+                    modifier = Modifier.weight(1f).testTag("drawer_selftest_btn"),
+                    onClick = onOpenSelfTest
+                )
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -741,6 +806,7 @@ private fun CameraToolsDrawer(
 private fun ColumnScope.RecordingAndStatusBanner(
     isCapturing: Boolean,
     isRecordingVideo: Boolean,
+    isTimeLapseRecording: Boolean,
     lastStatusMessage: String?,
     telemetry: CameraTelemetryState,
     onDismissStatus: () -> Unit = {}
@@ -750,6 +816,7 @@ private fun ColumnScope.RecordingAndStatusBanner(
     val isWarnStatus = !isErrorStatus && (msgUpper.contains("ВНИМАНИЕ") || msgUpper.contains("ТРЕВОГА") || msgUpper.contains("НЕДОСТУП"))
     val bannerAccent = when {
         isRecordingVideo -> CyberRed
+        isTimeLapseRecording -> NeonYellow
         isCapturing -> CyberGreen
         isErrorStatus -> CyberRed
         isWarnStatus -> NeonYellow
@@ -757,6 +824,7 @@ private fun ColumnScope.RecordingAndStatusBanner(
     }
     val bannerBorder = when {
         isRecordingVideo -> CyberRed
+        isTimeLapseRecording -> NeonYellow
         isCapturing -> CyberGreen
         isErrorStatus -> CyberRed
         isWarnStatus -> NeonYellow
@@ -764,7 +832,7 @@ private fun ColumnScope.RecordingAndStatusBanner(
     }
 
     AnimatedVisibility(
-        visible = isCapturing || lastStatusMessage != null || isRecordingVideo,
+        visible = isCapturing || lastStatusMessage != null || isRecordingVideo || isTimeLapseRecording,
         enter = fadeIn() + slideInVertically(),
         exit = fadeOut() + slideOutVertically(),
         modifier = Modifier
@@ -777,7 +845,7 @@ private fun ColumnScope.RecordingAndStatusBanner(
                 .background(CyberBlack.copy(alpha = 0.85f))
                 .border(1.5.dp, bannerBorder, RoundedCornerShape(16.dp))
                 .let { mod ->
-                    if (!isRecordingVideo && !isCapturing && lastStatusMessage != null) {
+                    if (!isRecordingVideo && !isTimeLapseRecording && !isCapturing && lastStatusMessage != null) {
                         mod.clickable(onClick = onDismissStatus)
                     } else {
                         mod
@@ -809,6 +877,20 @@ private fun ColumnScope.RecordingAndStatusBanner(
                         fontWeight = FontWeight.Bold,
                         fontSize = 11.sp,
                         maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (isTimeLapseRecording) {
+                    val elapsed = telemetry.timeLapseElapsedSec
+                    val timerStr = String.format(Locale.ROOT, "%02d:%02d", elapsed / 60, elapsed % 60)
+                    Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(NeonYellow))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "⏱ ТАЙМЛАПС: ${telemetry.timeLapseFrames} кадр. • $timerStr",
+                        color = NeonYellow,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 } else if (isCapturing) {
