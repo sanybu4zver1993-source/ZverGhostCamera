@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -73,6 +74,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -153,6 +155,8 @@ internal fun CameraTopHudAndDrawer(
     isRecordingVideo: Boolean,
     lastStatusMessage: String?,
     telemetry: CameraTelemetryState,
+    selectedCameraMode: String = "PHOTO",
+    zoomRatio: Float = 1.0f,
     onToggleTorch: () -> Unit,
     onToggleDrawer: () -> Unit,
     onCloseDrawer: () -> Unit,
@@ -192,134 +196,110 @@ internal fun CameraTopHudAndDrawer(
         ExifStripper.CompressionPreset.DOCUMENT_BW -> "Ч/Б"
         ExifStripper.CompressionPreset.HIGH_QUALITY -> "JPEG"
     }
+    val modeShort = when (selectedCameraMode) {
+        "VIDEO" -> "Видео"
+        "NIGHT" -> "Ночь"
+        "VISOR" -> "Визор"
+        "SENTINEL" -> "Дозор"
+        "DOCUMENTS" -> "Док"
+        else -> "Фото"
+    }
+    val zoomLabel = if (zoomRatio > 1.05f) " • ${zoomRatio.toInt()}x" else ""
+    val toolsNote = if (activeToolsCount > 0) " • +$activeToolsCount" else ""
+    val shakeWarn = if (!telemetry.isGyroStable && !telemetry.isTripodMode) " • ⚠" else ""
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(CyberBlack.copy(alpha = 0.58f))
-                .border(
-                    1.dp,
-                    if (isAssistModeActive) CyberRed.copy(alpha = 0.7f) else CyberGreen.copy(alpha = 0.3f),
-                    RoundedCornerShape(16.dp)
-                )
-                .padding(start = 12.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(if (isAssistModeActive) CyberRed else if (hasByokKey) NeonCyan else CyberGreen)
+            // Single compact pill on the left — keeps ~90% of top area open viewfinder
+            Row(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(CyberBlack.copy(alpha = 0.52f))
+                    .border(
+                        1.dp,
+                        if (isAssistModeActive) CyberRed.copy(alpha = 0.7f) else CyberGreen.copy(alpha = 0.35f),
+                        RoundedCornerShape(16.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "ZVER",
-                        color = Color.White,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (ramMode) "ОЗУ • $presetShort" else "СЕЙФ • $presetShort",
-                        color = if (ramMode) NeonYellow else CyberGreen,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 9.sp,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(CyberSurface.copy(alpha = 0.8f))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.height(2.dp))
-                CameraTelemetrySummaryText(telemetry = telemetry)
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onToggleTorch,
-                    modifier = Modifier.size(40.dp).testTag("torch_button")
-                ) {
-                    Icon(
-                        imageVector = if (isTorchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                        contentDescription = "Фонарик",
-                        tint = if (isTorchActive) NeonYellow else Color.White,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-
-                Box(contentAlignment = Alignment.TopEnd) {
-                    IconButton(
-                        onClick = onToggleDrawer,
-                        modifier = Modifier.size(40.dp).testTag("tools_drawer_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isToolsDrawerOpen) Icons.Default.KeyboardArrowUp else Icons.Default.Tune,
-                            contentDescription = "Шторка инструментов",
-                            tint = if (isToolsDrawerOpen || activeToolsCount > 0) CyberGreen else Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    if (activeToolsCount > 0 && !isToolsDrawerOpen) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 4.dp, end = 4.dp)
-                                .size(14.dp)
-                                .clip(CircleShape)
-                                .background(CyberGreen),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = activeToolsCount.toString(),
-                                color = Color.Black,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 8.sp
-                            )
-                        }
-                    }
-                }
-
-                IconButton(
-                    onClick = onFlipCamera,
-                    modifier = Modifier.size(40.dp).testTag("flip_camera_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.FlipCameraAndroid,
-                        contentDescription = "Сменить камеру",
-                        tint = CyberGreen,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-
-                TopOverflowMenuButton(
-                    expanded = isTopOverflowMenuOpen,
-                    isProPanelExpanded = isProPanelExpanded,
-                    isHistogramEnabled = isHistogramEnabled,
-                    isZebraEnabled = isZebraEnabled,
-                    onOpenMenu = onOpenOverflowMenu,
-                    onDismissMenu = onDismissOverflowMenu,
-                    onOpenSettings = onOpenSettings,
-                    onToggleProPanel = onToggleProPanel,
-                    onToggleHistogram = onToggleHistogram,
-                    onToggleZebra = onToggleZebra,
-                    onOpenPcbLab = onOpenPcbLab,
-                    onOpenCamouflage = onOpenCamouflage,
-                    onActivateStealth = onActivateStealth,
-                    onOpenVikaSheet = onOpenVikaSheet
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (isAssistModeActive) CyberRed else if (hasByokKey) NeonCyan else CyberGreen)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "ZVER",
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    softWrap = false
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "${if (ramMode) "ОЗУ" else "СЕЙФ"} • $presetShort • $modeShort$zoomLabel$toolsNote$shakeWarn",
+                    color = when {
+                        isTorchActive -> NeonYellow
+                        ramMode -> NeonYellow
+                        else -> CyberGreen
+                    },
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Chrome-style top-right 3-dots menu button (with tiny active-tools badge)
+            TopOverflowMenuButton(
+                expanded = isTopOverflowMenuOpen,
+                activeToolsCount = activeToolsCount,
+                isTorchActive = isTorchActive,
+                isToolsDrawerOpen = isToolsDrawerOpen,
+                isProPanelExpanded = isProPanelExpanded,
+                isHistogramEnabled = isHistogramEnabled,
+                isZebraEnabled = isZebraEnabled,
+                isFocusPeakingEnabled = isFocusPeakingEnabled,
+                isGyroEisEnabled = isGyroEisEnabled,
+                isAudioWatcherActive = isAudioWatcherActive,
+                isRetroScanning = isRetroScanning,
+                onOpenMenu = onOpenOverflowMenu,
+                onDismissMenu = onDismissOverflowMenu,
+                onToggleTorch = onToggleTorch,
+                onFlipCamera = onFlipCamera,
+                onToggleDrawer = onToggleDrawer,
+                onOpenSettings = onOpenSettings,
+                onToggleProPanel = onToggleProPanel,
+                onToggleHistogram = onToggleHistogram,
+                onToggleZebra = onToggleZebra,
+                onToggleFocusPeaking = onToggleFocusPeaking,
+                onToggleGyroEis = onToggleGyroEis,
+                onToggleAudioWatcher = onToggleAudioWatcher,
+                onTriggerRetroScan = onTriggerRetroScan,
+                onOpenPcbLab = onOpenPcbLab,
+                onOpenSelfTest = onOpenSelfTest,
+                onOpenCamouflage = onOpenCamouflage,
+                onActivateStealth = onActivateStealth,
+                onOpenVikaSheet = onOpenVikaSheet,
+                onOpenPanicShred = onOpenPanicShred
+            )
         }
 
         CameraToolsDrawer(
@@ -394,113 +374,298 @@ internal fun CameraTopHudAndDrawer(
 }
 
 @Composable
-private fun CameraTelemetrySummaryText(telemetry: CameraTelemetryState) {
-    val isTripod = telemetry.isTripodMode
-    val isStable = telemetry.isGyroStable
-    val variance = telemetry.liveLaplacianVariance
-    val stabilityText = if (isTripod) "Штатив" else if (isStable) "Стабильно" else "Тряска!"
-    Text(
-        text = "$stabilityText • Резкость ${variance.toInt()}",
-        color = if (isStable) CyberMuted else CyberRed,
-        fontFamily = FontFamily.Monospace,
-        fontSize = 9.sp,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis
-    )
-}
-
-@Composable
 private fun TopOverflowMenuButton(
     expanded: Boolean,
+    activeToolsCount: Int,
+    isTorchActive: Boolean,
+    isToolsDrawerOpen: Boolean,
     isProPanelExpanded: Boolean,
     isHistogramEnabled: Boolean,
     isZebraEnabled: Boolean,
+    isFocusPeakingEnabled: Boolean,
+    isGyroEisEnabled: Boolean,
+    isAudioWatcherActive: Boolean,
+    isRetroScanning: Boolean,
     onOpenMenu: () -> Unit,
     onDismissMenu: () -> Unit,
+    onToggleTorch: () -> Unit,
+    onFlipCamera: () -> Unit,
+    onToggleDrawer: () -> Unit,
     onOpenSettings: () -> Unit,
     onToggleProPanel: () -> Unit,
     onToggleHistogram: () -> Unit,
     onToggleZebra: () -> Unit,
+    onToggleFocusPeaking: () -> Unit,
+    onToggleGyroEis: () -> Unit,
+    onToggleAudioWatcher: () -> Unit,
+    onTriggerRetroScan: () -> Unit,
     onOpenPcbLab: () -> Unit,
+    onOpenSelfTest: () -> Unit,
     onOpenCamouflage: () -> Unit,
     onActivateStealth: () -> Unit,
-    onOpenVikaSheet: () -> Unit
+    onOpenVikaSheet: () -> Unit,
+    onOpenPanicShred: () -> Unit
 ) {
-    Box {
+    Box(contentAlignment = Alignment.TopEnd) {
         IconButton(
             onClick = onOpenMenu,
-            modifier = Modifier.size(40.dp).testTag("top_overflow_menu_button")
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .background(CyberBlack.copy(alpha = 0.56f))
+                .border(
+                    1.dp,
+                    if (expanded || activeToolsCount > 0 || isTorchActive) CyberGreen.copy(alpha = 0.65f) else CyberBorder,
+                    CircleShape
+                )
+                .testTag("top_overflow_menu_button")
         ) {
             Icon(
                 imageVector = Icons.Default.MoreVert,
-                contentDescription = "Меню",
+                contentDescription = "Верхнее меню",
                 tint = Color.White,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(22.dp)
             )
+        }
+        if (activeToolsCount > 0 && !expanded) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 3.dp, end = 3.dp)
+                    .size(15.dp)
+                    .clip(CircleShape)
+                    .background(CyberGreen),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = activeToolsCount.toString(),
+                    color = Color.Black,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 8.sp
+                )
+            }
         }
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = onDismissMenu,
             modifier = Modifier
+                .widthIn(min = 246.dp, max = 300.dp)
+                .heightIn(max = 420.dp)
                 .background(CyberSurface)
-                .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
+                .border(1.dp, CyberBorder, RoundedCornerShape(12.dp))
         ) {
+            // Chrome-like quick icon action strip at top of dropdown
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MenuQuickIconButton(
+                    icon = if (isTorchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                    label = "Свет",
+                    active = isTorchActive,
+                    accent = NeonYellow,
+                    modifier = Modifier.testTag("torch_button")
+                ) {
+                    onToggleTorch()
+                }
+                MenuQuickIconButton(
+                    icon = Icons.Default.FlipCameraAndroid,
+                    label = "Камера",
+                    active = false,
+                    accent = CyberGreen,
+                    modifier = Modifier.testTag("flip_camera_button")
+                ) {
+                    onDismissMenu()
+                    onFlipCamera()
+                }
+                MenuQuickIconButton(
+                    icon = if (isToolsDrawerOpen) Icons.Default.KeyboardArrowUp else Icons.Default.Tune,
+                    label = "Инстр.",
+                    active = isToolsDrawerOpen || activeToolsCount > 0,
+                    accent = CyberGreen,
+                    modifier = Modifier.testTag("tools_drawer_button")
+                ) {
+                    onDismissMenu()
+                    onToggleDrawer()
+                }
+                MenuQuickIconButton(
+                    icon = Icons.Default.Settings,
+                    label = "Опции",
+                    active = false,
+                    accent = NeonCyan,
+                    modifier = Modifier.testTag("top_menu_settings_button")
+                ) {
+                    onDismissMenu()
+                    onOpenSettings()
+                }
+            }
+
+            HorizontalDivider(color = CyberBorder, thickness = 1.dp)
+
             DropdownMenuItem(
-                text = { Text("Настройки ZVER", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
-                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
-                onClick = { onDismissMenu(); onOpenSettings() }
+                text = {
+                    Text(
+                        if (isToolsDrawerOpen) "Свернуть панель 24 узлов" else "Все инструменты (24 узла)",
+                        color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp
+                    )
+                },
+                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
+                onClick = { onDismissMenu(); onToggleDrawer() }
             )
             DropdownMenuItem(
                 text = {
                     Text(
                         if (isProPanelExpanded) "Скрыть PRO-панель" else "Открыть PRO-панель",
-                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp
                     )
                 },
-                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp)) },
+                leadingIcon = { Icon(Icons.Default.Exposure, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp)) },
                 onClick = { onDismissMenu(); onToggleProPanel() }
             )
             DropdownMenuItem(
                 text = {
                     Text(
                         if (isHistogramEnabled) "Гистограмма: Вкл" else "Гистограмма: Выкл",
-                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                        color = if (isHistogramEnabled) CyberGreen else Color.White,
+                        fontFamily = FontFamily.Monospace, fontSize = 11.sp
                     )
                 },
                 leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
-                onClick = { onDismissMenu(); onToggleHistogram() }
+                onClick = { onToggleHistogram() }
             )
             DropdownMenuItem(
                 text = {
                     Text(
                         if (isZebraEnabled) "Зебра пересветов: Вкл" else "Зебра пересветов: Выкл",
-                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                        color = if (isZebraEnabled) NeonYellow else Color.White,
+                        fontFamily = FontFamily.Monospace, fontSize = 11.sp
                     )
                 },
                 leadingIcon = { Icon(Icons.Default.Grain, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp)) },
-                onClick = { onDismissMenu(); onToggleZebra() }
+                onClick = { onToggleZebra() }
             )
             DropdownMenuItem(
-                text = { Text("Лаборатория плат PCB", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                text = {
+                    Text(
+                        if (isFocusPeakingEnabled) "Фокус-пикинг: Вкл" else "Фокус-пикинг: Выкл",
+                        color = if (isFocusPeakingEnabled) NeonCyan else Color.White,
+                        fontFamily = FontFamily.Monospace, fontSize = 11.sp
+                    )
+                },
+                leadingIcon = { Icon(Icons.Default.CenterFocusStrong, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
+                onClick = { onToggleFocusPeaking() }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (isGyroEisEnabled) "Gyro-EIS Lite: Вкл" else "Gyro-EIS Lite: Выкл",
+                        color = if (isGyroEisEnabled) NeonCyan else Color.White,
+                        fontFamily = FontFamily.Monospace, fontSize = 11.sp
+                    )
+                },
+                leadingIcon = { Icon(Icons.Default.VideoStable, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
+                onClick = { onToggleGyroEis() }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (isAudioWatcherActive) "Акустик-сторож: Вкл" else "Акустик-сторож",
+                        color = if (isAudioWatcherActive) NeonYellow else Color.White,
+                        fontFamily = FontFamily.Monospace, fontSize = 11.sp
+                    )
+                },
+                leadingIcon = { Icon(Icons.Default.GraphicEq, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp)) },
+                onClick = { onDismissMenu(); onToggleAudioWatcher() }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (isRetroScanning) "Анти-Оптика: Скан..." else "Анти-Оптика (блики)",
+                        color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp
+                    )
+                },
+                leadingIcon = { Icon(Icons.Default.Flare, contentDescription = null, tint = CyberRed, modifier = Modifier.size(18.dp)) },
+                onClick = { onDismissMenu(); onTriggerRetroScan() }
+            )
+            HorizontalDivider(color = CyberBorder, thickness = 1.dp)
+            DropdownMenuItem(
+                text = { Text("Лаборатория плат PCB", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
                 leadingIcon = { Icon(Icons.Default.Memory, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
                 onClick = { onDismissMenu(); onOpenPcbLab() }
             )
             DropdownMenuItem(
-                text = { Text("Маскировка иконки", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                text = { Text("Self-Test диагностика", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.FactCheck, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
+                onClick = { onDismissMenu(); onOpenSelfTest() }
+            )
+            DropdownMenuItem(
+                text = { Text("Маскировка иконки", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
                 leadingIcon = { Icon(Icons.Default.VisibilityOff, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
                 onClick = { onDismissMenu(); onOpenCamouflage() }
             )
             DropdownMenuItem(
-                text = { Text("Стелс-экран", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                text = { Text("Стелс-экран", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
                 leadingIcon = { Icon(Icons.Default.DarkMode, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
                 onClick = { onDismissMenu(); onActivateStealth() }
             )
             DropdownMenuItem(
-                text = { Text("Вика AI и аналитика", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                text = { Text("Вика AI и аналитика", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
                 leadingIcon = { Icon(Icons.Default.Psychology, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp)) },
                 onClick = { onDismissMenu(); onOpenVikaSheet() }
             )
+            DropdownMenuItem(
+                text = { Text("Настройки ZVER", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
+                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp)) },
+                onClick = { onDismissMenu(); onOpenSettings() }
+            )
+            DropdownMenuItem(
+                text = { Text("Шредер сейфа (Паника)", color = CyberRed, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                leadingIcon = { Icon(Icons.Default.DeleteForever, contentDescription = null, tint = CyberRed, modifier = Modifier.size(18.dp)) },
+                onClick = { onDismissMenu(); onOpenPanicShred() }
+            )
         }
+    }
+}
+
+@Composable
+private fun MenuQuickIconButton(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .defaultMinSize(minWidth = 52.dp, minHeight = 48.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (active) accent.copy(alpha = 0.22f) else CyberBlack.copy(alpha = 0.6f))
+            .border(1.dp, if (active) accent else CyberBorder, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (active) accent else Color.White,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = label,
+            color = if (active) accent else CyberMuted,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 8.sp,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 
@@ -1072,13 +1237,17 @@ internal fun CameraBottomControlDeck(
     onOpenVault: () -> Unit,
     onTriggerVideoToggle: () -> Unit,
     onTriggerPhotoCapture: () -> Unit,
-    onOpenVikaSheet: () -> Unit
+    onOpenVikaSheet: () -> Unit,
+    timerSeconds: Int = 0,
+    onCycleTimer: () -> Unit = {}
 ) {
+    var isBottomOverflowOpen by remember { mutableStateOf(false) }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         if (isAudioWatcherActive) {
@@ -1128,7 +1297,7 @@ internal fun CameraBottomControlDeck(
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
         }
 
         AnimatedVisibility(visible = isProPanelExpanded) {
@@ -1170,37 +1339,363 @@ internal fun CameraBottomControlDeck(
             telemetry = telemetry
         )
 
-        ZoomProEvFloatingStrip(
-            zoomRatio = zoomRatio,
-            multiFrameMode = multiFrameMode,
-            isProPanelExpanded = isProPanelExpanded,
-            exposureIndex = exposureIndex,
-            proProfile = proProfile,
-            onSelectZoom = onSelectZoom,
-            onCycleMultiFrame = onCycleMultiFrame,
-            onToggleProPanel = onToggleProPanel,
-            onCycleEvQuick = onCycleEvQuick
-        )
+        // Single ultra-clean bottom bar: [Vault] — [Primary Shutter/Stop] — [Bottom ⋮ Menu]
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(CyberBlack.copy(alpha = 0.58f))
+                .border(1.dp, CyberBorder.copy(alpha = 0.65f), RoundedCornerShape(24.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = onOpenVault,
+                modifier = Modifier.height(48.dp).testTag("vault_button"),
+                colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.9f)),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, CyberGreen.copy(alpha = 0.55f)),
+                contentPadding = PaddingValues(horizontal = 12.dp)
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = "Сейф", tint = CyberGreen, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "$vaultCount",
+                    color = CyberGreen,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
 
-        ModeCarouselRow(
-            cameraModes = cameraModes,
-            selectedCameraMode = selectedCameraMode,
-            onApplyCameraMode = onApplyCameraMode
-        )
+            // Center single shutter button (or red Stop/Rec button when in VIDEO mode or actively recording video)
+            if (selectedCameraMode == "VIDEO" || isRecordingVideo) {
+                Box(
+                    modifier = Modifier
+                        .size(66.dp)
+                        .testTag("video_record_button")
+                        .clip(CircleShape)
+                        .border(3.dp, CyberRed, CircleShape)
+                        .clickable(onClick = onTriggerVideoToggle),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isRecordingVideo) {
+                        Box(modifier = Modifier.size(26.dp).clip(RoundedCornerShape(6.dp)).background(CyberRed))
+                    } else {
+                        Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(CyberRed))
+                    }
+                }
+            } else {
+                ShutterButton(
+                    isCapturing = isCapturing || countdownRemaining != null,
+                    isAssistMode = isAssistModeActive,
+                    onClick = onTriggerPhotoCapture
+                )
+            }
 
-        PrimaryActionDeckRow(
-            selectedCameraMode = selectedCameraMode,
-            vaultCount = vaultCount,
-            isCapturing = isCapturing,
-            countdownRemaining = countdownRemaining,
-            isAssistModeActive = isAssistModeActive,
-            isRecordingVideo = isRecordingVideo,
-            hasByokKey = hasByokKey,
-            onOpenVault = onOpenVault,
-            onTriggerVideoToggle = onTriggerVideoToggle,
-            onTriggerPhotoCapture = onTriggerPhotoCapture,
-            onOpenVikaSheet = onOpenVikaSheet
-        )
+            // Bottom-right 3-dots overflow menu (contains Modes, Zoom, Video, PRO, EV, Multi-Frame, Vika AI, Timer, Photo IQ)
+            Box(contentAlignment = Alignment.BottomEnd) {
+                val hasActiveBottomMods = isProPanelExpanded ||
+                    multiFrameMode != null ||
+                    exposureIndex != 0 ||
+                    zoomRatio > 1.05f ||
+                    timerSeconds > 0
+                IconButton(
+                    onClick = { isBottomOverflowOpen = true },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(if (isBottomOverflowOpen || hasActiveBottomMods) NeonCyan.copy(alpha = 0.2f) else CyberSurface.copy(alpha = 0.9f))
+                        .border(1.dp, if (isBottomOverflowOpen || hasActiveBottomMods) NeonCyan else CyberBorder, CircleShape)
+                        .testTag("bottom_overflow_menu_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Нижнее меню камеры",
+                        tint = if (isBottomOverflowOpen || hasActiveBottomMods) NeonCyan else Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = isBottomOverflowOpen,
+                    onDismissRequest = { isBottomOverflowOpen = false },
+                    modifier = Modifier
+                        .widthIn(min = 272.dp, max = 320.dp)
+                        .heightIn(max = 430.dp)
+                        .background(CyberSurface)
+                        .border(1.dp, CyberBorder, RoundedCornerShape(12.dp))
+                ) {
+                    // Section 1: Shooting Modes grid (3x2)
+                    Text(
+                        text = "РЕЖИМ СЪЁМКИ",
+                        color = CyberMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        cameraModes.chunked(3).forEach { rowModes ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                rowModes.forEach { (title, key) ->
+                                    val isSel = selectedCameraMode == key
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(34.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (isSel) NeonYellow else CyberBlack.copy(alpha = 0.7f))
+                                            .border(1.dp, if (isSel) NeonYellow else CyberBorder, RoundedCornerShape(8.dp))
+                                            .clickable {
+                                                onApplyCameraMode(key)
+                                                isBottomOverflowOpen = false
+                                            }
+                                            .padding(horizontal = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = title,
+                                            color = if (isSel) Color.Black else Color.White,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = CyberBorder, thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
+
+                    // Section 2: Zoom 1x..10x
+                    Text(
+                        text = "ЗУМ",
+                        color = CyberMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(1.0f, 2.0f, 4.0f, 6.0f, 10.0f).forEach { z ->
+                            val sel = zoomRatio == z
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(34.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (sel) CyberGreen.copy(alpha = 0.28f) else CyberBlack.copy(alpha = 0.7f))
+                                    .border(1.dp, if (sel) CyberGreen else CyberBorder, RoundedCornerShape(8.dp))
+                                    .clickable { onSelectZoom(z) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "${z.toInt()}x",
+                                    color = if (sel) CyberGreen else CyberMuted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = CyberBorder, thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
+
+                    // Section 3: Quick PRO / EV / MultiFrame chips
+                    val evLabel = CameraCapabilityProfiler.formatEvStops(exposureIndex, proProfile.evStep)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isProPanelExpanded) NeonCyan.copy(alpha = 0.25f) else CyberBlack)
+                                .border(1.dp, if (isProPanelExpanded) NeonCyan else CyberBorder, RoundedCornerShape(8.dp))
+                                .clickable {
+                                    isBottomOverflowOpen = false
+                                    onToggleProPanel()
+                                }
+                                .testTag("pro_panel_pill"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "PRO",
+                                color = if (isProPanelExpanded) NeonCyan else Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(CyberBlack)
+                                .border(1.dp, if (exposureIndex != 0) NeonYellow else CyberBorder, RoundedCornerShape(8.dp))
+                                .clickable { onCycleEvQuick() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = evLabel,
+                                color = if (exposureIndex != 0) NeonYellow else Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (multiFrameMode != null) NeonCyan.copy(alpha = 0.22f) else CyberBlack)
+                                .border(1.dp, if (multiFrameMode != null) NeonCyan else CyberBorder, RoundedCornerShape(8.dp))
+                                .clickable { onCycleMultiFrame() }
+                                .testTag("stack_mode_pill"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = multiFrameMode?.let { "${it.badgeRu}×3" } ?: "Стек",
+                                color = if (multiFrameMode != null) NeonCyan else CyberMuted,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = CyberBorder, thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
+
+                    // Section 4: Video, Vika AI, Timer, Photo IQ
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (isRecordingVideo) "Остановить запись видео" else "Записать видео",
+                                color = CyberRed,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (isRecordingVideo) Icons.Default.Stop else Icons.Default.Videocam,
+                                contentDescription = null,
+                                tint = CyberRed,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        modifier = if (selectedCameraMode != "VIDEO" && !isRecordingVideo) {
+                            Modifier.testTag("video_record_button")
+                        } else {
+                            Modifier.testTag("bottom_menu_video_item")
+                        },
+                        onClick = {
+                            isBottomOverflowOpen = false
+                            onTriggerVideoToggle()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "Вика AI и аналитика",
+                                color = NeonCyan,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Psychology,
+                                contentDescription = null,
+                                tint = NeonCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        modifier = Modifier.testTag("vika_ai_button"),
+                        onClick = {
+                            isBottomOverflowOpen = false
+                            onOpenVikaSheet()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (timerSeconds == 0) "Таймер: Выкл" else "Таймер: ${timerSeconds}с",
+                                color = if (timerSeconds > 0) NeonYellow else Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Timer,
+                                contentDescription = null,
+                                tint = if (timerSeconds > 0) NeonYellow else CyberMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = { onCycleTimer() }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "Photo IQ: ${photoIqProfile.badgeRu}",
+                                color = if (photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF) CyberGreen else Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = if (photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF) CyberGreen else CyberMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            val vals = PhotoIqEngine.PhotoIqProfile.values()
+                            val next = vals[(vals.indexOf(photoIqProfile) + 1) % vals.size]
+                            onPhotoIqChange(next)
+                        }
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1301,274 +1796,6 @@ private fun ZoomIntelligenceBannerLeaf(
 }
 
 @Composable
-private fun ZoomProEvFloatingStrip(
-    zoomRatio: Float,
-    multiFrameMode: MultiFrameStacker.StackMode?,
-    isProPanelExpanded: Boolean,
-    exposureIndex: Int,
-    proProfile: CameraCapabilityProfiler.CameraProProfile,
-    onSelectZoom: (Float) -> Unit,
-    onCycleMultiFrame: () -> Unit,
-    onToggleProPanel: () -> Unit,
-    onCycleEvQuick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(CyberBlack.copy(alpha = 0.55f))
-                .border(1.dp, CyberBorder.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
-                .padding(horizontal = 6.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            listOf(1.0f, 2.0f, 4.0f, 6.0f, 10.0f).forEach { z ->
-                val sel = zoomRatio == z
-                Box(
-                    modifier = Modifier
-                        .height(30.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (sel) CyberGreen.copy(alpha = 0.25f) else Color.Transparent)
-                        .clickable { onSelectZoom(z) }
-                        .padding(horizontal = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "${z.toInt()}x",
-                        color = if (sel) CyberGreen else CyberMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (multiFrameMode != null) {
-                Box(
-                    modifier = Modifier
-                        .height(38.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(NeonCyan.copy(alpha = 0.22f))
-                        .border(1.dp, NeonCyan, RoundedCornerShape(20.dp))
-                        .clickable(onClick = onCycleMultiFrame)
-                        .padding(horizontal = 8.dp)
-                        .testTag("stack_mode_pill"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "${multiFrameMode.badgeRu}×3",
-                        color = NeonCyan,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .height(38.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (isProPanelExpanded) NeonCyan.copy(alpha = 0.22f) else CyberBlack.copy(alpha = 0.55f))
-                    .border(1.dp, if (isProPanelExpanded) NeonCyan else CyberBorder, RoundedCornerShape(20.dp))
-                    .clickable(onClick = onToggleProPanel)
-                    .padding(horizontal = 10.dp)
-                    .testTag("pro_panel_pill"),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "PRO",
-                    color = if (isProPanelExpanded) NeonCyan else CyberMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            val evLabel = CameraCapabilityProfiler.formatEvStops(exposureIndex, proProfile.evStep)
-            Box(
-                modifier = Modifier
-                    .height(38.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(CyberBlack.copy(alpha = 0.55f))
-                    .border(1.dp, if (exposureIndex != 0) NeonYellow else CyberBorder, RoundedCornerShape(20.dp))
-                    .clickable(onClick = onCycleEvQuick)
-                    .padding(horizontal = 10.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = evLabel,
-                    color = if (exposureIndex != 0) NeonYellow else CyberMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ModeCarouselRow(
-    cameraModes: List<Pair<String, String>>,
-    selectedCameraMode: String,
-    onApplyCameraMode: (String) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        cameraModes.forEach { (title, key) ->
-            val isSelected = selectedCameraMode == key
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onApplyCameraMode(key) }
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
-            ) {
-                Text(
-                    text = title,
-                    color = if (isSelected) Color.White else CyberMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    softWrap = false
-                )
-                Spacer(modifier = Modifier.height(3.dp))
-                Box(
-                    modifier = Modifier
-                        .size(4.dp)
-                        .clip(CircleShape)
-                        .background(if (isSelected) NeonYellow else Color.Transparent)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PrimaryActionDeckRow(
-    selectedCameraMode: String,
-    vaultCount: Int,
-    isCapturing: Boolean,
-    countdownRemaining: Int?,
-    isAssistModeActive: Boolean,
-    isRecordingVideo: Boolean,
-    hasByokKey: Boolean,
-    onOpenVault: () -> Unit,
-    onTriggerVideoToggle: () -> Unit,
-    onTriggerPhotoCapture: () -> Unit,
-    onOpenVikaSheet: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(CyberBlack.copy(alpha = 0.65f))
-            .border(1.dp, CyberBorder.copy(alpha = 0.7f), RoundedCornerShape(22.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Button(
-            onClick = onOpenVault,
-            modifier = Modifier.height(48.dp).testTag("vault_button"),
-            colors = ButtonDefaults.buttonColors(containerColor = CyberSurface.copy(alpha = 0.9f)),
-            shape = RoundedCornerShape(14.dp),
-            border = BorderStroke(1.dp, CyberGreen.copy(alpha = 0.55f)),
-            contentPadding = PaddingValues(horizontal = 12.dp)
-        ) {
-            Icon(Icons.Default.Lock, contentDescription = "Сейф", tint = CyberGreen, modifier = Modifier.size(16.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = "$vaultCount",
-                color = CyberGreen,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (selectedCameraMode == "VIDEO") {
-                Box(
-                    modifier = Modifier
-                        .size(72.dp)
-                        .testTag("video_record_button")
-                        .clip(CircleShape)
-                        .border(3.dp, CyberRed, CircleShape)
-                        .clickable(onClick = onTriggerVideoToggle),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isRecordingVideo) {
-                        Box(modifier = Modifier.size(28.dp).clip(RoundedCornerShape(6.dp)).background(CyberRed))
-                    } else {
-                        Box(modifier = Modifier.size(54.dp).clip(CircleShape).background(CyberRed))
-                    }
-                }
-            } else {
-                ShutterButton(
-                    isCapturing = isCapturing || countdownRemaining != null,
-                    isAssistMode = isAssistModeActive,
-                    onClick = onTriggerPhotoCapture
-                )
-
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("video_record_button")
-                        .clip(CircleShape)
-                        .background(if (isRecordingVideo) CyberRed else CyberRed.copy(alpha = 0.22f))
-                        .border(1.5.dp, CyberRed, CircleShape)
-                        .clickable(onClick = onTriggerVideoToggle),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (isRecordingVideo) Icons.Default.Stop else Icons.Default.Videocam,
-                        contentDescription = if (isRecordingVideo) "Остановить запись" else "Запись видео",
-                        tint = if (isRecordingVideo) Color.White else CyberRed,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
-        }
-
-        IconButton(
-            onClick = onOpenVikaSheet,
-            modifier = Modifier
-                .size(48.dp)
-                .testTag("vika_ai_button")
-                .clip(RoundedCornerShape(14.dp))
-                .background(if (hasByokKey) NeonCyan.copy(alpha = 0.2f) else CyberSurface)
-                .border(1.dp, if (hasByokKey) NeonCyan else CyberBorder, RoundedCornerShape(14.dp))
-        ) {
-            Icon(
-                Icons.Default.Psychology,
-                contentDescription = "Вика AI и Аналитика",
-                tint = if (hasByokKey) NeonCyan else CyberMuted,
-                modifier = Modifier.size(22.dp)
-            )
-        }
-    }
-}
-
-@Composable
 private fun SentinelControlCardLeaf(
     armed: Boolean,
     config: SentinelEngine.SentinelConfig,
@@ -1624,15 +1851,16 @@ internal fun SentinelControlCard(
     onStealthGuard: () -> Unit
 ) {
     var showAllEvents by remember { mutableStateOf(false) }
+    var isCollapsed by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(CyberBlack.copy(alpha = 0.86f))
-            .border(1.dp, if (armed) CyberRed.copy(alpha = 0.7f) else NeonCyan.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+            .clip(RoundedCornerShape(if (isCollapsed) 12.dp else 16.dp))
+            .background(CyberBlack.copy(alpha = if (isCollapsed) 0.72f else 0.86f))
+            .border(1.dp, if (armed) CyberRed.copy(alpha = 0.7f) else NeonCyan.copy(alpha = 0.4f), RoundedCornerShape(if (isCollapsed) 12.dp else 16.dp))
+            .padding(horizontal = 10.dp, vertical = if (isCollapsed) 6.dp else 10.dp),
+        verticalArrangement = Arrangement.spacedBy(if (isCollapsed) 0.dp else 6.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1645,127 +1873,157 @@ internal fun SentinelControlCard(
                     color = if (armed) CyberRed else NeonCyan,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = "Движение: $motionScore% • ${if (isNight) "НОЧЬ-CLAHE" else "ДЕНЬ-HDR"} (L=$avgLuma)",
-                    color = CyberMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.sp
-                )
-            }
-            Button(
-                onClick = onToggleArmed,
-                colors = ButtonDefaults.buttonColors(containerColor = if (armed) CyberRed else CyberGreenDark),
-                shape = RoundedCornerShape(10.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp),
-                modifier = Modifier.height(40.dp).testTag("sentinel_arm_button")
-            ) {
-                Text(
-                    text = if (armed) "СТОП" else "НА ПОСТ",
-                    color = Color.White,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            SentinelChip(
-                label = "Фильтр ${config.lingerThresholdSec}с",
-                active = true,
-                accent = NeonYellow,
-                modifier = Modifier.testTag("sentinel_linger_chip"),
-                onClick = onCycleLinger
-            )
-            SentinelChip(
-                label = "Стук",
-                active = config.knockTriggerEnabled,
-                accent = CyberGreen,
-                modifier = Modifier.testTag("sentinel_knock_chip"),
-                onClick = onToggleKnock
-            )
-            SentinelChip(
-                label = "CLAHE Ночь",
-                active = config.autoNightClaheEnabled,
-                accent = NeonCyan,
-                modifier = Modifier.testTag("sentinel_clahe_chip"),
-                onClick = onToggleClaheNight
-            )
-            SentinelChip(
-                label = "2-Stage Кроп",
-                active = config.twoStageFaceCropEnabled,
-                accent = CyberGreen,
-                modifier = Modifier.testTag("sentinel_crop_chip"),
-                onClick = onToggleTwoStageCrop
-            )
-            SentinelChip(
-                label = if (!hasByokKey) "ИИ (нет ключа)" else "ИИ-триаж",
-                active = config.aiTriageEnabled && hasByokKey,
-                accent = NeonCyan,
-                modifier = Modifier.testTag("sentinel_ai_chip"),
-                onClick = onToggleAiTriage
-            )
-            SentinelChip(
-                label = "Стелс-пост",
-                active = false,
-                accent = CyberRed,
-                modifier = Modifier.testTag("sentinel_stealth_chip"),
-                onClick = onStealthGuard
-            )
-        }
-
-        if (events.isNotEmpty()) {
-            val timeFmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-            val visibleEvents = if (showAllEvents) events.take(8) else events.take(3)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                visibleEvents.forEach { ev ->
-                    val col = when (ev.kind) {
-                        SentinelEngine.EventKind.LINGER_ALARM, SentinelEngine.EventKind.KNOCK_ALARM -> CyberRed
-                        SentinelEngine.EventKind.AI_VERDICT -> NeonCyan
-                        SentinelEngine.EventKind.IGNORED -> CyberGreen
-                        SentinelEngine.EventKind.INFO -> CyberMuted
-                    }
+                if (!isCollapsed) {
                     Text(
-                        text = "${timeFmt.format(Date(ev.timestampMs))} [${ev.kind.tagRu}] ${ev.message}",
-                        color = col,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 9.sp,
-                        maxLines = 2
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (events.size > 3) {
-                        Text(
-                            text = if (showAllEvents) "Свернуть лог" else "Весь лог (${events.size})",
-                            color = NeonCyan,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 9.sp,
-                            modifier = Modifier
-                                .clickable { showAllEvents = !showAllEvents }
-                                .padding(vertical = 2.dp)
-                                .testTag("sentinel_expand_log_btn")
-                        )
-                    }
-                    Text(
-                        text = "Очистить лог",
+                        text = "Движение: $motionScore% • ${if (isNight) "НОЧЬ-CLAHE" else "ДЕНЬ-HDR"} (L=$avgLuma)",
                         color = CyberMuted,
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 9.sp,
-                        modifier = Modifier
-                            .clickable(onClick = onClearEvents)
-                            .padding(vertical = 2.dp)
-                            .testTag("sentinel_clear_log_btn")
+                        fontSize = 9.sp
                     )
+                }
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 44.dp, minHeight = 36.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(CyberSurface)
+                        .border(1.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .clickable { isCollapsed = !isCollapsed }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("sentinel_card_toggle_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (isCollapsed) "▲" else "▼",
+                        color = NeonCyan,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                }
+                Button(
+                    onClick = onToggleArmed,
+                    colors = ButtonDefaults.buttonColors(containerColor = if (armed) CyberRed else CyberGreenDark),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    modifier = Modifier.height(40.dp).testTag("sentinel_arm_button")
+                ) {
+                    Text(
+                        text = if (armed) "СТОП" else "НА ПОСТ",
+                        color = Color.White,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
+        if (!isCollapsed) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                SentinelChip(
+                    label = "Фильтр ${config.lingerThresholdSec}с",
+                    active = true,
+                    accent = NeonYellow,
+                    modifier = Modifier.testTag("sentinel_linger_chip"),
+                    onClick = onCycleLinger
+                )
+                SentinelChip(
+                    label = "Стук",
+                    active = config.knockTriggerEnabled,
+                    accent = CyberGreen,
+                    modifier = Modifier.testTag("sentinel_knock_chip"),
+                    onClick = onToggleKnock
+                )
+                SentinelChip(
+                    label = "CLAHE Ночь",
+                    active = config.autoNightClaheEnabled,
+                    accent = NeonCyan,
+                    modifier = Modifier.testTag("sentinel_clahe_chip"),
+                    onClick = onToggleClaheNight
+                )
+                SentinelChip(
+                    label = "2-Stage Кроп",
+                    active = config.twoStageFaceCropEnabled,
+                    accent = CyberGreen,
+                    modifier = Modifier.testTag("sentinel_crop_chip"),
+                    onClick = onToggleTwoStageCrop
+                )
+                SentinelChip(
+                    label = if (!hasByokKey) "ИИ (нет ключа)" else "ИИ-триаж",
+                    active = config.aiTriageEnabled && hasByokKey,
+                    accent = NeonCyan,
+                    modifier = Modifier.testTag("sentinel_ai_chip"),
+                    onClick = onToggleAiTriage
+                )
+                SentinelChip(
+                    label = "Стелс-пост",
+                    active = false,
+                    accent = CyberRed,
+                    modifier = Modifier.testTag("sentinel_stealth_chip"),
+                    onClick = onStealthGuard
+                )
+            }
+
+            if (events.isNotEmpty()) {
+                val timeFmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+                val visibleEvents = if (showAllEvents) events.take(8) else events.take(3)
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    visibleEvents.forEach { ev ->
+                        val col = when (ev.kind) {
+                            SentinelEngine.EventKind.LINGER_ALARM, SentinelEngine.EventKind.KNOCK_ALARM -> CyberRed
+                            SentinelEngine.EventKind.AI_VERDICT -> NeonCyan
+                            SentinelEngine.EventKind.IGNORED -> CyberGreen
+                            SentinelEngine.EventKind.INFO -> CyberMuted
+                        }
+                        Text(
+                            text = "${timeFmt.format(Date(ev.timestampMs))} [${ev.kind.tagRu}] ${ev.message}",
+                            color = col,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            maxLines = 2
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (events.size > 3) {
+                            Text(
+                                text = if (showAllEvents) "Свернуть лог" else "Весь лог (${events.size})",
+                                color = NeonCyan,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                modifier = Modifier
+                                    .clickable { showAllEvents = !showAllEvents }
+                                    .padding(vertical = 2.dp)
+                                    .testTag("sentinel_expand_log_btn")
+                            )
+                        }
+                        Text(
+                            text = "Очистить лог",
+                            color = CyberMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            modifier = Modifier
+                                .clickable(onClick = onClearEvents)
+                                .padding(vertical = 2.dp)
+                                .testTag("sentinel_clear_log_btn")
+                        )
+                    }
                 }
             }
         }

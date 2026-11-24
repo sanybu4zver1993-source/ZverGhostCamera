@@ -2,6 +2,10 @@ package com.example
 
 import android.graphics.Bitmap
 import android.hardware.camera2.CameraCharacteristics
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertWidthIsAtLeast
@@ -10,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import com.example.assist.GeminiByokClient
 import com.example.camera.AudioWatcherEngine
@@ -198,7 +203,7 @@ class PartGPolishAndLogFixesTest {
     }
 
     @Test
-    fun cameraHudComponents_narrow360dp_rendersDrawerAndStackedBottomDeckCleanly() {
+    fun cameraHudComponents_narrow360dp_rendersChromeStyleSingleRowHudAndOverflowMenus() {
         val telemetry = CameraTelemetryState()
         val modes = listOf(
             "Видео" to "VIDEO",
@@ -209,7 +214,9 @@ class PartGPolishAndLogFixesTest {
             "Документы" to "DOCUMENTS"
         )
         composeTestRule.setContent {
-            CameraTopHudAndDrawer(
+            val isTopMenuOpen = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+            Box(modifier = Modifier.fillMaxSize()) {
+                CameraTopHudAndDrawer(
                 ramMode = false,
                 compressionPreset = ExifStripper.CompressionPreset.BALANCED,
                 isAssistModeActive = false,
@@ -217,7 +224,7 @@ class PartGPolishAndLogFixesTest {
                 isTorchActive = false,
                 isToolsDrawerOpen = true,
                 activeToolsCount = 2,
-                isTopOverflowMenuOpen = false,
+                isTopOverflowMenuOpen = isTopMenuOpen.value,
                 isProPanelExpanded = false,
                 isHistogramEnabled = false,
                 isZebraEnabled = false,
@@ -243,12 +250,14 @@ class PartGPolishAndLogFixesTest {
                 isRecordingVideo = false,
                 lastStatusMessage = null,
                 telemetry = telemetry,
+                selectedCameraMode = "SENTINEL",
+                zoomRatio = 2.0f,
                 onToggleTorch = {},
                 onToggleDrawer = {},
                 onCloseDrawer = {},
                 onFlipCamera = {},
-                onOpenOverflowMenu = {},
-                onDismissOverflowMenu = {},
+                onOpenOverflowMenu = { isTopMenuOpen.value = true },
+                onDismissOverflowMenu = { isTopMenuOpen.value = false },
                 onOpenSettings = {},
                 onToggleProPanel = {},
                 onToggleHistogram = {},
@@ -277,6 +286,7 @@ class PartGPolishAndLogFixesTest {
             )
 
             CameraBottomControlDeck(
+                modifier = Modifier.align(Alignment.BottomCenter),
                 telemetry = telemetry,
                 isAudioWatcherActive = false,
                 audioTelemetry = AudioWatcherEngine.AcousticTelemetry(),
@@ -307,6 +317,7 @@ class PartGPolishAndLogFixesTest {
                 countdownRemaining = null,
                 isAssistModeActive = false,
                 isRecordingVideo = false,
+                timerSeconds = 0,
                 onSelectAudioThreshold = {},
                 onToggleSentinelArmed = {},
                 onCycleSentinelLinger = {},
@@ -337,19 +348,69 @@ class PartGPolishAndLogFixesTest {
                 onOpenVault = {},
                 onTriggerVideoToggle = {},
                 onTriggerPhotoCapture = {},
-                onOpenVikaSheet = {}
+                onOpenVikaSheet = {},
+                onCycleTimer = {}
             )
+            }
         }
         composeTestRule.waitForIdle()
 
+        // Top compact HUD pill + drawer + top 3-dots button
+        composeTestRule.onNodeWithText("ZVER").assertIsDisplayed()
         composeTestRule.onNodeWithText("▲ Свернуть панель").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Дозор").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("vault_button")
-            .assertIsDisplayed()
-            .assertHeightIsAtLeast(48.dp)
-        composeTestRule.onNodeWithTag("vika_ai_button")
+        composeTestRule.onNodeWithTag("top_overflow_menu_button")
             .assertIsDisplayed()
             .assertWidthIsAtLeast(48.dp)
             .assertHeightIsAtLeast(48.dp)
+
+        // Bottom single-row bar: Vault + Shutter + Bottom 3-dots button
+        composeTestRule.onNodeWithTag("vault_button")
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
+        composeTestRule.onNodeWithTag("bottom_overflow_menu_button")
+            .assertIsDisplayed()
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+
+        // Sentinel card can collapse to save even more viewfinder space
+        composeTestRule.onNodeWithTag("sentinel_card_toggle_button")
+            .assertIsDisplayed()
+            .performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("▲").assertIsDisplayed()
+
+        // Open top Chrome-style 3-dots menu
+        composeTestRule.onNodeWithTag("top_overflow_menu_button").performClick()
+        composeTestRule.mainClock.advanceTimeBy(300L)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("torch_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("flip_camera_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tools_drawer_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("top_menu_settings_button").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Открыть PRO-панель").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Self-Test диагностика")
+            .performScrollTo()
+            .assertIsDisplayed()
+
+        // Scroll back to quick icons and click flip camera to dismiss top menu
+        composeTestRule.onNodeWithTag("flip_camera_button")
+            .performScrollTo()
+            .performClick()
+        composeTestRule.mainClock.advanceTimeBy(300L)
+        composeTestRule.waitForIdle()
+
+        // Open bottom Chrome-style 3-dots menu
+        composeTestRule.onNodeWithTag("bottom_overflow_menu_button").performClick()
+        composeTestRule.mainClock.advanceTimeBy(300L)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Дозор").assertIsDisplayed()
+        composeTestRule.onNodeWithText("10x").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("pro_panel_pill").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("vika_ai_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeTestRule.onNodeWithTag("video_record_button")
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 }

@@ -2243,6 +2243,8 @@ fun GhostCameraScreen(
             isRecordingVideo = isRecordingVideo,
             lastStatusMessage = lastStatusMessage,
             telemetry = telemetry,
+            selectedCameraMode = selectedCameraMode,
+            zoomRatio = zoomRatio,
             onToggleTorch = { isTorchActive = !isTorchActive },
             onToggleDrawer = { isToolsDrawerOpen = !isToolsDrawerOpen },
             onCloseDrawer = { isToolsDrawerOpen = false },
@@ -2381,6 +2383,7 @@ fun GhostCameraScreen(
             countdownRemaining = countdownRemaining,
             isAssistModeActive = isAssistModeActive,
             isRecordingVideo = isRecordingVideo,
+            timerSeconds = timerSeconds,
             onSelectAudioThreshold = { thr ->
                 audioThresholdDbfs = thr
                 lastStatusMessage = "АКУСТИК ПОРОГ: ${thr.toInt()} dBFS"
@@ -2567,6 +2570,14 @@ fun GhostCameraScreen(
             onOpenVikaSheet = {
                 vikaSheetInitialTab = VikaSheetTab.TASKS
                 showVikaSheet = true
+            },
+            onCycleTimer = {
+                timerSeconds = when (timerSeconds) {
+                    0 -> 3
+                    3 -> 5
+                    5 -> 10
+                    else -> 0
+                }
             }
         )
 
