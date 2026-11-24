@@ -153,8 +153,7 @@ fun VaultPhotoEditorDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(VpeBlack)
-                .statusBarsPadding()
-                .navigationBarsPadding()
+                .zverDialogSafeBarsPadding()
                 .padding(10.dp)
         ) {
             // Top bar
@@ -312,7 +311,7 @@ fun VaultPhotoEditorDialog(
                 ) { contrast = it }
 
                 EditorSliderRow(
-                    label = "НАСЫЩЕН",
+                    label = "ЦВЕТ",
                     value = saturation,
                     valueRange = 0f..1.8f,
                     displayVal = String.format(java.util.Locale.US, "%.2fx", saturation),
@@ -496,7 +495,9 @@ private fun EditorChip(
             color = if (selected) accent else VpeMuted,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
-            fontSize = 9.sp
+            fontSize = 9.sp,
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -519,7 +520,9 @@ private fun EditorSliderRow(
             color = VpeMuted,
             fontFamily = FontFamily.Monospace,
             fontSize = 9.sp,
-            modifier = Modifier.width(66.dp)
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.width(74.dp)
         )
         Slider(
             value = value,
@@ -538,6 +541,8 @@ private fun EditorSliderRow(
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             fontSize = 9.sp,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier.width(44.dp)
         )
     }

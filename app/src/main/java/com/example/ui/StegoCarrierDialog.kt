@@ -112,9 +112,7 @@ fun StegoCarrierDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(StegoBg.copy(alpha = 0.96f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
+                .zverDialogSafeBarsPadding()
                 .padding(14.dp)
         ) {
             Column(

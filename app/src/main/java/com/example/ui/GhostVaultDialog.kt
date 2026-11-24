@@ -402,8 +402,7 @@ fun GhostVaultDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(CyberBlack.copy(alpha = 0.97f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
+                .zverDialogSafeBarsPadding()
                 .padding(14.dp)
         ) {
             if (!isConfigLoaded) {
@@ -1324,10 +1323,19 @@ fun GhostVaultDialog(
                                             }
                                         },
                                         enabled = !isRunningVaultDiag,
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                                         colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                                         modifier = Modifier.testTag("vault_diagnose_single_btn")
                                     ) {
-                                        Text("READ-ONLY ДИАГНОСТИКА КЛЮЧА", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                        Text(
+                                            "READ-ONLY ДИАГНОСТИКА КЛЮЧА",
+                                            color = Color.Black,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp,
+                                            textAlign = TextAlign.Center
+                                        )
                                     }
                                     Spacer(modifier = Modifier.height(6.dp))
                                     OutlinedButton(
@@ -1359,10 +1367,18 @@ fun GhostVaultDialog(
                                             }
                                         },
                                         enabled = !isRunningVaultDiag,
-                                        shape = RoundedCornerShape(6.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                                         modifier = Modifier.testTag("vault_recover_copy_btn")
                                     ) {
-                                        Text("ВОССТАНОВИТЬ КОПИЮ (НОВЫЙ .GCF)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                        Text(
+                                            "ВОССТАНОВИТЬ КОПИЮ (НОВЫЙ .GCF)",
+                                            color = CyberGreen,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp,
+                                            textAlign = TextAlign.Center
+                                        )
                                     }
                                 }
                             }

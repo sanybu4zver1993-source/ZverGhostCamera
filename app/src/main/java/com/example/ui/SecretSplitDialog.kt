@@ -26,6 +26,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -71,9 +73,7 @@ fun SecretSplitDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(SplitBlack.copy(alpha = 0.96f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
+                .zverDialogSafeBarsPadding()
                 .padding(14.dp)
         ) {
             Column(
@@ -87,15 +87,17 @@ fun SecretSplitDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Default.Key, contentDescription = "Split Key", tint = SplitAmber, modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "СПЛИТ-КЛЮЧ (ШАМИР GF256)",
+                            text = "СПЛИТ-КЛЮЧ GF256",
                             color = SplitAmber,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     IconButton(
@@ -122,7 +124,10 @@ fun SecretSplitDialog(
                         color = if (isCreateMode) Color.Black else SplitMuted,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
@@ -132,15 +137,18 @@ fun SecretSplitDialog(
                                 isCreateMode = true
                                 errorMsg = null
                             }
-                            .padding(vertical = 8.dp, horizontal = 10.dp)
+                            .padding(vertical = 8.dp, horizontal = 6.dp)
                             .testTag("split_mode_create")
                     )
                     Text(
-                        text = "🧩 СОБРАТЬ ИЗ ДОЛЕЙ",
+                        text = "🧩 СОБРАТЬ ДОЛИ",
                         color = if (!isCreateMode) Color.Black else SplitMuted,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
@@ -150,7 +158,7 @@ fun SecretSplitDialog(
                                 isCreateMode = false
                                 errorMsg = null
                             }
-                            .padding(vertical = 8.dp, horizontal = 10.dp)
+                            .padding(vertical = 8.dp, horizontal = 6.dp)
                             .testTag("split_mode_combine")
                     )
                 }
@@ -195,18 +203,21 @@ fun SecretSplitDialog(
                             listOf(2 to 3, 2 to 4, 3 to 5).forEach { (k, n) ->
                                 val selected = schemePair == (k to n)
                                 Text(
-                                    text = "Схема $k из $n",
+                                    text = "$k из $n",
                                     color = if (selected) Color.Black else SplitCyan,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 10.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    textAlign = TextAlign.Center,
                                     modifier = Modifier
                                         .weight(1f)
                                         .clip(RoundedCornerShape(6.dp))
                                         .background(if (selected) SplitAmber else SplitSurface)
                                         .border(1.dp, if (selected) SplitAmber else SplitBorder, RoundedCornerShape(6.dp))
                                         .clickable { schemePair = k to n }
-                                        .padding(vertical = 8.dp, horizontal = 8.dp)
+                                        .padding(vertical = 8.dp, horizontal = 6.dp)
                                 )
                             }
                         }

@@ -52,8 +52,8 @@ private val CyberMuted = Color(0xFF8FA3B0)
 
 enum class VikaSheetTab(val labelRu: String) {
     TASKS("🧠 Задачи"),
-    ANALYTICS("📊 Аналитика"),
-    KEYS_MODELS("🔑 Ключ и Модели")
+    ANALYTICS("📊 Стата"),
+    KEYS_MODELS("🔑 Ключи")
 }
 
 @Composable
@@ -214,7 +214,12 @@ fun VikaAiSheet(
                 if (report != null) {
                     LocalSymbiosisCvEngine.buildOfflineVikaReport(report, userTask, fallbackReason, systemOverride)
                 } else {
-                    LocalSymbiosisCvEngine.buildOfflineTextOnlyReply(context, userTask, systemOverride)
+                    val reply = LocalSymbiosisCvEngine.buildOfflineTextOnlyReply(context, userTask, systemOverride)
+                    if (!fallbackReason.isNullOrBlank()) {
+                        "⚡ АВТО-ПОДХВАТ ОФЛАЙН ($fallbackReason)\n$reply"
+                    } else {
+                        reply
+                    }
                 }
             }
 
@@ -519,11 +524,11 @@ fun VikaAiSheet(
                         )
                     }.onFailure { err ->
                         val msg = err.message.orEmpty()
-                        if (GeminiByokClient.isQuotaOrNetworkFailure(msg) && includeImage) {
+                        if (GeminiByokClient.isQuotaOrNetworkFailure(msg)) {
                             runOfflineSymbiosisFallback(
                                 userTask = userTask,
-                                fallbackReason = "Gemini недоступен: ${msg.take(45)}",
-                                includeImage = true,
+                                fallbackReason = "Gemini перегружен/недоступен: ${msg.take(45)}",
+                                includeImage = includeImage,
                                 precomputedReport = cachedLocalReport,
                                 systemOverride = systemOverride
                             )
@@ -611,8 +616,7 @@ fun VikaAiSheet(
             modifier = Modifier
                 .fillMaxSize()
                 .background(SheetBg.copy(alpha = 0.96f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
+                .zverDialogSafeBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Column(
@@ -709,6 +713,7 @@ fun VikaAiSheet(
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 10.sp,
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }

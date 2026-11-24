@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -50,7 +51,7 @@ private val PcbRed = Color(0xFFFF3366)
 private val PcbMuted = Color(0xFF8FA3B0)
 
 private enum class PcbLabTab(val titleRu: String) {
-    INSPECT("🔬 ПЛАТА / ПАЙКА"),
+    INSPECT("🔬 ПЛАТА"),
     SILKSCREEN("🔤 OCR ЧИПЫ"),
     DECODER("🎛️ SMD КОДЫ")
 }
@@ -126,9 +127,7 @@ fun PcbLabDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(PcbBg.copy(alpha = 0.97f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
+                .zverDialogSafeBarsPadding()
                 .padding(12.dp)
         ) {
             Column(
@@ -174,13 +173,16 @@ fun PcbLabDialog(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 9.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            textAlign = TextAlign.Center,
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(if (sel) PcbCyan else PcbSurface)
                                 .border(1.dp, if (sel) PcbCyan else PcbBorder, RoundedCornerShape(6.dp))
                                 .clickable { activeTab = tab }
-                                .padding(vertical = 7.dp, horizontal = 4.dp)
+                                .padding(vertical = 8.dp, horizontal = 4.dp)
                                 .testTag("pcb_tab_${tab.name.lowercase()}")
                         )
                     }
@@ -270,9 +272,19 @@ fun PcbLabDialog(
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     OutlinedButton(
                                         onClick = { showOverlay = !showOverlay },
-                                        modifier = Modifier.weight(1f).height(40.dp)
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(1f).height(42.dp)
                                     ) {
-                                        Text(if (showOverlay) "СЛОЙ: ДЕФЕКТЫ CV" else "СЛОЙ: ОРИГИНАЛ", color = PcbCyan, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                                        Text(
+                                            if (showOverlay) "СЛОЙ: ДЕФЕКТЫ" else "СЛОЙ: ОРИГ",
+                                            color = PcbCyan,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.sp,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
                                     }
                                     Button(
                                         onClick = {
@@ -307,9 +319,19 @@ fun PcbLabDialog(
                                             }
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = PcbGreen),
-                                        modifier = Modifier.weight(1f).height(40.dp)
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(1f).height(42.dp)
                                     ) {
-                                        Text("В СЕЙФ (КОПИЯ)", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                                        Text(
+                                            "В СЕЙФ (КОПИЯ)",
+                                            color = Color.Black,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.sp,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
                                     }
                                 }
 

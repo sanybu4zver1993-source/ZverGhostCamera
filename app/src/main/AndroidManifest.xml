@@ -122,12 +122,15 @@
             android:exported="false"
             android:process=":assist" />
 
-        <!-- Privacy Hardening: Disable background ML Kit Clearcut / DataTransport telemetry uploads -->
+        <!-- Privacy & Stability Hardening: Disable background ML Kit Clearcut / DataTransport & acceleration mini-benchmark -->
         <service
             android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery"
             tools:node="remove" />
         <service
             android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService"
+            tools:node="remove" />
+        <service
+            android:name="com.google.mlkit.acceleration.internal.MlKitRemoteWorkerService"
             tools:node="remove" />
         <receiver
             android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver"

@@ -335,7 +335,9 @@ private fun VikaPhotoModeSelectorRow(
     onFrameModeChange: (AiFrameMode) -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         listOf(
@@ -347,12 +349,12 @@ private fun VikaPhotoModeSelectorRow(
             val sel = frameMode == m
             Box(
                 modifier = Modifier
-                    .weight(1f)
                     .height(38.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (sel) accent.copy(alpha = 0.22f) else TabCard)
                     .border(1.dp, if (sel) accent else TabBorder, RoundedCornerShape(8.dp))
-                    .clickable { onFrameModeChange(m) },
+                    .clickable { onFrameModeChange(m) }
+                    .padding(horizontal = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -361,7 +363,8 @@ private fun VikaPhotoModeSelectorRow(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 9.sp,
-                    maxLines = 1
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }

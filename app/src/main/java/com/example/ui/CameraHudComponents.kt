@@ -24,12 +24,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -571,215 +573,223 @@ private fun CameraToolsDrawer(
                 .padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                DrawerTileButton(
-                    icon = Icons.Default.CenterFocusStrong,
-                    label = "Фокус-\nпикинг",
-                    active = isFocusPeakingEnabled,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleFocusPeaking
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Exposure,
-                    label = "Карта\nэкспозиции",
-                    active = isFalseColorEnabled,
-                    accent = NeonYellow,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleFalseColor
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.CropFree,
-                    label = "Уровень\nлиста",
-                    active = isDocumentModeActive,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleDocumentMode
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.AutoFixHigh,
-                    label = "Анти-\nтуман",
-                    active = isDcpDehazeActive,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleDcpDehaze
-                )
-            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 285.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DrawerTileButton(
+                        icon = Icons.Default.CenterFocusStrong,
+                        label = "Фокус\nпикинг",
+                        active = isFocusPeakingEnabled,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleFocusPeaking
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Exposure,
+                        label = "Карта\nсвета",
+                        active = isFalseColorEnabled,
+                        accent = NeonYellow,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleFalseColor
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.CropFree,
+                        label = "Уровень\nлиста",
+                        active = isDocumentModeActive,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleDocumentMode
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.AutoFixHigh,
+                        label = "Анти\nтуман",
+                        active = isDcpDehazeActive,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleDcpDehaze
+                    )
+                }
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                DrawerTileButton(
-                    icon = Icons.Default.ShutterSpeed,
-                    label = "Авто-\nспуск",
-                    active = isAutoShutterEnabled,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleAutoShutter
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.BurstMode,
-                    label = "Серия\nфокуса",
-                    active = isFocusBracketingActive,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleFocusBracketing
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Timer,
-                    label = if (timerSeconds == 0) "Таймер" else "Таймер\n${timerSeconds} сек",
-                    active = timerSeconds > 0,
-                    accent = NeonYellow,
-                    modifier = Modifier.weight(1f),
-                    onClick = onCycleTimer
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Mic,
-                    label = "Голос-\nкоманды",
-                    active = isVoiceControlActive,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f),
-                    onClick = onToggleVoiceControl
-                )
-            }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DrawerTileButton(
+                        icon = Icons.Default.ShutterSpeed,
+                        label = "Авто\nспуск",
+                        active = isAutoShutterEnabled,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleAutoShutter
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.BurstMode,
+                        label = "Серия\nфокуса",
+                        active = isFocusBracketingActive,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleFocusBracketing
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Timer,
+                        label = if (timerSeconds == 0) "Таймер" else "Таймер\n${timerSeconds} сек",
+                        active = timerSeconds > 0,
+                        accent = NeonYellow,
+                        modifier = Modifier.weight(1f),
+                        onClick = onCycleTimer
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Mic,
+                        label = "Голос\nкоманд",
+                        active = isVoiceControlActive,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f),
+                        onClick = onToggleVoiceControl
+                    )
+                }
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                DrawerTileButton(
-                    icon = Icons.Default.DarkMode,
-                    label = "Стелс-\nэкран",
-                    active = false,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f).testTag("stealth_button"),
-                    onClick = onActivateStealth
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.VisibilityOff,
-                    label = "Маски-\nровка",
-                    active = false,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f).testTag("camouflage_button"),
-                    onClick = onOpenCamouflage
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Shield,
-                    label = "Ассистент\n:AI",
-                    active = isAssistModeActive,
-                    accent = CyberRed,
-                    modifier = Modifier.weight(1f).testTag("assist_toggle_button"),
-                    onClick = onToggleAssistMode
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Settings,
-                    label = "Наст-\nройки",
-                    active = false,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f).testTag("settings_button"),
-                    onClick = onOpenSettings
-                )
-            }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DrawerTileButton(
+                        icon = Icons.Default.DarkMode,
+                        label = "Стелс\nэкран",
+                        active = false,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f).testTag("stealth_button"),
+                        onClick = onActivateStealth
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.VisibilityOff,
+                        label = "Маска\nиконки",
+                        active = false,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f).testTag("camouflage_button"),
+                        onClick = onOpenCamouflage
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Shield,
+                        label = "Щит AI\nрежим",
+                        active = isAssistModeActive,
+                        accent = CyberRed,
+                        modifier = Modifier.weight(1f).testTag("assist_toggle_button"),
+                        onClick = onToggleAssistMode
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Settings,
+                        label = "Центр\nопций",
+                        active = false,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f).testTag("settings_button"),
+                        onClick = onOpenSettings
+                    )
+                }
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                DrawerTileButton(
-                    icon = Icons.Default.Tune,
-                    label = "PRO-\nпанель",
-                    active = isProPanelExpanded,
-                    accent = NeonYellow,
-                    modifier = Modifier.weight(1f).testTag("drawer_pro_toggle"),
-                    onClick = onToggleProPanel
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.BarChart,
-                    label = "Гисто-\nграмма",
-                    active = isHistogramEnabled,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f).testTag("drawer_histogram_toggle"),
-                    onClick = onToggleHistogram
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Grain,
-                    label = "Зебра\nсвета",
-                    active = isZebraEnabled,
-                    accent = NeonYellow,
-                    modifier = Modifier.weight(1f).testTag("drawer_zebra_toggle"),
-                    onClick = onToggleZebra
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.AutoAwesome,
-                    label = "Качество\n${photoIqProfile.badgeRu}",
-                    active = photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f).testTag("drawer_iq_cycle"),
-                    onClick = onCyclePhotoIq
-                )
-            }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DrawerTileButton(
+                        icon = Icons.Default.Tune,
+                        label = "PRO\nпанель",
+                        active = isProPanelExpanded,
+                        accent = NeonYellow,
+                        modifier = Modifier.weight(1f).testTag("drawer_pro_toggle"),
+                        onClick = onToggleProPanel
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.BarChart,
+                        label = "Гисто\nграмма",
+                        active = isHistogramEnabled,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f).testTag("drawer_histogram_toggle"),
+                        onClick = onToggleHistogram
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Grain,
+                        label = "Зебра\nсвета",
+                        active = isZebraEnabled,
+                        accent = NeonYellow,
+                        modifier = Modifier.weight(1f).testTag("drawer_zebra_toggle"),
+                        onClick = onToggleZebra
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.AutoAwesome,
+                        label = "Качество\n${photoIqProfile.badgeRu}",
+                        active = photoIqProfile != PhotoIqEngine.PhotoIqProfile.OFF,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f).testTag("drawer_iq_cycle"),
+                        onClick = onCyclePhotoIq
+                    )
+                }
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                DrawerTileButton(
-                    icon = Icons.Default.FilterHdr,
-                    label = "Стекинг\n${multiFrameMode?.badgeRu ?: "Выкл"}",
-                    active = multiFrameMode != null,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f).testTag("drawer_stack_cycle"),
-                    onClick = onCycleMultiFrame
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Memory,
-                    label = "Плата\nPCB",
-                    active = showPcbLabDialog,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f).testTag("drawer_pcb_lab"),
-                    onClick = onOpenPcbLab
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.GraphicEq,
-                    label = if (isAudioWatcherActive) "Акустик\n${audioThresholdDbfs.toInt()} дБ" else "Акустик-\nсторож",
-                    active = isAudioWatcherActive,
-                    accent = NeonYellow,
-                    modifier = Modifier.weight(1f).testTag("drawer_audio_watcher"),
-                    onClick = onToggleAudioWatcher
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.DeleteForever,
-                    label = "Шредер\nсейфа",
-                    active = false,
-                    accent = CyberRed,
-                    modifier = Modifier.weight(1f).testTag("panic_shred_button"),
-                    onClick = onOpenPanicShred
-                )
-            }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DrawerTileButton(
+                        icon = Icons.Default.FilterHdr,
+                        label = "Стекинг\n${multiFrameMode?.badgeRu ?: "Выкл"}",
+                        active = multiFrameMode != null,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f).testTag("drawer_stack_cycle"),
+                        onClick = onCycleMultiFrame
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Memory,
+                        label = "Плата\nPCB",
+                        active = showPcbLabDialog,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f).testTag("drawer_pcb_lab"),
+                        onClick = onOpenPcbLab
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.GraphicEq,
+                        label = if (isAudioWatcherActive) "Акустик\n${audioThresholdDbfs.toInt()} дБ" else "Акуст.\nсторож",
+                        active = isAudioWatcherActive,
+                        accent = NeonYellow,
+                        modifier = Modifier.weight(1f).testTag("drawer_audio_watcher"),
+                        onClick = onToggleAudioWatcher
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.DeleteForever,
+                        label = "Шредер\nсейфа",
+                        active = false,
+                        accent = CyberRed,
+                        modifier = Modifier.weight(1f).testTag("panic_shred_button"),
+                        onClick = onOpenPanicShred
+                    )
+                }
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val intervalLabel = if (timeLapseIntervalMs < 1000L) "${timeLapseIntervalMs}мс" else "${timeLapseIntervalMs / 1000L}с"
-                DrawerTileButton(
-                    icon = Icons.Default.VideoStable,
-                    label = "Gyro-EIS\nLite",
-                    active = isGyroEisEnabled,
-                    accent = NeonCyan,
-                    modifier = Modifier.weight(1f).testTag("drawer_eis_toggle"),
-                    onClick = onToggleGyroEis
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Flare,
-                    label = if (isRetroScanning) "Скан...\nОптика" else "Анти-\nОптика",
-                    active = isRetroScanning,
-                    accent = CyberRed,
-                    modifier = Modifier.weight(1f).testTag("drawer_retro_scan_btn"),
-                    onClick = onTriggerRetroScan
-                )
-                DrawerTileButton(
-                    icon = Icons.Default.Timelapse,
-                    label = if (isTimeLapseRecording) "Стоп\nТаймлапс" else "Таймлапс\n$intervalLabel",
-                    active = isTimeLapseRecording,
-                    accent = NeonYellow,
-                    modifier = Modifier.weight(1f).testTag("drawer_timelapse_toggle"),
-                    onClick = onToggleTimeLapse
-                )
-                DrawerTileButton(
-                    icon = Icons.AutoMirrored.Filled.FactCheck,
-                    label = "Self-\nTest",
-                    active = false,
-                    accent = CyberGreen,
-                    modifier = Modifier.weight(1f).testTag("drawer_selftest_btn"),
-                    onClick = onOpenSelfTest
-                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val intervalLabel = if (timeLapseIntervalMs < 1000L) "${timeLapseIntervalMs}мс" else "${timeLapseIntervalMs / 1000L}с"
+                    DrawerTileButton(
+                        icon = Icons.Default.VideoStable,
+                        label = "Gyro-EIS\nLite",
+                        active = isGyroEisEnabled,
+                        accent = NeonCyan,
+                        modifier = Modifier.weight(1f).testTag("drawer_eis_toggle"),
+                        onClick = onToggleGyroEis
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Flare,
+                        label = if (isRetroScanning) "Скан...\nОптика" else "Анти\nОптика",
+                        active = isRetroScanning,
+                        accent = CyberRed,
+                        modifier = Modifier.weight(1f).testTag("drawer_retro_scan_btn"),
+                        onClick = onTriggerRetroScan
+                    )
+                    DrawerTileButton(
+                        icon = Icons.Default.Timelapse,
+                        label = if (isTimeLapseRecording) "Стоп\nТаймлапс" else "Таймлапс\n$intervalLabel",
+                        active = isTimeLapseRecording,
+                        accent = NeonYellow,
+                        modifier = Modifier.weight(1f).testTag("drawer_timelapse_toggle"),
+                        onClick = onToggleTimeLapse
+                    )
+                    DrawerTileButton(
+                        icon = Icons.AutoMirrored.Filled.FactCheck,
+                        label = "Self-\nTest",
+                        active = false,
+                        accent = CyberGreen,
+                        modifier = Modifier.weight(1f).testTag("drawer_selftest_btn"),
+                        onClick = onOpenSelfTest
+                    )
+                }
             }
 
             Box(
@@ -1079,33 +1089,45 @@ internal fun CameraBottomControlDeck(
             )
         }
 
-        if (selectedCameraMode == "SENTINEL") {
-            SentinelControlCardLeaf(
-                armed = sentinelArmed,
-                config = sentinelConfig,
-                telemetry = telemetry,
-                hasByokKey = hasByokKey,
-                events = sentinelEvents,
-                onToggleArmed = onToggleSentinelArmed,
-                onCycleLinger = onCycleSentinelLinger,
-                onToggleKnock = onToggleSentinelKnock,
-                onToggleClaheNight = onToggleSentinelClaheNight,
-                onToggleTwoStageCrop = onToggleSentinelTwoStageCrop,
-                onToggleAiTriage = onToggleSentinelAiTriage,
-                onClearEvents = onClearSentinelEvents,
-                onStealthGuard = onStealthGuard
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
+        val hasOverlayCards = selectedCameraMode == "SENTINEL" ||
+            selectedCameraMode == "VISOR" ||
+            visorMode != VisorMode.NORMAL
+        if (hasOverlayCards) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 260.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (selectedCameraMode == "SENTINEL") {
+                    SentinelControlCardLeaf(
+                        armed = sentinelArmed,
+                        config = sentinelConfig,
+                        telemetry = telemetry,
+                        hasByokKey = hasByokKey,
+                        events = sentinelEvents,
+                        onToggleArmed = onToggleSentinelArmed,
+                        onCycleLinger = onCycleSentinelLinger,
+                        onToggleKnock = onToggleSentinelKnock,
+                        onToggleClaheNight = onToggleSentinelClaheNight,
+                        onToggleTwoStageCrop = onToggleSentinelTwoStageCrop,
+                        onToggleAiTriage = onToggleSentinelAiTriage,
+                        onClearEvents = onClearSentinelEvents,
+                        onStealthGuard = onStealthGuard
+                    )
+                }
 
-        if (selectedCameraMode == "VISOR" || visorMode != VisorMode.NORMAL) {
-            CyberVisorControlCardLeaf(
-                activeMode = visorMode,
-                telemetryState = telemetry,
-                onSelectVisorMode = onSelectVisorMode,
-                onSavePulseMetrics = onSavePulseMetrics,
-                onSaveVisorSnapshot = onSaveVisorSnapshot
-            )
+                if (selectedCameraMode == "VISOR" || visorMode != VisorMode.NORMAL) {
+                    CyberVisorControlCardLeaf(
+                        activeMode = visorMode,
+                        telemetryState = telemetry,
+                        onSelectVisorMode = onSelectVisorMode,
+                        onSavePulseMetrics = onSavePulseMetrics,
+                        onSaveVisorSnapshot = onSaveVisorSnapshot
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(8.dp))
         }
 
@@ -1404,7 +1426,7 @@ private fun ModeCarouselRow(
             .fillMaxWidth()
             .padding(bottom = 8.dp)
             .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.Center,
+        horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically
     ) {
         cameraModes.forEach { (title, key) ->
@@ -1414,14 +1436,16 @@ private fun ModeCarouselRow(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .clickable { onApplyCameraMode(key) }
-                    .padding(horizontal = 11.dp, vertical = 5.dp)
+                    .padding(horizontal = 8.dp, vertical = 5.dp)
             ) {
                 Text(
                     text = title,
                     color = if (isSelected) Color.White else CyberMuted,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                    fontSize = 12.sp
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    softWrap = false
                 )
                 Spacer(modifier = Modifier.height(3.dp))
                 Box(
@@ -1782,12 +1806,12 @@ internal fun DrawerTileButton(
 ) {
     Column(
         modifier = modifier
-            .height(58.dp)
+            .height(50.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(if (active) accent.copy(alpha = 0.22f) else CyberBlack.copy(alpha = 0.55f))
             .border(1.dp, if (active) accent else CyberBorder, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 3.dp, vertical = 4.dp),
+            .padding(horizontal = 3.dp, vertical = 3.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -1795,7 +1819,7 @@ internal fun DrawerTileButton(
             imageVector = icon,
             contentDescription = label.replace("\n", " "),
             tint = if (active) accent else Color.White,
-            modifier = Modifier.size(17.dp)
+            modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
@@ -1804,9 +1828,10 @@ internal fun DrawerTileButton(
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             fontSize = 8.sp,
-            lineHeight = 9.5.sp,
+            lineHeight = 9.sp,
             textAlign = TextAlign.Center,
-            maxLines = 2
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

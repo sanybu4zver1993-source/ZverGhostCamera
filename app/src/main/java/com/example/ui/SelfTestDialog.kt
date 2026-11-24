@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -89,8 +90,7 @@ fun SelfTestDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(CyberBlack.copy(alpha = 0.96f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
+                .zverDialogSafeBarsPadding()
                 .padding(14.dp)
         ) {
             Column(
@@ -131,11 +131,11 @@ fun SelfTestDialog(
                             .background(CyberSurface, RoundedCornerShape(8.dp))
                             .border(1.dp, CyberBorder, RoundedCornerShape(8.dp))
                             .padding(horizontal = 10.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "PASS: ${r.passCount}   WARN: ${r.warnCount}   FAIL: ${r.failCount}",
+                            text = "PASS: ${r.passCount}  WARN: ${r.warnCount}  FAIL: ${r.failCount}",
                             color = when {
                                 r.failCount > 0 -> CyberRed
                                 r.warnCount > 0 -> CyberAmber
@@ -143,13 +143,18 @@ fun SelfTestDialog(
                             },
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
                         Text(
                             text = "4GB RAM PROFILE",
                             color = CyberMuted,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 9.sp
+                            fontSize = 9.sp,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }

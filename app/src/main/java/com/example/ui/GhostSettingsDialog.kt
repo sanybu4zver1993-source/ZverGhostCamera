@@ -122,10 +122,8 @@ fun GhostSettingsDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(CyberBlack.copy(alpha = 0.95f))
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
-                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 20.dp)
+                .zverDialogSafeBarsPadding()
+                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 14.dp)
         ) {
             Column(
                 modifier = Modifier

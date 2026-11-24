@@ -208,8 +208,7 @@ fun PrivacyEditorDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(EdBlack)
-                .statusBarsPadding()
-                .navigationBarsPadding()
+                .zverDialogSafeBarsPadding()
                 .padding(12.dp)
         ) {
             // Top bar

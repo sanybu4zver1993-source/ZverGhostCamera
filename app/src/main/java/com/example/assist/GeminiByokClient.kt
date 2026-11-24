@@ -527,6 +527,17 @@ object GeminiByokClient {
     fun isQuotaOrNetworkFailure(message: String?): Boolean {
         val m = message.orEmpty().lowercase()
         return m.contains("429") ||
+            m.contains("500") ||
+            m.contains("502") ||
+            m.contains("503") ||
+            m.contains("504") ||
+            m.contains("high demand") ||
+            m.contains("overloaded") ||
+            m.contains("unavailable") ||
+            m.contains("resource_exhausted") ||
+            m.contains("rate limit") ||
+            m.contains("too many requests") ||
+            m.contains("перегруж") ||
             m.contains("лимит") ||
             m.contains("quota") ||
             m.contains("нет сети") ||
@@ -535,7 +546,8 @@ object GeminiByokClient {
             m.contains("timeout") ||
             m.contains("unable to resolve") ||
             m.contains("failed to connect") ||
-            m.contains("socket")
+            m.contains("socket") ||
+            m.contains("connection reset")
     }
 
     private fun mapNetworkError(e: Exception): String {
