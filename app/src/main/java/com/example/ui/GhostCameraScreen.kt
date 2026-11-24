@@ -173,17 +173,21 @@ fun GhostCameraScreen(
 
     // Pro Camera2 & Photo IQ (P1) States
     var proProfile by remember { mutableStateOf(CameraCapabilityProfiler.CameraProProfile.fallback(lensFacing)) }
-    LaunchedEffect(lensFacing) {
-        proProfile = withContext(Dispatchers.IO) {
-            CameraCapabilityProfiler.profileCamera(context, lensFacing)
-        }
-    }
     var isProPanelExpanded by remember { mutableStateOf(false) }
     var awbPreset by remember { mutableStateOf(CameraCapabilityProfiler.AwbPreset.AUTO) }
     var manualFocusNorm by remember { mutableStateOf<Float?>(null) }
     var isoOverride by remember { mutableStateOf<Int?>(null) }
     var shutterNsOverride by remember { mutableStateOf<Long?>(null) }
     var isAeLocked by remember { mutableStateOf(false) }
+    var isAwbLocked by remember { mutableStateOf(false) }
+    var targetFpsRange by remember { mutableStateOf<IntRange?>(null) }
+    LaunchedEffect(lensFacing) {
+        targetFpsRange = null
+        isAwbLocked = false
+        proProfile = withContext(Dispatchers.IO) {
+            CameraCapabilityProfiler.profileCamera(context, lensFacing)
+        }
+    }
     var isHistogramEnabled by remember { mutableStateOf(false) }
     var isZebraEnabled by remember { mutableStateOf(false) }
     var photoIqProfile by remember { mutableStateOf(ZverPrefs.getPhotoIqProfile(context)) }
@@ -433,7 +437,7 @@ fun GhostCameraScreen(
     val hasByokKey by ByokManager.hasKeyFlow.collectAsState()
 
     // Camera2 Interop: BIO_RPPG AE/AWB lock takes priority; otherwise apply Pro Camera2 overrides
-    DisposableEffect(visorMode, cameraControl, awbPreset, manualFocusNorm, isoOverride, shutterNsOverride, isAeLocked, proProfile) {
+    DisposableEffect(visorMode, cameraControl, awbPreset, manualFocusNorm, isoOverride, shutterNsOverride, isAeLocked, isAwbLocked, targetFpsRange, proProfile) {
         val ctrl = cameraControl
         if (ctrl == null) {
             onDispose {}
@@ -453,6 +457,8 @@ fun GhostCameraScreen(
             val hasProOverride = (awbPreset != CameraCapabilityProfiler.AwbPreset.AUTO) ||
                 (manualFocusNorm != null && proProfile.isManualFocusSupported) ||
                 isAeLocked ||
+                (isAwbLocked && proProfile.supportsAwbLock) ||
+                targetFpsRange != null ||
                 (proProfile.supportsManualExposure && (isoOverride != null || shutterNsOverride != null))
             if (hasProOverride) {
                 try {
@@ -460,6 +466,15 @@ fun GhostCameraScreen(
                     builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbPreset.camera2Mode)
                     if (isAeLocked && proProfile.supportsAeLock) {
                         builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+                    }
+                    if (isAwbLocked && proProfile.supportsAwbLock) {
+                        builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+                    }
+                    targetFpsRange?.let { fps ->
+                        builder.setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                            android.util.Range(fps.first, fps.last)
+                        )
                     }
                     val mf = manualFocusNorm
                     if (mf != null && proProfile.isManualFocusSupported) {
@@ -469,10 +484,12 @@ fun GhostCameraScreen(
                             (mf.coerceIn(0f, 1f) * proProfile.minFocusDiopters)
                         )
                     }
-                    if (proProfile.supportsManualExposure && (isoOverride != null || shutterNsOverride != null)) {
+                    val isoRange = proProfile.isoRange
+                    val expRange = proProfile.exposureTimeNsRange
+                    if (proProfile.supportsManualExposure && isoRange != null && expRange != null && (isoOverride != null || shutterNsOverride != null)) {
                         builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                        val targetIso = isoOverride ?: (proProfile.isoRange?.first ?: 200)
-                        val targetNs = shutterNsOverride ?: 16_666_666L
+                        val targetIso = (isoOverride ?: isoRange.first).coerceIn(isoRange.first, isoRange.last)
+                        val targetNs = (shutterNsOverride ?: 16_666_666L).coerceIn(expRange.first, expRange.last)
                         builder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, targetIso)
                         builder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, targetNs)
                     }
@@ -655,6 +672,12 @@ fun GhostCameraScreen(
             captureExecutor.shutdown()
             analysisExecutor.shutdown()
             MainActivity.onVolumeShutterTrigger = null
+            MainActivity.onVideoToggleTrigger = null
+            MainActivity.onTorchToggleTrigger = null
+            MainActivity.onBlackoutToggleTrigger = null
+            MainActivity.onSentinelArmTrigger = null
+            MainActivity.onModeSwitchTrigger = null
+            MainActivity.onRamOnlyTrigger = null
         }
     }
 
@@ -1501,15 +1524,6 @@ fun GhostCameraScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        MainActivity.onVolumeShutterTrigger = {
-            if (selectedCameraMode == "VIDEO") triggerVideoRecordingToggle() else triggerPhotoCapture()
-        }
-        MainActivity.onVideoToggleTrigger = { triggerVideoRecordingToggle() }
-        MainActivity.onTorchToggleTrigger = { isTorchActive = !isTorchActive }
-        MainActivity.onBlackoutToggleTrigger = { isStealthBlackoutActive = !isStealthBlackoutActive }
-    }
-
     LaunchedEffect(zoomRatio, proProfile) {
         try {
             cameraControl?.setZoomRatio(zoomRatio.coerceIn(1.0f, proProfile.maxZoomRatio))
@@ -1988,7 +2002,9 @@ fun GhostCameraScreen(
                 stealthCoverMode = when (stealthCoverMode) {
                     StealthCoverMode.BLACKOUT -> StealthCoverMode.LOCKSCREEN_CLOCK
                     StealthCoverMode.LOCKSCREEN_CLOCK -> StealthCoverMode.BROWSER_MOCK
-                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.BLACKOUT
+                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.SYSTEM_UPDATE
+                    StealthCoverMode.SYSTEM_UPDATE -> StealthCoverMode.LOW_BATTERY
+                    StealthCoverMode.LOW_BATTERY -> StealthCoverMode.BLACKOUT
                 }
             },
             onCapture = { triggerPhotoCapture() },
@@ -2063,6 +2079,36 @@ fun GhostCameraScreen(
                 requestVoiceControlToggle(forceEnable = true)
             }
         }
+    }
+
+    LaunchedEffect(Unit) {
+        MainActivity.onVolumeShutterTrigger = {
+            if (selectedCameraMode == "VIDEO") triggerVideoRecordingToggle() else triggerPhotoCapture()
+        }
+        MainActivity.onVideoToggleTrigger = { triggerVideoRecordingToggle() }
+        MainActivity.onTorchToggleTrigger = { explicit ->
+            isTorchActive = explicit ?: !isTorchActive
+        }
+        MainActivity.onBlackoutToggleTrigger = { isStealthBlackoutActive = !isStealthBlackoutActive }
+        MainActivity.onSentinelArmTrigger = { explicit ->
+            val next = explicit ?: !sentinelArmed
+            if (next && selectedCameraMode != "SENTINEL") {
+                applyCameraModeSelection("SENTINEL")
+            }
+            SentinelEngine.setArmed(next)
+            sentinelArmed = next
+            sentinelEvents = SentinelEngine.getEvents()
+            lastStatusMessage = if (next) "🛡️ ДОЗОР ВКЛ (URI/Intent)" else "🛡️ ДОЗОР СНЯТ (URI/Intent)"
+        }
+        MainActivity.onModeSwitchTrigger = { modeKey ->
+            applyCameraModeSelection(modeKey)
+        }
+        MainActivity.onRamOnlyTrigger = { explicit ->
+            val next = explicit ?: !ZverPrefs.isRamOnlyMode(context)
+            ZverPrefs.setRamOnlyMode(context, next)
+            lastStatusMessage = if (next) "🧠 RAM-ONLY ВКЛ (URI/Intent)" else "💾 ЗАПИСЬ В СЕЙФ ВКЛ"
+        }
+        MainActivity.flushPendingAction(context)
     }
 
     val activeToolsCount = listOf(
@@ -2322,6 +2368,8 @@ fun GhostCameraScreen(
             isoOverride = isoOverride,
             shutterNsOverride = shutterNsOverride,
             isAeLocked = isAeLocked,
+            isAwbLocked = isAwbLocked,
+            targetFpsRange = targetFpsRange,
             photoIqProfile = photoIqProfile,
             isHistogramEnabled = isHistogramEnabled,
             isZebraEnabled = isZebraEnabled,
@@ -2463,6 +2511,19 @@ fun GhostCameraScreen(
             onIsoChange = { isoOverride = it },
             onShutterNsChange = { shutterNsOverride = it },
             onAeLockChange = { isAeLocked = it },
+            onAwbLockChange = { isAwbLocked = it },
+            onTargetFpsRangeChange = { targetFpsRange = it },
+            onResetPro = {
+                exposureIndex = 0
+                awbPreset = CameraCapabilityProfiler.AwbPreset.AUTO
+                manualFocusNorm = null
+                isoOverride = null
+                shutterNsOverride = null
+                isAeLocked = false
+                isAwbLocked = false
+                targetFpsRange = null
+                lastStatusMessage = "PRO-параметры сброшены на Авто"
+            },
             onPhotoIqChange = { iq ->
                 photoIqProfile = iq
                 ZverPrefs.setPhotoIqProfile(context, iq)

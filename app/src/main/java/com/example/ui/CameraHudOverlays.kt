@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -51,7 +52,9 @@ private val HudYellow = Color(0xFFFFEA00)
 enum class StealthCoverMode(val titleRu: String) {
     BLACKOUT("Чёрный экран"),
     LOCKSCREEN_CLOCK("Часы (Блокировка)"),
-    BROWSER_MOCK("Поиск (Браузер)")
+    BROWSER_MOCK("Поиск (Браузер)"),
+    SYSTEM_UPDATE("Обновление Android"),
+    LOW_BATTERY("Разряд 2%")
 }
 
 @Composable
@@ -179,6 +182,63 @@ fun StealthBlackoutScreen(
                         color = Color.Gray,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
+                    )
+                }
+            }
+            StealthCoverMode.SYSTEM_UPDATE -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 28.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(
+                        color = HudCyan.copy(alpha = 0.7f),
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(38.dp)
+                    )
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Text(
+                        text = "Оптимизация системы Android...",
+                        color = Color.White.copy(alpha = 0.88f),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Завершено 47% • Не выключайте устройство",
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            StealthCoverMode.LOW_BATTERY -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "2%",
+                        color = HudRed.copy(alpha = 0.78f),
+                        fontSize = 46.sp,
+                        fontWeight = FontWeight.Light,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Критически низкий заряд батареи",
+                        color = Color.Gray.copy(alpha = 0.8f),
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Подключите зарядное устройство",
+                        color = Color.DarkGray,
+                        fontSize = 11.sp
                     )
                 }
             }
@@ -524,6 +584,11 @@ fun ProCameraControlPanel(
     onShutterNsChange: (Long?) -> Unit,
     isAeLocked: Boolean,
     onAeLockChange: (Boolean) -> Unit,
+    isAwbLocked: Boolean = false,
+    onAwbLockChange: (Boolean) -> Unit = {},
+    targetFpsRange: IntRange? = null,
+    onTargetFpsRangeChange: (IntRange?) -> Unit = {},
+    onResetPro: () -> Unit = {},
     photoIqProfile: com.example.camera.PhotoIqEngine.PhotoIqProfile,
     onPhotoIqChange: (com.example.camera.PhotoIqEngine.PhotoIqProfile) -> Unit,
     isHistogramEnabled: Boolean,
@@ -534,6 +599,14 @@ fun ProCameraControlPanel(
     modifier: Modifier = Modifier
 ) {
     var activeSection by remember { mutableStateOf(ProControlSection.IQ) }
+    val hasAnyOverride = exposureIndex != 0 ||
+        awbPreset != com.example.camera.CameraCapabilityProfiler.AwbPreset.AUTO ||
+        manualFocusNorm != null ||
+        isoOverride != null ||
+        shutterNsOverride != null ||
+        isAeLocked ||
+        isAwbLocked ||
+        targetFpsRange != null
 
     Column(
         modifier = modifier
@@ -559,6 +632,7 @@ fun ProCameraControlPanel(
                 fontSize = 9.sp
             )
             Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -578,11 +652,29 @@ fun ProCameraControlPanel(
                 )
                 if (profile.supportsAeLock) {
                     ProChip(
-                        label = if (isAeLocked) "Фикс AE 🔒" else "Фикс AE",
+                        label = if (isAeLocked) "AE 🔒" else "AE-L",
                         selected = isAeLocked,
                         accent = HudRed,
                         modifier = Modifier.testTag("pro_toggle_ael"),
                         onClick = { onAeLockChange(!isAeLocked) }
+                    )
+                }
+                if (profile.supportsAwbLock) {
+                    ProChip(
+                        label = if (isAwbLocked) "WB 🔒" else "WB-L",
+                        selected = isAwbLocked,
+                        accent = HudCyan,
+                        modifier = Modifier.testTag("pro_toggle_awbl"),
+                        onClick = { onAwbLockChange(!isAwbLocked) }
+                    )
+                }
+                if (hasAnyOverride) {
+                    ProChip(
+                        label = "Сброс",
+                        selected = false,
+                        accent = HudYellow,
+                        modifier = Modifier.testTag("pro_reset_btn"),
+                        onClick = onResetPro
                     )
                 }
                 if (onClose != null) {
@@ -801,6 +893,39 @@ fun ProCameraControlPanel(
                             lineHeight = 11.sp
                         )
                     }
+                    if (profile.availableFpsRanges.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("FPS:", color = Color.LightGray, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                            ProChip(
+                                label = "Авто",
+                                selected = targetFpsRange == null,
+                                accent = HudCyan,
+                                modifier = Modifier.testTag("pro_fps_auto"),
+                                onClick = { onTargetFpsRangeChange(null) }
+                            )
+                            profile.availableFpsRanges.take(5).forEach { range ->
+                                val tag = if (range.first == range.last) "${range.last}" else "${range.first}-${range.last}"
+                                ProChip(
+                                    label = tag,
+                                    selected = targetFpsRange == range,
+                                    accent = HudCyan,
+                                    onClick = { onTargetFpsRangeChange(range) }
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        text = "HAL: JPEG ${profile.maxJpegRes} • AF=${if (profile.isManualFocusSupported) String.format(java.util.Locale.US, "%.1fD", profile.minFocusDiopters) else "Fix"} • RAW=${if (profile.hasRawCapability) "Да" else "Нет"}",
+                        color = Color(0xFF7D93A5),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 8.sp
+                    )
                 }
             }
         }

@@ -339,7 +339,7 @@ class ZverSecurityFeaturesTest {
             userTask = "посмотри чё там",
             fallbackReason = "Лимит 429"
         )
-        assertTrue(offlineReply.contains("МАЛЫШЕЙ ОФЛАЙН"))
+        assertTrue(offlineReply.contains("МАЛИПУСИКОВ ОФЛАЙН"))
         assertTrue(offlineReply.contains("Cat 91%"))
         assertTrue(offlineReply.contains("AA 1234 BB"))
 

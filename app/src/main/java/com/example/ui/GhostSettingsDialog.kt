@@ -896,27 +896,15 @@ fun GhostSettingsDialog(
                         }
 
                         SettingsTab.TERMUX_AUTOMATION -> {
-                            Text("СИМБИОЗ: TERMUX, SHIZUKU И MACRODROID", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("СИМБИОЗ: TERMUX, SHIZUKU, ORBOT И MACRODROID", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(
-                                "Прямая связь на уровне системы Android. Zver Camera слушает широковещательные интенты и прямой протокол zver://",
+                                "Прямая связь на уровне Android без root. Zver Camera принимает deep-link zver:// (singleTop) и широковещательные интенты.",
                                 color = CyberMuted,
                                 fontSize = 10.sp,
                                 modifier = Modifier.padding(vertical = 4.dp)
                             )
 
-                            // Live App Ecosystem Detection
-                            val isTermuxInstalled = remember {
-                                try { context.packageManager.getPackageInfo("com.termux", 0); true } catch (_: Exception) { false }
-                            }
-                            val isTermuxApiInstalled = remember {
-                                try { context.packageManager.getPackageInfo("com.termux.api", 0); true } catch (_: Exception) { false }
-                            }
-                            val isShizukuInstalled = remember {
-                                try { context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0); true } catch (_: Exception) { false }
-                            }
-                            val isMacroDroidInstalled = remember {
-                                try { context.packageManager.getPackageInfo("com.arlosoft.macrodroid", 0); true } catch (_: Exception) { false }
-                            }
+                            val eco = remember { com.example.assist.AutomationRouter.inspectEcosystem(context) }
 
                             Text("СТАТУС ПОДКЛЮЧЕНИЯ В СИСТЕМЕ:", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.height(4.dp))
@@ -926,48 +914,76 @@ fun GhostSettingsDialog(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                AppBadge("Termux", isTermuxInstalled) {
-                                    val intent = context.packageManager.getLaunchIntentForPackage("com.termux")
-                                    if (intent != null) context.startActivity(intent)
+                                AppBadge("Termux", eco.termux) {
+                                    context.packageManager.getLaunchIntentForPackage("com.termux")?.let { context.startActivity(it) }
                                 }
-                                AppBadge("Termux:API", isTermuxApiInstalled) {
-                                    val intent = context.packageManager.getLaunchIntentForPackage("com.termux.api")
-                                    if (intent != null) context.startActivity(intent)
+                                AppBadge("Termux:API", eco.termuxApi) {
+                                    context.packageManager.getLaunchIntentForPackage("com.termux.api")?.let { context.startActivity(it) }
                                 }
-                                AppBadge("Shizuku", isShizukuInstalled) {
-                                    val intent = context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-                                    if (intent != null) context.startActivity(intent)
+                                AppBadge(if (eco.shizukuVersion != null) "Shizuku ${eco.shizukuVersion}" else "Shizuku", eco.shizuku) {
+                                    context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")?.let { context.startActivity(it) }
                                 }
-                                AppBadge("MacroDroid", isMacroDroidInstalled) {
-                                    val intent = context.packageManager.getLaunchIntentForPackage("com.arlosoft.macrodroid")
-                                    if (intent != null) context.startActivity(intent)
+                                AppBadge("MacroDroid", eco.macroDroid) {
+                                    context.packageManager.getLaunchIntentForPackage("com.arlosoft.macrodroid")?.let { context.startActivity(it) }
+                                }
+                                AppBadge("Orbot / Tor", eco.orbot) {
+                                    (context.packageManager.getLaunchIntentForPackage("org.torproject.android")
+                                        ?: context.packageManager.getLaunchIntentForPackage("org.torproject.torbrowser"))
+                                        ?.let { context.startActivity(it) }
                                 }
                             }
 
                             Spacer(modifier = Modifier.height(10.dp))
 
-                            Text("БЫСТРЫЙ ВЫЗОВ (DEEP-LINK URI):", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("DEEP-LINK URI (SINGLETOP — БЕЗ ДУБЛЕЙ ОКНА):", color = CyberGreen, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold)
 
                             AutomationCommandCard(
-                                label = "Прямой запуск из Termux (одной строкой):",
+                                label = "Сделать фото с текущей сцены (Termux / ADB):",
                                 cmd = "am start -d zver://capture",
                                 onCopy = {
-                                    SecureClipboard.copySensitive(context, "Zver Termux CMD", "am start -d zver://capture")
-                                    onStatusMessage("СКОПИРОВАНО (АВТО-ОЧИСТКА 45с)")
+                                    SecureClipboard.copySensitive(context, "Zver Capture URI", "am start -d zver://capture")
+                                    onStatusMessage("СКОПИРОВАНО (45с)")
                                 }
                             )
 
                             AutomationCommandCard(
-                                label = "Широковещательный интент (MacroDroid / Termux):",
-                                cmd = "am broadcast -a com.example.camera.TRIGGER_CAPTURE",
+                                label = "Поставить / снять Дозор (Sentinel) удалённо:",
+                                cmd = "am start -d \"zver://sentinel?arm=1\"",
                                 onCopy = {
-                                    SecureClipboard.copySensitive(context, "Zver Broadcast Intent", "am broadcast -a com.example.camera.TRIGGER_CAPTURE")
-                                    onStatusMessage("СКОПИРОВАН INTENT (АВТО-ОЧИСТКА 45с)")
+                                    SecureClipboard.copySensitive(context, "Zver Sentinel URI", "am start -d \"zver://sentinel?arm=1\"")
+                                    onStatusMessage("СКОПИРОВАН ДОЗОР URI (45с)")
                                 }
                             )
 
                             AutomationCommandCard(
-                                label = "Переключение фонарика из скрипта:",
+                                label = "Переключить режим (PHOTO|VIDEO|NIGHT|VISOR|SENTINEL|DOCUMENTS):",
+                                cmd = "am start -d \"zver://mode?name=NIGHT\"",
+                                onCopy = {
+                                    SecureClipboard.copySensitive(context, "Zver Mode URI", "am start -d \"zver://mode?name=NIGHT\"")
+                                    onStatusMessage("СКОПИРОВАН MODE URI (45с)")
+                                }
+                            )
+
+                            AutomationCommandCard(
+                                label = "Включить RAM-Only (0 записей на диск) / Экстренная блокировка:",
+                                cmd = "am start -d \"zver://ram?on=1\"  # или zver://lock",
+                                onCopy = {
+                                    SecureClipboard.copySensitive(context, "Zver RAM URI", "am start -d \"zver://ram?on=1\"")
+                                    onStatusMessage("СКОПИРОВАН RAM-ONLY URI (45с)")
+                                }
+                            )
+
+                            AutomationCommandCard(
+                                label = "Broadcast-интенты (MacroDroid / Tasker / Termux):",
+                                cmd = "am broadcast -a com.example.camera.ARM_SENTINEL --ez armed true",
+                                onCopy = {
+                                    SecureClipboard.copySensitive(context, "Zver Broadcast Intent", "am broadcast -a com.example.camera.ARM_SENTINEL --ez armed true")
+                                    onStatusMessage("СКОПИРОВАН INTENT (45с)")
+                                }
+                            )
+
+                            AutomationCommandCard(
+                                label = "Фонарик / Захват кадра через broadcast:",
                                 cmd = "am broadcast -a com.example.camera.TOGGLE_TORCH",
                                 onCopy = {
                                     SecureClipboard.copySensitive(context, "Zver Torch Intent", "am broadcast -a com.example.camera.TOGGLE_TORCH")
@@ -977,20 +993,32 @@ fun GhostSettingsDialog(
 
                             Spacer(modifier = Modifier.height(6.dp))
 
-                            // Test Impulse Button
-                            Button(
-                                onClick = {
-                                    val testIntent = android.content.Intent("com.example.camera.TRIGGER_CAPTURE")
-                                    context.sendBroadcast(testIntent)
-                                    onStatusMessage("⚡ ТЕСТОВЫЙ ИМПУЛЬС ОТПРАВЛЕН В КАМЕРУ!")
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
-                                shape = RoundedCornerShape(6.dp),
-                                modifier = Modifier.fillMaxWidth()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(Icons.Default.Bolt, contentDescription = "Тест", tint = Color.White, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("ОТПРАВИТЬ ТЕСТОВЫЙ ИМПУЛЬС (СДЕЛАТЬ КАДР)", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                Button(
+                                    onClick = {
+                                        context.sendBroadcast(android.content.Intent(com.example.assist.AutomationRouter.ACTION_TRIGGER_CAPTURE))
+                                        onStatusMessage("⚡ ТЕСТОВЫЙ ИМПУЛЬС КАДРА ОТПРАВЛЕН!")
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenDark),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).height(44.dp)
+                                ) {
+                                    Text("⚡ ТЕСТ КАДР", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Button(
+                                    onClick = {
+                                        context.sendBroadcast(android.content.Intent(com.example.assist.AutomationRouter.ACTION_TOGGLE_TORCH))
+                                        onStatusMessage("🔦 ТЕСТ ФОНАРИКА ОТПРАВЛЕН!")
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CyberSurface),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.weight(1f).height(44.dp)
+                                ) {
+                                    Text("🔦 ТЕСТ СВЕТ", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }

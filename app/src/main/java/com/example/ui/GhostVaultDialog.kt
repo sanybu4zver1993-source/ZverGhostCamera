@@ -54,6 +54,7 @@ import com.example.crypto.EncryptedMediaDataSource
 import com.example.crypto.GhostCryptoVault
 import com.example.crypto.MonoVaultEngine
 import com.example.crypto.VaultIndexEngine
+import com.example.crypto.BaitGalleryGenerator
 import com.example.crypto.ZverBackupEngine
 import com.example.security.ZverPrefs
 import kotlinx.coroutines.Dispatchers
@@ -141,6 +142,8 @@ fun GhostVaultDialog(
     var showPhotoEditor by remember { mutableStateOf(false) }
     var showPcbLab by remember { mutableStateOf(false) }
     var showVikaAi by remember { mutableStateOf(false) }
+    var showStegoDialog by remember { mutableStateOf(false) }
+    var showSplitKeyDialog by remember { mutableStateOf(false) }
     var showMetaTtlDialog by remember { mutableStateOf(false) }
     var zvbPasswordPromptMode by remember { mutableStateOf<String?>(null) } // "EXPORT" | "IMPORT" | null
     var pendingZvbPassword by remember { mutableStateOf(charArrayOf()) }
@@ -288,6 +291,33 @@ fun GhostVaultDialog(
         }
     }
 
+    val importProofLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                val proofJson = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { ins ->
+                        ins.bufferedReader(Charsets.UTF_8).readText()
+                    } ?: throw IllegalStateException("Не удалось прочитать .proof.json")
+                }
+                val raw = decryptedRawBytes ?: selectedVideoOrFileBytes(context, selectedFile, decryptedVideoFile)
+                if (raw == null) {
+                    statusMessage = "Нет открытого медиафайла для сверки"
+                    return@launch
+                }
+                val vr = withContext(Dispatchers.Default) {
+                    GhostCryptoVault.verifyDetachedProofJson(raw, proofJson)
+                }
+                proofVerifyResult = vr
+                statusMessage = if (vr.valid) "✅ ВНЕШНИЙ PROOF СОВПАЛ" else "⚠ ВНЕШНИЙ PROOF НЕ СОВПАЛ"
+            } catch (e: Exception) {
+                statusMessage = "Ошибка чтения proof: ${e.message}"
+            }
+        }
+    }
+
     LaunchedEffect(unlockedProfile) {
         if (unlockedProfile != null) {
             refreshFiles()
@@ -309,12 +339,20 @@ fun GhostVaultDialog(
         isPinBusy = true
         scope.launch {
             try {
-                withContext(Dispatchers.Default) {
+                val seededCount = withContext(Dispatchers.Default) {
+                    val hadDecoy = decoyClone != null && decoyClone.isNotEmpty()
                     GhostCryptoVault.setupVaultPins(context, mainClone, decoyClone, duressClone)
+                    if (hadDecoy) {
+                        BaitGalleryGenerator.seedDecoyBaitGallery(context).createdCount
+                    } else 0
                 }
                 inSetupFlow = false
                 unlockedProfile = GhostCryptoVault.VaultProfile.MAIN
-                statusMessage = "КЛЮЧИ PBKDF2 И КОНТУРЫ ЗАЩИТЫ АКТИВНЫ"
+                statusMessage = if (seededCount > 0) {
+                    "КЛЮЧИ PBKDF2 АКТИВНЫ + $seededCount ПРИМАНКИ В DECOY"
+                } else {
+                    "КЛЮЧИ PBKDF2 И КОНТУРЫ ЗАЩИТЫ АКТИВНЫ"
+                }
                 refreshFiles()
             } finally {
                 isPinBusy = false
@@ -647,15 +685,33 @@ fun GhostVaultDialog(
                                 fontSize = 12.sp
                             )
                         }
-                        IconButton(
-                            onClick = {
-                                cleanupPreviewMedia()
-                                GhostCryptoVault.lockSession()
-                                onDismiss()
-                            },
-                            modifier = Modifier.size(48.dp).testTag("vault_close_btn")
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Close", tint = CyberMuted)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (unlockedProfile == GhostCryptoVault.VaultProfile.DECOY && selectedFile == null && selectedRamId == null && selectedMonoId == null) {
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            val res = withContext(Dispatchers.Default) {
+                                                BaitGalleryGenerator.seedDecoyBaitGallery(context)
+                                            }
+                                            statusMessage = "🎭 ДОБАВЛЕНО ПРИМАНОК: ${res.createdCount}"
+                                            refreshFiles()
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("vault_seed_decoy_bait_btn")
+                                ) {
+                                    Text("🎭 ПРИМАНКИ", color = CyberAmber, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                }
+                            }
+                            IconButton(
+                                onClick = {
+                                    cleanupPreviewMedia()
+                                    GhostCryptoVault.lockSession()
+                                    onDismiss()
+                                },
+                                modifier = Modifier.size(48.dp).testTag("vault_close_btn")
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = CyberMuted)
+                            }
                         }
                     }
 
@@ -804,6 +860,18 @@ fun GhostVaultDialog(
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text("ПЛАТА", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberCyan)
                                     }
+
+                                    Button(
+                                        onClick = { showStegoDialog = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberAmber.copy(alpha = 0.18f)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_open_stego")
+                                    ) {
+                                        Icon(Icons.Default.EnhancedEncryption, contentDescription = "Стего", modifier = Modifier.size(14.dp), tint = CyberAmber)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("СТЕГО", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberAmber)
+                                    }
                                 }
 
                                 val isSelectedDiskVideo = selectedFile != null && GhostCryptoVault.isVideoFile(selectedFile!!)
@@ -900,6 +968,7 @@ fun GhostVaultDialog(
                                                 val mime = when (shareTmp.extension.lowercase()) {
                                                     "mp4" -> "video/mp4"
                                                     "webp" -> "image/webp"
+                                                    "png" -> "image/png"
                                                     else -> "image/jpeg"
                                                 }
                                                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -1833,6 +1902,20 @@ fun GhostVaultDialog(
                                     fontSize = 10.sp
                                 )
                             }
+                            OutlinedButton(
+                                onClick = { showSplitKeyDialog = true },
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.weight(0.85f).height(42.dp).testTag("vault_open_split_key")
+                            ) {
+                                Text(
+                                    "🔑 СПЛИТ",
+                                    color = CyberAmber,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -2014,6 +2097,25 @@ fun GhostVaultDialog(
                 )
             }
 
+            if (showStegoDialog && decryptedBitmap != null) {
+                StegoCarrierDialog(
+                    sourceBitmap = decryptedBitmap!!,
+                    onSavedToVault = { msg ->
+                        showStegoDialog = false
+                        statusMessage = msg
+                        refreshFiles()
+                    },
+                    onDismiss = { showStegoDialog = false }
+                )
+            }
+
+            if (showSplitKeyDialog) {
+                SecretSplitDialog(
+                    onStatusMessage = { statusMessage = it },
+                    onDismiss = { showSplitKeyDialog = false }
+                )
+            }
+
             auditDialogReport?.let { rep ->
                 AlertDialog(
                     onDismissRequest = {
@@ -2122,11 +2224,21 @@ fun GhostVaultDialog(
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = {
-                            auditDialogReport = null
-                            proofVerifyResult = null
-                        }) {
-                            Text("ЗАКРЫТЬ", color = CyberMuted, fontFamily = FontFamily.Monospace)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                onClick = {
+                                    importProofLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                                },
+                                modifier = Modifier.testTag("vault_import_proof_btn")
+                            ) {
+                                Text("📂 СВЕРКА", color = CyberAmber, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                            }
+                            TextButton(onClick = {
+                                auditDialogReport = null
+                                proofVerifyResult = null
+                            }) {
+                                Text("ЗАКРЫТЬ", color = CyberMuted, fontFamily = FontFamily.Monospace)
+                            }
                         }
                     },
                     containerColor = CyberSurface

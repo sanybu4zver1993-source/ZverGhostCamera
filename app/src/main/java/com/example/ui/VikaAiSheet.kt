@@ -83,6 +83,7 @@ fun VikaAiSheet(
     val aiStats by ByokManager.sessionStatsFlow.collectAsState()
     val httpLogs by ByokManager.httpLogsFlow.collectAsState()
     val transportConfig by ByokManager.transportConfigFlow.collectAsState()
+    val contextMemoryEnabled by ByokManager.contextMemoryEnabledFlow.collectAsState()
 
     val hasMediaSource = externalBitmap != null || externalVideoFile != null || onCaptureTwoStageFrame != null || onCaptureLiveFrame != null
     var frameMode by remember {
@@ -95,6 +96,7 @@ fun VikaAiSheet(
     var stagedPreview by remember { mutableStateOf(VikaStagedPreviewState()) }
 
     var isStrongBoxSupported by remember { mutableStateOf(false) }
+    var isOrbotInstalled by remember { mutableStateOf(false) }
     var localSnap by remember {
         mutableStateOf(
             VaultAnalytics.LocalAnalyticsSnapshot(
@@ -124,9 +126,11 @@ fun VikaAiSheet(
             ByokManager.syncFromPrefs(context)
             val snap = VaultAnalytics.captureSnapshot(context)
             val sb = ByokManager.isStrongBoxSupported(context)
+            val orbot = ByokManager.hasOrbotInstalled(context)
             withContext(Dispatchers.Main) {
                 localSnap = snap
                 isStrongBoxSupported = sb
+                isOrbotInstalled = orbot
             }
         }
     }
@@ -167,6 +171,7 @@ fun VikaAiSheet(
     suspend fun runOfflineSymbiosisFallback(
         userTask: String,
         fallbackReason: String?,
+        includeImage: Boolean = true,
         precomputedReport: LocalSymbiosisCvEngine.SymbiosisReport? = null,
         systemOverride: String? = null
     ) {
@@ -174,7 +179,7 @@ fun VikaAiSheet(
         var capturedOfflineBmp: Bitmap? = null
         try {
             val intent = LocalSymbiosisCvEngine.classifyOfflineIntent(userTask, systemOverride)
-            val needFrameAnalysis = intent != LocalSymbiosisCvEngine.OfflineTaskIntent.STATS_AUDIT
+            val needFrameAnalysis = includeImage && !LocalSymbiosisCvEngine.isSystemKnowledgeIntent(intent)
             val report: LocalSymbiosisCvEngine.SymbiosisReport? = when {
                 !needFrameAnalysis -> null
                 precomputedReport != null -> precomputedReport
@@ -216,13 +221,13 @@ fun VikaAiSheet(
             ByokManager.addChatEntry(
                 ByokManager.AiChatEntry(
                     modelId = "6-NN ОФЛАЙН",
-                    userTask = userTask.ifBlank { "Анализ малышами" },
+                    userTask = userTask.ifBlank { "Анализ малипусиками" },
                     replyText = textOut,
                     hadImage = report != null,
                     latencyMs = System.currentTimeMillis() - t0,
                     totalTokens = 0,
                     isError = false,
-                    engineBadge = "⚡ МАЛЫШИ 6-NN ОФЛАЙН"
+                    engineBadge = if (report != null) "⚡ МАЛИПУСИКИ 6-NN ОФЛАЙН" else "⚡ ВИКА ОФЛАЙН (0 БАЙТ)"
                 )
             )
             refreshTelemetryAsync()
@@ -231,7 +236,7 @@ fun VikaAiSheet(
                 ByokManager.AiChatEntry(
                     modelId = "6-NN ОФЛАЙН",
                     userTask = userTask,
-                    replyText = "Ошибка локальных малышей: ${e.message}",
+                    replyText = "Ошибка локальных малипусиков: ${e.message}",
                     hadImage = false,
                     latencyMs = System.currentTimeMillis() - t0,
                     totalTokens = 0,
@@ -261,7 +266,12 @@ fun VikaAiSheet(
 
             try {
                 if (forceLocalOnly) {
-                    runOfflineSymbiosisFallback(userTask, fallbackReason = null, systemOverride = systemOverride)
+                    runOfflineSymbiosisFallback(
+                        userTask = userTask,
+                        fallbackReason = null,
+                        includeImage = includeImage,
+                        systemOverride = systemOverride
+                    )
                     return@launch
                 }
 
@@ -270,7 +280,12 @@ fun VikaAiSheet(
                 if (keyChars == null || keyChars.isEmpty() || !online) {
                     keyChars?.let { Arrays.fill(it, '0') }
                     val why = if (!online) "нет сети" else "ключ не задан"
-                    runOfflineSymbiosisFallback(userTask, fallbackReason = why, systemOverride = systemOverride)
+                    runOfflineSymbiosisFallback(
+                        userTask = userTask,
+                        fallbackReason = why,
+                        includeImage = includeImage,
+                        systemOverride = systemOverride
+                    )
                     return@launch
                 }
 
@@ -470,6 +485,13 @@ fun VikaAiSheet(
                         }
                     }
 
+                    val turnsHistory = if (contextMemoryEnabled) {
+                        chatFeed.filter { !it.isError && it.replyText.isNotBlank() }
+                            .take(4)
+                            .reversed()
+                            .map { it.userTask to it.replyText }
+                    } else emptyList()
+
                     val res = GeminiByokClient.generateContent(
                         apiKeyChars = keyChars,
                         modelId = selectedModel,
@@ -478,7 +500,8 @@ fun VikaAiSheet(
                         imageBytes = imageBytes,
                         imageMimeType = mimeType,
                         extraImages = extraCrops,
-                        transportConfig = transportConfig
+                        transportConfig = transportConfig,
+                        historyTurns = turnsHistory
                     )
 
                     res.onSuccess { ok ->
@@ -500,6 +523,7 @@ fun VikaAiSheet(
                             runOfflineSymbiosisFallback(
                                 userTask = userTask,
                                 fallbackReason = "Gemini недоступен: ${msg.take(45)}",
+                                includeImage = true,
                                 precomputedReport = cachedLocalReport,
                                 systemOverride = systemOverride
                             )
@@ -775,6 +799,8 @@ fun VikaAiSheet(
                             context = context,
                             hasKey = hasKey,
                             isStrongBoxSupported = isStrongBoxSupported,
+                            isOrbotInstalled = isOrbotInstalled,
+                            contextMemoryEnabled = contextMemoryEnabled,
                             selectedModel = selectedModel,
                             discoveredModels = discoveredModels,
                             customPrompt = customPrompt,

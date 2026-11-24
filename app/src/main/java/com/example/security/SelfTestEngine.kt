@@ -254,6 +254,41 @@ object SelfTestEngine {
             detail = "Debugger=${secStatus.isDebuggerAttached}, Root=${secStatus.isRooted}, TestKeys=${secStatus.isTestKeys}"
         )
 
+        // 9. OPSEC Surface: External Displays & Accessibility UI Watchers (Часть Е)
+        val opsec = OpsecSurfaceScanner.scanSurface(context)
+        val displayStatus = when {
+            opsec.externalDisplayNames.isNotEmpty() -> CheckStatus.FAIL
+            opsec.accessibilityServiceLabels.isNotEmpty() -> CheckStatus.WARN
+            else -> CheckStatus.PASS
+        }
+        items += SelfTestItem(
+            id = "opsec_displays_ui",
+            title = "OPSEC: Экраны и Accessibility",
+            status = displayStatus,
+            summary = when {
+                opsec.externalDisplayNames.isNotEmpty() -> "ОБНАРУЖЕН ВНЕШНИЙ ЭКРАН: ${opsec.externalDisplayNames.joinToString()}"
+                opsec.accessibilityServiceLabels.isNotEmpty() -> "Чистые экраны | Accessibility служб: ${opsec.accessibilityServiceLabels.size}"
+                else -> "Чисто: 0 внешних дисплеев, 0 Accessibility-служб"
+            },
+            detail = "Датчиков железа: ${opsec.sensorCount}" +
+                if (opsec.accessibilityServiceLabels.isNotEmpty()) " | A11y: ${opsec.accessibilityServiceLabels.take(3).joinToString()}" else ""
+        )
+
+        // 10. OPSEC Surface: USB/ADB & VPN/Private DNS (Часть Е)
+        val usbNetStatus = when {
+            opsec.adbEnabled && opsec.usbPlugged -> CheckStatus.FAIL
+            opsec.adbEnabled || (!opsec.vpnActive && opsec.privateDnsHost.isNullOrBlank()) -> CheckStatus.WARN
+            else -> CheckStatus.PASS
+        }
+        val dnsStr = opsec.privateDnsHost ?: if (opsec.isPrivateDnsStrictOrAuto) "Авто" else "Нет"
+        items += SelfTestItem(
+            id = "opsec_usb_network",
+            title = "OPSEC: USB/ADB & VPN/DNS",
+            status = usbNetStatus,
+            summary = "USB=${if (opsec.usbPlugged) "ДА" else "нет"} | ADB=${if (opsec.adbEnabled) "ВКЛ" else "выкл"} | VPN/Tor=${if (opsec.vpnActive) "АКТИВЕН" else "нет"}",
+            detail = "Private DNS=$dnsStr | DevOptions=${opsec.devOptionsEnabled}"
+        )
+
         val passCount = items.count { it.status == CheckStatus.PASS }
         val warnCount = items.count { it.status == CheckStatus.WARN }
         val failCount = items.count { it.status == CheckStatus.FAIL }

@@ -563,6 +563,56 @@ object GhostCryptoVault {
         }
     }
 
+    /**
+     * Encrypts harmless bait media directly into the DECOY vault directory without switching
+     * [activeProfile] when [activeDecoyKey] is unlocked (e.g., right after 3-PIN setup or inside DECOY).
+     */
+    fun encryptBytesToDecoyVault(
+        context: Context,
+        plainBytes: ByteArray,
+        prefix: String = MEDIA_PHOTO
+    ): File? {
+        val decoyKey = activeDecoyKey ?: if (!hasDecoyConfigured(context)) {
+            getHardwareKeystoreKey(context, "Ghost_Vault_${VaultProfile.DECOY.name}")
+        } else {
+            return null
+        }
+        val vaultDir = VaultProfile.DECOY.getDirectory(context)
+        val baseName = "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
+        val tempFile = File(vaultDir, "$baseName.gcf.tmp")
+        val targetFile = File(vaultDir, "$baseName.gcf")
+        val iv = ByteArray(GCM_IV_LEN)
+        secureRandom.nextBytes(iv)
+        return try {
+            val cipher = Cipher.getInstance(AES_GCM)
+            cipher.init(Cipher.ENCRYPT_MODE, decoyKey, GCMParameterSpec(GCM_TAG_LEN, iv))
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(MAGIC_HEADER)
+                fos.write(iv)
+                CipherOutputStream(fos, cipher).use { cos ->
+                    cos.write(plainBytes)
+                    cos.flush()
+                }
+            }
+            if (!tempFile.renameTo(targetFile)) {
+                FileInputStream(tempFile).use { input ->
+                    FileOutputStream(targetFile).use { out ->
+                        input.copyTo(out)
+                        out.fd.sync()
+                    }
+                }
+                shredFile(tempFile)
+            }
+            targetFile
+        } catch (_: Exception) {
+            shredFile(tempFile)
+            shredFile(targetFile)
+            null
+        } finally {
+            Arrays.fill(iv, 0.toByte())
+        }
+    }
+
     fun isGcf2File(file: File): Boolean {
         if (!file.exists() || file.length() < GcfChunkedCodec.HEADER_SIZE) return false
         return try {
@@ -1088,6 +1138,14 @@ object GhostCryptoVault {
 
     fun detectMediaExtension(bytes: ByteArray, isVideo: Boolean): String {
         if (isVideo) return "mp4"
+        if (bytes.size >= 8 &&
+            bytes[0] == 0x89.toByte() &&
+            bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() &&
+            bytes[3] == 0x47.toByte()
+        ) {
+            return "png"
+        }
         if (bytes.size >= 12 &&
             bytes[0] == 'R'.code.toByte() &&
             bytes[1] == 'I'.code.toByte() &&

@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.example.assist.AutomationRouter
 import com.example.assist.ByokManager
 import com.example.crypto.GhostCryptoVault
 import com.example.security.CamouflageManager
@@ -53,11 +54,59 @@ class MainActivity : ComponentActivity() {
     companion object {
         var onVolumeShutterTrigger: (() -> Unit)? = null
         var onVideoToggleTrigger: (() -> Unit)? = null
-        var onTorchToggleTrigger: (() -> Unit)? = null
+        var onTorchToggleTrigger: ((Boolean?) -> Unit)? = null
         var onBlackoutToggleTrigger: (() -> Unit)? = null
+        var onSentinelArmTrigger: ((Boolean?) -> Unit)? = null
+        var onModeSwitchTrigger: ((String) -> Unit)? = null
+        var onRamOnlyTrigger: ((Boolean?) -> Unit)? = null
         var onLockGateTrigger: (() -> Unit)? = null
         var onScreenCapturePolicyChanged: (() -> Unit)? = null
         var onVaultSecureOverrideChanged: ((Boolean) -> Unit)? = null
+
+        @Volatile
+        private var pendingAction: AutomationRouter.AutomationAction? = null
+
+        fun dispatchOrQueueAction(context: android.content.Context, action: AutomationRouter.AutomationAction) {
+            if (action is AutomationRouter.AutomationAction.PanicLock) {
+                pendingAction = null
+                GhostCryptoVault.lockSession()
+                ByokManager.clearSessionMemory()
+                SentinelEngine.clearSession()
+                com.example.security.SecureClipboard.clearIfOwned(context)
+                onLockGateTrigger?.invoke()
+                return
+            }
+            if (onVolumeShutterTrigger == null) {
+                pendingAction = action
+                return
+            }
+            executeActionNow(context, action)
+        }
+
+        fun flushPendingAction(context: android.content.Context) {
+            val act = pendingAction ?: return
+            pendingAction = null
+            executeActionNow(context, act)
+        }
+
+        private fun executeActionNow(context: android.content.Context, action: AutomationRouter.AutomationAction) {
+            when (action) {
+                AutomationRouter.AutomationAction.CapturePhoto -> onVolumeShutterTrigger?.invoke()
+                AutomationRouter.AutomationAction.ToggleVideo -> onVideoToggleTrigger?.invoke()
+                is AutomationRouter.AutomationAction.ToggleTorch -> onTorchToggleTrigger?.invoke(action.explicitState)
+                AutomationRouter.AutomationAction.ToggleStealth -> onBlackoutToggleTrigger?.invoke()
+                is AutomationRouter.AutomationAction.SetSentinelArmed -> onSentinelArmTrigger?.invoke(action.armed)
+                is AutomationRouter.AutomationAction.SwitchMode -> onModeSwitchTrigger?.invoke(action.modeKey)
+                is AutomationRouter.AutomationAction.SetRamOnly -> onRamOnlyTrigger?.invoke(action.enabled)
+                AutomationRouter.AutomationAction.PanicLock -> {
+                    GhostCryptoVault.lockSession()
+                    ByokManager.clearSessionMemory()
+                    SentinelEngine.clearSession()
+                    com.example.security.SecureClipboard.clearIfOwned(context)
+                    onLockGateTrigger?.invoke()
+                }
+            }
+        }
     }
 
     private val isScreenBeingRecorded = mutableStateOf(false)
@@ -79,12 +128,8 @@ class MainActivity : ComponentActivity() {
 
     private val externalCommandReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
-            when (intent?.action) {
-                "com.example.camera.TRIGGER_CAPTURE" -> onVolumeShutterTrigger?.invoke()
-                "com.example.camera.TOGGLE_VIDEO" -> onVideoToggleTrigger?.invoke()
-                "com.example.camera.TOGGLE_TORCH" -> onTorchToggleTrigger?.invoke()
-                "com.example.camera.TOGGLE_BLACKOUT" -> onBlackoutToggleTrigger?.invoke()
-            }
+            val action = AutomationRouter.parseBroadcastIntent(intent) ?: return
+            dispatchOrQueueAction(this@MainActivity, action)
         }
     }
 
@@ -115,7 +160,7 @@ class MainActivity : ComponentActivity() {
                 }
                 ZverPrefs.VolumeKeyAction.TORCH_TOGGLE -> {
                     onTorchToggleTrigger?.let {
-                        it.invoke()
+                        it.invoke(null)
                         return true
                     }
                 }
@@ -179,29 +224,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleCustomUri(intent)
     }
 
     private fun handleCustomUri(intent: Intent?) {
-        val uri = intent?.data ?: return
-        if (uri.scheme?.lowercase() != "zver") return
-        val route = uri.host?.lowercase()?.trim() ?: return
-        when (route) {
-            "capture" -> onVolumeShutterTrigger?.invoke()
-            "video" -> onVideoToggleTrigger?.invoke()
-            "torch" -> onTorchToggleTrigger?.invoke()
-            "stealth" -> onBlackoutToggleTrigger?.invoke()
-            "lock" -> {
-                GhostCryptoVault.lockSession()
-                ByokManager.clearSessionMemory()
-                SentinelEngine.clearSession()
-                com.example.security.SecureClipboard.clearIfOwned(this)
-                onLockGateTrigger?.invoke()
-            }
-            else -> {
-                // Unknown zver:// route ignored cleanly (no arbitrary command execution)
-            }
-        }
+        val action = AutomationRouter.parseCustomUri(intent?.data) ?: return
+        dispatchOrQueueAction(this, action)
     }
 
     private var receiverRegistered = false
@@ -257,10 +286,13 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
 
         val filter = android.content.IntentFilter().apply {
-            addAction("com.example.camera.TRIGGER_CAPTURE")
-            addAction("com.example.camera.TOGGLE_VIDEO")
-            addAction("com.example.camera.TOGGLE_TORCH")
-            addAction("com.example.camera.TOGGLE_BLACKOUT")
+            addAction(AutomationRouter.ACTION_TRIGGER_CAPTURE)
+            addAction(AutomationRouter.ACTION_TOGGLE_VIDEO)
+            addAction(AutomationRouter.ACTION_TOGGLE_TORCH)
+            addAction(AutomationRouter.ACTION_TOGGLE_BLACKOUT)
+            addAction(AutomationRouter.ACTION_ARM_SENTINEL)
+            addAction(AutomationRouter.ACTION_SET_MODE)
+            addAction(AutomationRouter.ACTION_PANIC_LOCK)
         }
         try {
             ContextCompat.registerReceiver(

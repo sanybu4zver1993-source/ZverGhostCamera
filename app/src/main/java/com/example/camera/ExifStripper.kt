@@ -804,6 +804,36 @@ object ExifStripper {
             return AuditReport("JPEG", bytes.size, metaBytes, segments, metaBytes == 0, notes)
         }
 
+        if (bytes.size >= 8 &&
+            u(bytes[0]) == 0x89 &&
+            u(bytes[1]) == 0x50 &&
+            u(bytes[2]) == 0x4E &&
+            u(bytes[3]) == 0x47
+        ) {
+            val segments = mutableListOf<String>()
+            var metaBytes = 0
+            var p = 8
+            val metadataChunks = setOf("eXIf", "tEXt", "zTXt", "iTXt", "tIME", "pHYs")
+            while (p + 12 <= bytes.size) {
+                val len = ByteBuffer.wrap(bytes, p, 4).order(ByteOrder.BIG_ENDIAN).int
+                if (len < 0 || p + 12L + len > bytes.size) break
+                val type = String(bytes, p + 4, 4, Charsets.US_ASCII)
+                if (type in metadataChunks) {
+                    metaBytes += 12 + len
+                    segments.add("$type (META! ${len}B)")
+                } else {
+                    segments.add("$type (${len}B)")
+                }
+                p += 12 + len
+                if (type == "IEND") break
+            }
+            val notes = buildList {
+                add(if (metaBytes == 0) "PNG: EXIF/tEXt/zTXt/iTXt/tIME отсутствуют (0 B)" else "ВНИМАНИЕ: обнаружены чанки метаданных PNG!")
+                add("Чистый PNG-контейнер без аппаратного EXIF")
+            }
+            return AuditReport("PNG", bytes.size, metaBytes, segments, metaBytes == 0, notes)
+        }
+
         if (bytes.size >= 12 && String(bytes, 4, 4, Charsets.US_ASCII) == "ftyp") {
             return Mp4Sanitizer.auditMp4(bytes)
         }

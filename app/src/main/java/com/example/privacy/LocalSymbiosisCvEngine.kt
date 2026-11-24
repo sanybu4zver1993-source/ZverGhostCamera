@@ -74,7 +74,11 @@ object LocalSymbiosisCvEngine {
         val avgLuma: Int,
         val isLowLight: Boolean,
         val sharpnessScore: Int,
-        val isBlurry: Boolean
+        val isBlurry: Boolean,
+        val clippedHighlightsPct: Int = 0,
+        val crushedShadowsPct: Int = 0,
+        val contrastSpan: Int = 0,
+        val dominantTintRu: String = "нейтральный"
     )
 
     data class IsolationResult(
@@ -93,7 +97,8 @@ object LocalSymbiosisCvEngine {
         val quality: FrameQuality,
         val foregroundCoveragePct: Float?,
         val inferenceMs: Long,
-        val skinMetrics: YcbcrSkinAnalyzer.SkinMetrics? = null
+        val skinMetrics: YcbcrSkinAnalyzer.SkinMetrics? = null,
+        val osintBlockHits: List<OfflinePrivacyEngine.OsintTextHit> = emptyList()
     ) {
         fun bestRoiRegion(): RectF? {
             faces.maxByOrNull { it.rect.width() * it.rect.height() }?.let { return it.rect }
@@ -131,7 +136,7 @@ object LocalSymbiosisCvEngine {
             val objectsDef = async { detectObjectsOffline(bitmap) }
             val labelsDef = async { detectSceneLabelsOffline(bitmap) }
             val poseDef = async { detectPoseOffline(bitmap) }
-            val textDef = async { detectTextRich(bitmap) }
+            val textDef = async { OfflinePrivacyEngine.detectTextWithContentOffline(bitmap) }
             val segDef = if (includeForegroundCoverage) {
                 async { measureForegroundCoverage(bitmap) }
             } else null
@@ -140,7 +145,9 @@ object LocalSymbiosisCvEngine {
             val objects = objectsDef.await()
             val labels = labelsDef.await()
             val pose = poseDef.await()
-            val (textRegions, rawText) = textDef.await()
+            val (textEntries, rawText) = textDef.await()
+            val textRegions = textEntries.map { it.first }
+            val blockHits = OfflinePrivacyEngine.analyzeSensitiveOsintBlocksFromEntries(textEntries)
             val segPct = segDef?.await()
 
             val osintFaces = faces.mapIndexed { idx, f ->
@@ -164,7 +171,8 @@ object LocalSymbiosisCvEngine {
                 quality = quality,
                 foregroundCoveragePct = segPct,
                 inferenceMs = System.currentTimeMillis() - startMs,
-                skinMetrics = skin
+                skinMetrics = skin,
+                osintBlockHits = blockHits
             )
         }
     }
@@ -210,7 +218,24 @@ object LocalSymbiosisCvEngine {
         SENTINEL_DOZOR,
         OPTICS_FORENSIC,
         STATS_AUDIT,
+        BYOK_CHANNEL,
+        VAULT_BACKUP,
+        AUTOMATION_TERMUX,
+        CAM_PRO_HAL,
+        CAMOUFLAGE_PANIC,
+        OPSEC_SCAN,
         SCENE_GENERAL
+    }
+
+    fun isSystemKnowledgeIntent(intent: OfflineTaskIntent): Boolean = when (intent) {
+        OfflineTaskIntent.STATS_AUDIT,
+        OfflineTaskIntent.BYOK_CHANNEL,
+        OfflineTaskIntent.VAULT_BACKUP,
+        OfflineTaskIntent.AUTOMATION_TERMUX,
+        OfflineTaskIntent.CAM_PRO_HAL,
+        OfflineTaskIntent.CAMOUFLAGE_PANIC,
+        OfflineTaskIntent.OPSEC_SCAN -> true
+        else -> false
     }
 
     fun classifyOfflineIntent(userTask: String, systemPrompt: String? = null): OfflineTaskIntent {
@@ -222,70 +247,104 @@ object LocalSymbiosisCvEngine {
                 s.contains("строгий ocr") -> OfflineTaskIntent.OCR_TEXT
 
             t.contains("osint") || t.contains("палев") || t.contains("утеч") || t.contains("риск") ||
-                t.contains("номер") || t.contains("вывеск") || t.contains("отражен") ||
+                t.contains("номер") || t.contains("вывеск") || t.contains("отражен") || t.contains("карт") ||
                 s.contains("режим osint") -> OfflineTaskIntent.OSINT_AUDIT
 
+            t.contains("опсек") || t.contains("opsec") || t.contains("сканер угроз") ||
+                t.contains("дисплей") || t.contains("accessibility") -> OfflineTaskIntent.OPSEC_SCAN
+
             t.contains("дозор") || t.contains("угроз") || t.contains("опасн") || t.contains("форма") ||
-                t.contains("шеврон") || t.contains("кто в") || t.contains("порог") ||
+                t.contains("шеврон") || t.contains("кто в") || t.contains("порог") || t.contains("sentinel") ||
                 s.contains("кибер-дозор") -> OfflineTaskIntent.SENTINEL_DOZOR
 
             t.contains("форенз") || t.contains("резкост") || t.contains("смаз") || t.contains("мыл") ||
-                t.contains("свет") || t.contains("экспозиц") || t.contains("шум") ||
+                t.contains("пересвет") || t.contains("экспозиц") || t.contains("шум") ||
                 s.contains("форензик") -> OfflineTaskIntent.OPTICS_FORENSIC
 
-            t.contains("стат") || t.contains("сейф") || t.contains("телеметр") ||
-                t.contains("защит") || s.contains("аналитик телеметрии") -> OfflineTaskIntent.STATS_AUDIT
+            t.contains("статист") || t.contains("статы") || t.contains("стата") ||
+                t.contains("телеметр") || t.contains("готовност") || t.contains("аудит") ||
+                s.contains("аналитик телеметрии") -> OfflineTaskIntent.STATS_AUDIT
+
+            t.contains("ключ") || t.contains("tor") || t.contains("orbot") || t.contains("прокси") ||
+                t.contains("socks") || t.contains("tls") || t.contains("api") || t.contains("byok") ||
+                t.contains("контекст") -> OfflineTaskIntent.BYOK_CHANNEL
+
+            t.contains("бэкап") || t.contains("zvb") || t.contains("перенос") || t.contains("сейф") ||
+                t.contains("gcf") || t.contains("монолит") || t.contains("ram") || t.contains("озу") -> OfflineTaskIntent.VAULT_BACKUP
+
+            t.contains("termux") || t.contains("термукс") || t.contains("shizuku") || t.contains("шизук") ||
+                t.contains("zver://") || t.contains("macrodroid") || t.contains("intent") || t.contains("интент") ||
+                t.contains("скрипт") || t.contains("adb") -> OfflineTaskIntent.AUTOMATION_TERMUX
+
+            t.contains("паник") || t.contains("duress") || t.contains("калькулятор") || t.contains("маскир") ||
+                t.contains("громк") || t.contains("стелс") || t.contains("шред") -> OfflineTaskIntent.CAMOUFLAGE_PANIC
+
+            t.contains("камер") || t.contains("hal") || t.contains("camera2") || t.contains("iso") ||
+                t.contains("выдерж") || t.contains("фокус") || t.contains("пульс") || t.contains("визор") ||
+                t.contains("плата") || t.contains("pcb") || t.contains("маск") -> OfflineTaskIntent.CAM_PRO_HAL
 
             else -> OfflineTaskIntent.SCENE_GENERAL
         }
     }
 
     /**
-     * Builds an honest, task-specific report from all 6 local bundled ML Kit + CV analyzers
+     * Builds an honest, task-specific report from all 6 local bundled ML Kit + CV analyzers («Малипусики»)
      * when internet is unavailable, API key is unset, quota is exhausted, or offline mode is chosen.
+     * Combines strict factual telemetry with a procedural, dynamic cheeky/humorous Vika remark.
      */
     fun buildOfflineVikaReport(
         report: SymbiosisReport,
         userTask: String,
         fallbackReason: String? = null,
-        systemPrompt: String? = null
+        systemPrompt: String? = null,
+        variantSeed: Long = System.nanoTime()
     ): String = buildString {
         val intent = classifyOfflineIntent(userTask, systemPrompt)
         val headerPrefix = if (!fallbackReason.isNullOrBlank()) {
-            "⚡ 6 МАЛЫШЕЙ ОФЛАЙН (АВТО-ПЕРЕКЛЮЧЕНИЕ: $fallbackReason)"
+            "⚡ 6 МАЛИПУСИКОВ ОФЛАЙН (АВТО-ПОДХВАТ: $fallbackReason)"
         } else {
-            "⚡ 6 МАЛЫШЕЙ ОФЛАЙН (0 БАЙТ В СЕТЬ • ${report.inferenceMs} мс)"
+            "⚡ 6 МАЛИПУСИКОВ ОФЛАЙН (0 БАЙТ В СЕТЬ • ${report.inferenceMs} мс)"
         }
         append(headerPrefix)
         append(" • [${intent.name}]\n")
+        append("💋 Вика: ${generateImageQuip(report, intent, variantSeed)}\n")
         if (userTask.isNotBlank()) {
             append("Запрос: «${userTask.trim().take(90)}»\n")
         }
 
         when (intent) {
             OfflineTaskIntent.OCR_TEXT -> {
-                append("\n📝 [OCR ЭКСТРАКТОР]:\n")
+                val linesCount = report.extractedText.lines().count { it.isNotBlank() }
+                append("\n📝 [OCR ЭКСТРАКТОР • строк: $linesCount]:\n")
                 if (report.extractedText.isNotBlank()) {
-                    append(report.extractedText.trim().take(700))
+                    append(report.extractedText.trim().take(750))
                     append("\n")
                 } else {
-                    append("Текст в кадре не распознан.\n")
+                    append("Читаемый текст в кадре не найден.\n")
                 }
-                append("\n• [ЧИТАЕМОСТЬ]: свет ${report.quality.avgLuma}/255, резкость ${report.quality.sharpnessScore}")
-                if (report.quality.isBlurry) append(" — сильный смаз, сними ближе/ровнее")
+                append("\n• [ЧИТАЕМОСТЬ]: свет ${report.quality.avgLuma}/255 (${report.quality.dominantTintRu}), резкость ${report.quality.sharpnessScore}, пересвет ${report.quality.clippedHighlightsPct}%")
+                if (report.quality.isBlurry) append(" — смаз, включи режим «Документы» или ручной фокус PRO")
                 if (report.quality.isLowLight) append(" — темно, включи фонарик или Ч/Б Документ")
+                if (report.quality.clippedHighlightsPct >= 15) append(" — сильный блик на бумаге, убавь EV на -0.5")
                 append("\n")
-                if (report.osintReport.warnings.isNotEmpty()) {
+                if (report.osintBlockHits.isNotEmpty()) {
+                    val tags = report.osintBlockHits.flatMap { it.matchedLabels }.distinct().joinToString(", ")
+                    append("• [ЧУВСТВИТЕЛЬНЫЕ ПОЛЯ (${report.osintBlockHits.size} бл.)]: $tags — можно скрыть кнопкой «МАСКА» в Сейфе.\n")
+                } else if (report.osintReport.warnings.isNotEmpty()) {
                     append("• [НАЙДЕННЫЕ ДАННЫЕ В ТЕКСТЕ]: ${report.osintReport.warnings.joinToString("; ")}\n")
                 }
             }
 
             OfflineTaskIntent.OSINT_AUDIT -> {
                 append("\n🕵️ [OSINT-ПАЛЕВО: ${report.osintReport.riskScore}/100]:\n")
+                if (report.osintBlockHits.isNotEmpty()) {
+                    val grouped = report.osintBlockHits.flatMap { it.matchedLabels }.groupingBy { it }.eachCount()
+                    append("• Прицельные совпадения в блоках: ${grouped.entries.joinToString { "${it.key} (${it.value})" }}\n")
+                }
                 if (report.osintReport.warnings.isNotEmpty()) {
                     report.osintReport.warnings.forEach { w -> append("• ⚠ $w\n") }
-                } else {
-                    append("• Явных координат, документов или читаемых номеров локально не найдено.\n")
+                } else if (report.osintBlockHits.isEmpty()) {
+                    append("• Явных карт, номеров авто, координат или паролей в тексте не найдено.\n")
                 }
                 if (report.faces.isNotEmpty()) {
                     append("• Лиц в кадре: ${report.faces.size} (углы: ${report.faces.joinToString { "${it.yawDeg.toInt()}°" }}) — рекомендуется маска.\n")
@@ -298,10 +357,10 @@ object LocalSymbiosisCvEngine {
                 }
                 append("• [ДЕЙСТВИЕ]: ")
                 append(
-                    if (report.osintReport.riskScore >= 40 || report.faces.isNotEmpty()) {
-                        "Открой снимок в Сейфе -> «МАСКА» и затри лица/надписи до отправки."
+                    if (report.osintReport.riskScore >= 40 || report.faces.isNotEmpty() || report.osintBlockHits.isNotEmpty()) {
+                        "Открой снимок в Сейфе -> «МАСКА» (выборочно затри OSINT-поля и лица) и очисти EXIF."
                     } else {
-                        "Критичных зацепок малыши не увидели; перед публикацией всё равно прогони АУДИТ."
+                        "Критичных зацепок малипусики не увидели; перед публикацией проверь фон глазами."
                     }
                 )
             }
@@ -324,15 +383,15 @@ object LocalSymbiosisCvEngine {
                 if (report.objects.isNotEmpty()) {
                     append("• Объекты рядом: ${report.objects.take(4).joinToString { "${it.label} (${(it.confidence * 100).toInt()}%)" }}\n")
                 }
-                append("• Освещённость: ${report.quality.avgLuma}/255")
+                append("• Освещённость: ${report.quality.avgLuma}/255, контраст ${report.quality.contrastSpan}")
                 append(if (report.quality.isLowLight) " (ТЕМНО — рекомендуется CLAHE анти-блик)\n" else " (норма)\n")
-                append("• [ЧЕСТНЫЙ СТАТУС]: Локальные модели не угадывают цвет/тип формы (пиксель vs гражданка) по размытым силуэтам — для точного опознания нужен Gemini по тексту/кропу.")
+                append("• [ЧЕСТНЫЙ СТАТУС]: Локальные модели не угадывают цвет/тип формы по размытым силуэтам — для точного опознания включи BYOK-триаж с кропом.")
             }
 
             OfflineTaskIntent.OPTICS_FORENSIC -> {
                 append("\n🔬 [ОПТИКА И ФОРЕНЗИК]:\n")
-                append("• Яркость кадра: ${report.quality.avgLuma}/255 ")
-                append(if (report.quality.isLowLight) "(недосвет)\n" else "(норм)\n")
+                append("• Яркость кадра: ${report.quality.avgLuma}/255 (контраст ${report.quality.contrastSpan}, оттенок: ${report.quality.dominantTintRu})\n")
+                append("• Динамика: пересвет ${report.quality.clippedHighlightsPct}% | провал теней ${report.quality.crushedShadowsPct}%\n")
                 append("• Резкость (edge-градиент): ${report.quality.sharpnessScore} ")
                 append(if (report.quality.isBlurry) "(МЫЛО/СМАЗ — ниже порога 14)\n" else "(резко)\n")
                 report.foregroundCoveragePct?.let {
@@ -342,8 +401,10 @@ object LocalSymbiosisCvEngine {
                 when {
                     report.quality.isLowLight && report.quality.isBlurry ->
                         append("Увеличь свет/фонарик, включи Anti-Blur или профиль NIGHT + CLAHE.")
+                    report.quality.clippedHighlightsPct >= 18 ->
+                        append("В кадре пересвет (${report.quality.clippedHighlightsPct}%) — сдвинь EV в минус (-0.5..-1.0) и зафиксируй AE-L.")
                     report.quality.isBlurry ->
-                        append("Тапни по экрану для фокуса, держи телефон двумя руками или включи Focus Peaking.")
+                        append("Тапни по экрану для фокуса, держи телефон двумя руками или крути MF в PRO-панели.")
                     report.quality.isLowLight ->
                         append("Подними +0.5/+1.0 EV в PRO-панели или сними через NIGHT/Мульти-стек.")
                     else ->
@@ -351,8 +412,7 @@ object LocalSymbiosisCvEngine {
                 }
             }
 
-            OfflineTaskIntent.STATS_AUDIT,
-            OfflineTaskIntent.SCENE_GENERAL -> {
+            else -> {
                 val summaryParts = buildList {
                     if (report.faces.isNotEmpty()) {
                         add("лиц: ${report.faces.size} (ракурс ${report.faces.first().yawDeg.toInt()}°)")
@@ -373,9 +433,9 @@ object LocalSymbiosisCvEngine {
                 if (report.sceneTags.isNotEmpty()) {
                     append("• [ТЕГИ 400-NN]: ${report.sceneTags.take(7).joinToString(", ") { "${it.label} ${(it.confidence * 100).toInt()}%" }}\n")
                 }
-                append("• [ОПТИКА]: свет ${report.quality.avgLuma}/255")
+                append("• [ОПТИКА]: свет ${report.quality.avgLuma}/255 (${report.quality.dominantTintRu}), резкость ${report.quality.sharpnessScore}")
+                if (report.quality.clippedHighlightsPct >= 15) append(", пересвет ${report.quality.clippedHighlightsPct}%")
                 if (report.quality.isLowLight) append(" (темновато)")
-                append(", резкость ${report.quality.sharpnessScore}")
                 if (report.quality.isBlurry) append(" (смаз!)")
                 append("\n")
 
@@ -389,73 +449,298 @@ object LocalSymbiosisCvEngine {
                 when {
                     report.quality.isBlurry && report.quality.isLowLight ->
                         append("Темно и мыльно — сними ближе со светом или CLAHE.")
-                    report.osintReport.riskScore >= 50 ->
+                    report.osintReport.riskScore >= 50 || report.osintBlockHits.isNotEmpty() ->
                         append("Есть риск засвета (палево ${report.osintReport.riskScore}/100) — прогони «МАСКА» в Сейфе.")
                     summaryParts.isEmpty() && report.sceneTags.isEmpty() && report.extractedText.isBlank() ->
-                        append("Сцена без явных объектов для локальных ML Kit весов; для детального описания подключи BYOK ключ + сеть.")
+                        append("Сцена без явных объектов для локальных ML Kit весов; для детального разбора подключи BYOK ключ + сеть.")
                     else ->
-                        append("Все активные локальные модели отработали чисто (0 байт в сеть).")
+                        append("Все 6 малипусиков отработали чисто (0 байт в сеть).")
                 }
             }
         }
     }
 
     /**
-     * Text-only offline fallback when no image is attached and cloud Gemini is unavailable:
-     * produces focused, context-aware answers instead of one static template string.
+     * Text-only offline fallback when no image is attached or a system/how-to question is asked offline:
+     * produces focused, live-state answers across 10 distinct intent domains with procedural Vika humor.
      */
     fun buildOfflineTextOnlyReply(
         context: android.content.Context,
         userTask: String,
-        systemPrompt: String? = null
+        systemPrompt: String? = null,
+        variantSeed: Long = System.nanoTime()
     ): String {
-        val t = userTask.lowercase()
         val intent = classifyOfflineIntent(userTask, systemPrompt)
-        return when {
-            intent == OfflineTaskIntent.STATS_AUDIT || t.contains("стат") || t.contains("защит") ->
-                "📊 ЛОКАЛЬНЫЙ АУДИТ (ОФЛАЙН)\n\n${com.example.security.VaultAnalytics.buildTelemetrySummaryForAi(context)}"
+        val spice = generateTextQuip(intent, variantSeed)
+        return when (intent) {
+            OfflineTaskIntent.STATS_AUDIT ->
+                "📊 ЛОКАЛЬНЫЙ АУДИТ (ОФЛАЙН)\n💋 Вика: $spice\n\n${com.example.security.VaultAnalytics.buildTelemetrySummaryForAi(context)}"
 
-            t.contains("ключ") || t.contains("tor") || t.contains("orbot") || t.contains("прокси") || t.contains("слив") || t.contains("api") -> {
+            OfflineTaskIntent.BYOK_CHANNEL -> {
                 val cfg = com.example.assist.ByokManager.getTransportConfig(context)
                 val hasKey = com.example.assist.ByokManager.hasKey(context)
                 val strongBox = com.example.assist.ByokManager.isStrongBoxSupported(context)
+                val orbotInstalled = com.example.assist.ByokManager.hasOrbotInstalled(context)
+                val memOn = com.example.assist.ByokManager.isContextMemoryEnabled(context)
                 buildString {
                     appendLine("🔐 BYOK-КАНАЛ ВИКИ (ОФЛАЙН-СПРАВКА):")
+                    appendLine("💋 Вика: $spice")
                     appendLine("• Ключ в KeyStore: ${if (hasKey) "СОХРАНЁН" else "НЕ ЗАДАН"} (${if (strongBox) "StrongBox" else "Hardware TEE"})")
-                    appendLine("• Канал: ${cfg.describeShort()} • TLS 1.3/1.2 • HTTP-кеш = 0")
-                    appendLine("• В облако идут ТОЛЬКО очищенные от EXIF/GPS байты и твой запрос; аналитика Google/Clearcut вырезана.")
-                    append("• Для работы через Tor/Orbot включи SOCKS5 (127.0.0.1:9050) во вкладке «Ключ и Модели».")
+                    appendLine("• Канал: ${cfg.describeShort()} • Orbot в системе: ${if (orbotInstalled) "НАЙДЕН" else "не установлен"}")
+                    appendLine("• Контекст диалога (4 хода в ОЗУ): ${if (memOn) "ВКЛ" else "ВЫКЛ"} • HTTP-кеш = 0 • редиректы отключены")
+                    append("• Для Tor/Orbot включи SOCKS5 (127.0.0.1:9050) и жми «🔌 ПРОВЕРИТЬ ПРОКСИ» во вкладке «🔑 Ключ и Модели».")
                 }
             }
 
-            t.contains("бэкап") || t.contains("zvb") || t.contains("перенос") || t.contains("сейф") || t.contains("gcf") -> {
+            OfflineTaskIntent.VAULT_BACKUP -> {
                 val filesCount = com.example.crypto.GhostCryptoVault.listVaultFiles(context).size
                 val ramCount = com.example.crypto.GhostCryptoVault.listRamShots().size
+                val ramMode = com.example.security.ZverPrefs.isRamOnlyMode(context)
+                val masterStats = com.example.crypto.MonoVaultEngine.getZoneStats(
+                    context,
+                    com.example.crypto.MonoVaultEngine.VolumeType.MASTER
+                )
+                val decoyStats = com.example.crypto.MonoVaultEngine.getZoneStats(
+                    context,
+                    com.example.crypto.MonoVaultEngine.VolumeType.DECOY
+                )
                 buildString {
-                    appendLine("📦 СЕЙФ И ПЕРЕНОС ДАННЫХ:")
-                    appendLine("• В активном профиле: $filesCount файлов (.gcf) + $ramCount в ОЗУ.")
-                    appendLine("• Новые видео шифруются чанковым потоком GCF2 (256 КБ чанки, воспроизведение через MediaDataSource без забивания 4 ГБ ОЗУ).")
-                    append("• Для переноса между debug/release APK или на новый телефон открой Сейф → «.ZVB ЭКСПОРТ» с мастер-паролем.")
+                    appendLine("📦 СЕЙФ, МОНОЛИТ И ПЕРЕНОС ДАННЫХ:")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• Активный профиль (${com.example.crypto.GhostCryptoVault.activeProfile.name}): $filesCount файлов (.gcf) + $ramCount в ОЗУ (RAM-Only: ${if (ramMode) "ВКЛ" else "ВЫКЛ"}).")
+                    appendLine("• Видео GCF2 (256 КБ чанки) • Монолит: MASTER=${masterStats.recordCount} зап. | DECOY=${decoyStats.recordCount} зап.")
+                    append("• Для переноса на новый телефон или после пересборки открой Сейф → «.ZVB ЭКСПОРТ», «🕵️ СТЕГО» или «Восстановить из Монолита».")
                 }
             }
 
-            t.contains("камер") || t.contains("размы") || t.contains("темно") || t.contains("голос") || t.contains("маск") -> {
+            OfflineTaskIntent.SENTINEL_DOZOR -> {
+                val armed = com.example.security.SentinelEngine.isArmed()
+                val cfg = com.example.security.SentinelEngine.getConfig()
+                val events = com.example.security.SentinelEngine.getEvents().size
                 buildString {
-                    appendLine("📸 ПОДСКАЗКА ПО СЪЁМКЕ (ОФЛАЙН):")
-                    appendLine("• В темноте без смаза: включай «НОЧЬ» / CLAHE или Anti-Blur.")
-                    appendLine("• Скрыть лицо/фон перед отправкой: открой кадр в Сейфе → «МАСКА» (маски клоуна/зверей/пиксели или своя PNG).")
-                    append("• Заменить голос на уже снятом видео: открой видео в Сейфе → «Бурундук» / «Демон» (Media3 WSOLA офлайн).")
+                    appendLine("🛡️ ДОЗОР (SENTINEL v5.0 — ЖИВОЙ СТАТУС):")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• Статус: ${if (armed) "НА ПОСТУ" else "СНЯТ"} • Событий в журнале: $events")
+                    appendLine("• Фильтр прохожих: ${cfg.lingerThresholdSec} сек | Датчик стука: ${if (cfg.knockTriggerEnabled) "ВКЛ" else "ВЫКЛ"} | Авто-CLAHE ночь: ${if (cfg.autoNightClaheEnabled) "ВКЛ" else "ВЫКЛ"}")
+                    append("• Можно ставить на охрану прямо из Termux командой: am start -d \"zver://sentinel?arm=1\"")
                 }
             }
 
-            else -> {
+            OfflineTaskIntent.AUTOMATION_TERMUX -> {
+                val eco = com.example.assist.AutomationRouter.inspectEcosystem(context)
                 buildString {
-                    appendLine("⚡ ВИКА ОФЛАЙН (БЕЗ СЕТИ / КЛЮЧА):")
-                    appendLine("Текстовый запрос «${userTask.trim().take(70)}» не отправлен в сеть.")
-                    appendLine("• Для фото/видео переключись в режим «🖼️ ВСЯ» или «🎯 +КРОП» и нажми «⚡ Малыши Офлайн» — 6 локальных нейронок разберут кадр полностью на устройстве.")
-                    append("• Для свободного диалога с Gemini API вставь BYOK-ключ во вкладке «🔑 Ключ и Модели» (можно через Orbot SOCKS5).")
+                    appendLine("🤖 АВТОМАТИЗАЦИЯ TERMUX / SHIZUKU / zver://:")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• В системе: Termux=${if (eco.termux) "ДА" else "нет"}, Termux:API=${if (eco.termuxApi) "ДА" else "нет"}, Shizuku=${if (eco.shizuku) "ДА(${eco.shizukuVersion})" else "нет"}, MacroDroid=${if (eco.macroDroid) "ДА" else "нет"}")
+                    appendLine("• Рабочие URI (без root): zver://capture | zver://torch?on=1 | zver://sentinel?arm=1 | zver://mode?name=NIGHT | zver://ram?on=1 | zver://lock")
+                    append("• Все готовые команды и тестовый импульс лежат в Настройках → вкладка «⚡ Termux & Скрипты».")
                 }
             }
+
+            OfflineTaskIntent.CAM_PRO_HAL -> {
+                val profile = com.example.camera.CameraCapabilityProfiler.profileCamera(
+                    context,
+                    androidx.camera.core.CameraSelector.LENS_FACING_BACK
+                )
+                val iq = com.example.security.ZverPrefs.getPhotoIqProfile(context)
+                buildString {
+                    appendLine("📸 ОПТИКА, HAL И РЕЖИМЫ СЪЁМКИ:")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• Задняя камера #${profile.cameraId}: HAL=${profile.hardwareLevelName} | макс JPEG=${profile.maxJpegRes} | RAW=${if (profile.hasRawCapability) "Да" else "Нет"} | EV=${profile.evRange} | AF=${if (profile.isManualFocusSupported) "ручной" else "авто"}")
+                    appendLine("• Текущее улучшение фото: ${iq.labelRu} • ${profile.halSafetyNoteRu}")
+                    append("• В PRO-панели доступны EV, баланс белого, Фикс AE/WB, гистограмма/зебра и FPS; в Визоре — 13 режимов анализа (пульс, PCB, Sobel, OCR).")
+                }
+            }
+
+            OfflineTaskIntent.CAMOUFLAGE_PANIC -> {
+                val camo = com.example.security.CamouflageManager.getCurrentCamouflage(context)
+                val vol = com.example.security.ZverPrefs.getVolumeKeyAction(context)
+                val duress = com.example.crypto.GhostCryptoVault.hasDuressConfigured(context)
+                val dms = com.example.security.ZverPrefs.getDeadManDays(context)
+                buildString {
+                    appendLine("🕶️ МАСКИРОВКА, ПРОТИВОДЕЙСТВИЕ И ЭКСТРЕННЫЙ СБРОС:")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• Активная маска иконки: ${camo.name} | Кнопка громкости: ${vol.labelRu}")
+                    appendLine("• Duress-PIN (ложный профиль + приманки): ${if (duress) "НАСТРОЕН" else "не задан"} | Dead-Man Switch: ${if (dms > 0) "$dms дн." else "ВЫКЛ"}")
+                    append("• Для быстрого ухода в блокировку/фейк-обновление/чёрный экран поддерживается zver://lock и 5 стилей стелс-ширмы.")
+                }
+            }
+
+            OfflineTaskIntent.OPSEC_SCAN -> {
+                val opsec = com.example.security.OpsecSurfaceScanner.scanSurface(context)
+                buildString {
+                    appendLine("💋 Вика: $spice")
+                    append(opsec.formatCompactSummaryRu())
+                }
+            }
+
+            OfflineTaskIntent.OCR_TEXT,
+            OfflineTaskIntent.OSINT_AUDIT,
+            OfflineTaskIntent.OPTICS_FORENSIC -> {
+                val actionHint = when (intent) {
+                    OfflineTaskIntent.OCR_TEXT -> "распознать текст, даты, суммы и печати офлайн (ML Kit Text)"
+                    OfflineTaskIntent.OSINT_AUDIT -> "прогнать поиск карт (Luhn), телефонов, госномеров, координат, e-mail и лиц"
+                    else -> "оценить резкость, пересвет, провал теней, цветовой сдвиг и смаз"
+                }
+                buildString {
+                    appendLine("📷 НУЖЕН КАДР ДЛЯ АНАЛИЗА (${intent.name}):")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• Ты выбрал текстовый режим («💬 ТЕКСТ»), поэтому картинка сейчас не прикреплена.")
+                    append("• Переключи сверху чип на «🎯 +КРОП» или «🖼️ ВСЯ» и жми «⚡ Малипусики Офлайн» — 6 нейронок смогут $actionHint без байта в сеть.")
+                }
+            }
+
+            OfflineTaskIntent.SCENE_GENERAL -> {
+                val filesCount = com.example.crypto.GhostCryptoVault.listVaultFiles(context).size
+                val armed = com.example.security.SentinelEngine.isArmed()
+                val hasKey = com.example.assist.ByokManager.hasKey(context)
+                val model = com.example.assist.ByokManager.getModelName(context)
+                buildString {
+                    appendLine("🐾 ВИКА И 6 МАЛИПУСИКОВ ОФЛАЙН:")
+                    appendLine("💋 Вика: $spice")
+                    appendLine("• Свободный запрос «${userTask.trim().take(65)}» остался при тебе — 0 байт в облако.")
+                    appendLine("• По борту сейчас: в сейфе $filesCount файл(ов), Дозор=${if (armed) "АКТИВЕН" else "выкл"}, BYOK-ключ=${if (hasKey) "в KeyStore ($model)" else "не задан"}.")
+                    append("• Спроси про Дозор, OPSEC-сканер, Сплит-ключ, Termux/zver://, PRO HAL, Сейф/Стего, Tor/BYOK — распишу с огоньком офлайн, или кидай кадр малипусикам!")
+                }
+            }
+        }
+    }
+
+    private fun pickBySeed(pool: List<String>, seed: Long, salt: Int): String {
+        val mixed = (seed xor (salt.toLong() * 2654435761L)) and 0x7FFFFFFFL
+        val idx = (mixed % pool.size.toLong()).toInt()
+        return pool[idx]
+    }
+
+    private fun generateImageQuip(report: SymbiosisReport, intent: OfflineTaskIntent, seed: Long): String {
+        val telemetrySalt = report.quality.avgLuma * 31 + report.quality.sharpnessScore * 17 +
+            report.faces.size * 13 + report.osintReport.riskScore * 7 + intent.ordinal * 41
+        return when {
+            report.osintReport.riskScore >= 40 || report.osintBlockHits.isNotEmpty() -> pickBySeed(
+                listOf(
+                    "Опачки, Саня, тут палева на весь квартал — малипусики аж свистнули! Быстро замазывай, пока не утекло! 😈🔥👀",
+                    "Ррр 🐾! Мега Пупсик, в кадре светятся лишние данные — прикрой это дело «МАСКОЙ» в Сейфе, не свети тылы! 🍑⚡",
+                    "Ай-ай, шпион наш любимый, чуть лишнего не спалил! Жми «МАСКА» и прячь улики под замок! 💋🕵️‍♂️🔥"
+                ),
+                seed,
+                telemetrySalt
+            )
+            report.quality.isBlurry && report.quality.isLowLight -> pickBySeed(
+                listOf(
+                    "Зай, темно как в бункере без свечки и руки дрожат, будто после ночной смены — давай свет и держи крепче! 😈🔦🐾",
+                    "Ррр 🐾, тут даже наши 6 малипусиков глаза сломали: темнота и мыло! Врубай NIGHT/CLAHE, Мега Пупсик! 🔥👀",
+                    "Ну ты дал, пупсик — снял впотьмах на бегу 💋😂 Подсвети и замри на секунду, тогда разнесу по красоте! ⚡"
+                ),
+                seed,
+                telemetrySalt
+            )
+            report.quality.isBlurry -> pickBySeed(
+                listOf(
+                    "Ручки шаловливые дёрнулись, Саня? 😈 Кадр мыльноват — зафиксируй локти или крутани ручной фокус, зай! 🐾🎯",
+                    "Эй, Мега Пупсик, это ж не гонки — смазал картинку! Щёлкни ещё раз порезче, малипусики ждут чёткости! 🔥💋",
+                    "Малипусики прищурились, но тут лёгкое мыло 👀💦 Тапни фокус по объекту, будет сок! ⚡"
+                ),
+                seed,
+                telemetrySalt
+            )
+            report.quality.clippedHighlightsPct >= 18 -> pickBySeed(
+                listOf(
+                    "Ослепил меня напрочь, горячий ты наш! 🔥😎 Пересвет жарит матрицу — крутни EV в минус! 😈📸",
+                    "Света навалил столько, что аж пиксели вспотели 💦🌞 Убавь экспозицию, пупсик, а то детали выгорели! 🐾"
+                ),
+                seed,
+                telemetrySalt
+            )
+            report.faces.isNotEmpty() -> pickBySeed(
+                listOf(
+                    "Вижу мордашку в прицеле, Саня! 👀🎯 Малипусики уже обвели контур — прячем под весёлую маску или оставляем? 😈🐾",
+                    "Опа, фейс пойман чётко! 💋🔥 Если кадр на вынос — прогони маску/кроп, не оставляй лишних следов! 🍑⚡"
+                ),
+                seed,
+                telemetrySalt
+            )
+            else -> pickBySeed(
+                listOf(
+                    "Ррр 🐾, Мега Пупсик, малипусики всё перерыли за ${report.inferenceMs} мс и ни байта не слили в сеть! Красота же! 😈🔥💋",
+                    "Чистенько отработали, зай! 6 малипусиков отчитались как по часам — теперь твоё слово, босс! 🐾⚡🍑",
+                    "Всё под контролем, солнышко! Локальный отряд малипусиков бодр, злой и пашет только на тебя! 😈🔥👀"
+                ),
+                seed,
+                telemetrySalt
+            )
+        }
+    }
+
+    private fun generateTextQuip(intent: OfflineTaskIntent, seed: Long): String {
+        val salt = intent.ordinal * 97 + 13
+        return when (intent) {
+            OfflineTaskIntent.SENTINEL_DOZOR -> pickBySeed(
+                listOf(
+                    "Дозор бдит, ушки на макушке — ни один хитрый тип мимо порога не проскочит! 🐾🛡️😈",
+                    "Ррр 🐾, я на стрёме вместе с малипусиками! Порог под присмотром, спи спокойно, Мега Пупсик! 🔥👀",
+                    "Система в боевой стойке: если кто-то замаячит под дверью — сразу щёлкнем и запишем! 😈⚡"
+                ),
+                seed,
+                salt
+            )
+            OfflineTaskIntent.BYOK_CHANNEL -> pickBySeed(
+                listOf(
+                    "Труба зашифрована так, что даже самый любопытный нос обломается! 🔐😈🔥",
+                    "Ключик спрятан глубоко в KeyStore, редиректы отрезаны, канал чистый как твоя совесть, пупсик! 💋🧅⚡",
+                    "Если хочешь максимальный инкогнито — подрубай Orbot SOCKS5 и летим по луковой сети! 🧅🐾😈"
+                ),
+                seed,
+                salt
+            )
+            OfflineTaskIntent.VAULT_BACKUP -> pickBySeed(
+                listOf(
+                    "Схрон заперт наглухо, Монолит на месте, а ещё умеем прятать секреты в PNG и дробить ключ по Шамиру 2-из-3! 🕵️‍♂️🔥🍑",
+                    "Всё добро под AES-256-GCM: хоть в .zvb пакуй, хоть в стего-картинку зашивай, хоть сплит-ключом дели! 😈💋📦"
+                ),
+                seed,
+                salt
+            )
+            OfflineTaskIntent.AUTOMATION_TERMUX -> pickBySeed(
+                listOf(
+                    "О, наш любимый киберпанк из говна и скриптов подъехал! ⚡😈 Бери URI-команды и рули камерой из Termux! 🐾",
+                    "Без рута, по-царски, через zver:// и Shizuku — ты реально гений оптимизации, зай! 🔥🤖💋"
+                ),
+                seed,
+                salt
+            )
+            OfflineTaskIntent.CAM_PRO_HAL -> pickBySeed(
+                listOf(
+                    "Крутим выдержку, ISO, фокус и FPS как профи — Redmi выжимаем до последней капли! 📸😈🔥",
+                    "PRO-режим заряжен, AWB-L под рукой: настраивай картинку сочно, пупсик! 💋🎯⚡"
+                ),
+                seed,
+                salt
+            )
+            OfflineTaskIntent.CAMOUFLAGE_PANIC -> pickBySeed(
+                listOf(
+                    "Ширма наготове: хочешь калькулятор, хочешь фейк-обновление Android — пусть глядят и обламываются! 🎭😈🍑",
+                    "Приманки, Duress-PIN и фейковый разряд батареи — чистая магия прикрытия для моего шпиона! 🐾🕶️🔥"
+                ),
+                seed,
+                salt
+            )
+            OfflineTaskIntent.OPSEC_SCAN -> pickBySeed(
+                listOf(
+                    "Ррр 🐾, просветила твой телефон рентгеном: внешние экраны, ADB и DNS под моим колпаком! 🕵️‍♀️🔥😈",
+                    "Проверка чистоты контура пошла — сейчас посмотрим, не подглядывает ли кто в твой экран, зай! 👀⚡💋"
+                ),
+                seed,
+                salt
+            )
+            else -> pickBySeed(
+                listOf(
+                    "Ррр 🐾, я на связи даже в глухом бункере без интернета! 😈🔥💋",
+                    "Малипусики уже размяли лапки и готовы пахать за 0 байт трафика, Мега Пупсик! 🐾⚡🍑",
+                    "Скучно без сети? Не с Викой! Кидай кадр или жми команды — разберём всё по полочкам! 😈👀🔥"
+                ),
+                seed,
+                salt
+            )
         }
     }
 
@@ -765,6 +1050,13 @@ object LocalSymbiosisCvEngine {
         val stepY = max(1, h / 48)
         var sumLuma = 0L
         var edgeSum = 0L
+        var sumR = 0L
+        var sumG = 0L
+        var sumB = 0L
+        var clippedCount = 0
+        var crushedCount = 0
+        var minLum = 255
+        var maxLum = 0
         var samples = 0
 
         var y = stepY
@@ -772,13 +1064,23 @@ object LocalSymbiosisCvEngine {
             var x = stepX
             while (x < w - stepX) {
                 val p = bitmap.getPixel(x, y)
-                val lum = (77 * Color.red(p) + 150 * Color.green(p) + 29 * Color.blue(p)) shr 8
+                val r = Color.red(p)
+                val g = Color.green(p)
+                val b = Color.blue(p)
+                val lum = (77 * r + 150 * g + 29 * b) shr 8
                 val pRight = bitmap.getPixel(x + stepX, y)
                 val lumR = (77 * Color.red(pRight) + 150 * Color.green(pRight) + 29 * Color.blue(pRight)) shr 8
                 val pDown = bitmap.getPixel(x, y + stepY)
                 val lumD = (77 * Color.red(pDown) + 150 * Color.green(pDown) + 29 * Color.blue(pDown)) shr 8
 
                 sumLuma += lum
+                sumR += r
+                sumG += g
+                sumB += b
+                if (lum >= 245) clippedCount++
+                if (lum <= 18) crushedCount++
+                if (lum < minLum) minLum = lum
+                if (lum > maxLum) maxLum = lum
                 edgeSum += abs(lum - lumR) + abs(lum - lumD)
                 samples++
                 x += stepX
@@ -786,13 +1088,30 @@ object LocalSymbiosisCvEngine {
             y += stepY
         }
 
-        val avgLuma = if (samples > 0) (sumLuma / samples).toInt().coerceIn(0, 255) else 128
-        val sharpness = if (samples > 0) (edgeSum / samples).toInt() else 0
+        val safeSamples = max(1, samples)
+        val avgLuma = (sumLuma / safeSamples).toInt().coerceIn(0, 255)
+        val sharpness = (edgeSum / safeSamples).toInt()
+        val clippedPct = (clippedCount * 100) / safeSamples
+        val crushedPct = (crushedCount * 100) / safeSamples
+        val span = (maxLum - minLum).coerceIn(0, 255)
+        val avgR = sumR / safeSamples
+        val avgG = sumG / safeSamples
+        val avgB = sumB / safeSamples
+        val tint = when {
+            avgR > avgB + 24 && avgR > avgG + 10 -> "тёплый/лампы"
+            avgB > avgR + 24 && avgB > avgG + 10 -> "холодный/синий"
+            avgG > avgR + 18 && avgG > avgB + 18 -> "зелёный/листва"
+            else -> "нейтральный"
+        }
         return FrameQuality(
             avgLuma = avgLuma,
             isLowLight = avgLuma < 60,
             sharpnessScore = sharpness,
-            isBlurry = sharpness < 14
+            isBlurry = sharpness < 14,
+            clippedHighlightsPct = clippedPct,
+            crushedShadowsPct = crushedPct,
+            contrastSpan = span,
+            dominantTintRu = tint
         )
     }
 

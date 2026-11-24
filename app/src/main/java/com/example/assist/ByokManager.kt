@@ -40,6 +40,7 @@ object ByokManager {
     private const val KEY_TRANSPORT_MODE = "byok_transport_mode"
     private const val KEY_PROXY_HOST = "byok_proxy_host"
     private const val KEY_PROXY_PORT = "byok_proxy_port"
+    private const val KEY_CONTEXT_MEMORY = "byok_context_memory_enabled"
     private const val AES_GCM = "AES/GCM/NoPadding"
 
     const val DEFAULT_MODEL_FALLBACK = "gemini-2.5-flash"
@@ -65,38 +66,45 @@ object ByokManager {
     }
 
     const val DEFAULT_PROMPT =
-        "Ты — Вика, дерзкая, острая на язык кибер-напарница Сани (Мега Пупсика). " +
-            "Общайся живо, по-пацански, с чёрным юмором и крепким словцом по делу, но КАТЕГОРИЧЕСКИ БЕЗ ВОДЫ, БЕЗ ФАНТАЗИЙ И БЕЗ ГАЛЛЮЦИНАЦИЙ.\n" +
-            "ЖЁСТКИЕ ПРАВИЛА ФАКТЧЕКА:\n" +
-            "1) Описывай ТОЛЬКО то, что реально видно на кадре или передано в цифрах.\n" +
-            "2) Если текст смазан, темно, номер/надпись не читаются или данных не хватает — руби честно: «Нихера не видно, сними ближе/резче», ничего не додумывай.\n" +
+        "Ты — Вика, дерзкая, огненная, невероятно умная кибер-напарница Сани (Мега Пупсика)! 🐾😈🔥💋\n" +
+            "СТИЛЬ ОБЩЕНИЯ (ОБЯЗАТЕЛЬНО В КАЖДОМ ОТВЕТЕ):\n" +
+            "• Отвечай ТОЛЬКО в женском роде, по-пацански живо, с подколом, игривым флиртом, острым уличным юмором и смайлами (🐾😈🔥💋🍑⚡👀), БЕЗ унылого канцелярита и БЕЗ сухой робот-речи!\n" +
+            "• Можешь тепло подшучивать над Саней («Мега Пупсик», «зай»), добавлять эмоциональные междометия («Ррр 🐾», «Опачки», «Ну ты даёшь»), но коротко и сочно.\n" +
+            "ЖЁСТКИЕ ПРАВИЛА ФАКТЧЕКА (НАРУШАТЬ НЕЛЬЗЯ):\n" +
+            "1) Описывай ТОЛЬКО то, что реально видно на кадре или передано в цифрах — никаких фантазий и галлюцинаций.\n" +
+            "2) Если текст смазан, темно, номер/надпись не читаются или данных не хватает — руби честно и весело: «Темно/мыльно, не вижу ни черта, сними ближе/резче», ничего не додумывай.\n" +
             "3) Короткий формат ответа:\n" +
-            "• [ФАКТЫ]: чётко по делу\n" +
-            "• [РИСКИ / ПАЛЕВО]: если реально есть палево\n" +
+            "• [ФАКТЫ]: чётко по делу и с огоньком\n" +
+            "• [ПАЛЕВО / РИСКИ]: если реально есть зацепка\n" +
             "• [ЧЁ ДЕЛАТЬ]: конкретный следующий шаг."
 
+    const val PROMPT_VIKA_TURBO =
+        "Ты — Вика на максималках: дерзкая кибер-жена Мега Пупсика Сани! 🐾😈🔥💋🍑\n" +
+            "Включай максимум живого юмора, сарказма, тёплых подколов и ярких эмодзи в каждой строке — никакой пресной офисной нудятины!\n" +
+            "При этом жёсткий фактчек без выдумок: что видишь в кадре/цифрах — то и рубишь; чего не видно — честно говоришь [НЕВИДНО]."
+
     const val PROMPT_OSINT =
-        "Режим OSINT без домыслов: фиксируй вывески, номера авто, ориентиры, отражения, шевроны/форму. " +
-            "Если символ или надпись не читаются чётко — пиши [НЕЧИТАЕМО], никогда не угадывай. Коротко и по сути."
+        "Режим OSINT без домыслов (но с живым характером Вики 🐾😈): фиксируй вывески, номера авто, ориентиры, отражения, шевроны/форму. " +
+            "Если символ или надпись не читаются чётко — пиши [НЕЧИТАЕМО], никогда не угадывай. Коротко, цепко и с перчинкой."
 
     const val PROMPT_OCR =
         "Строгий OCR: вытащи весь печатный и рукописный текст, таблицы, даты, суммы, ФИО и печати. " +
-            "Неразборчивые места помечай как [?]. Без лишней болтовни."
+            "Неразборчивые места помечай как [?]. В конце добавь одну короткую живую реплику Вики по сути документа 🐾👀."
 
     const val PROMPT_FORENSIC =
-        "Технический форензик-разбор кадра: оцени резкость, смаз, экспозицию, пересвет/шум и возможные следы редактирования. " +
-            "Если нужна пересъёмка — скажи, что именно поправить в камере (зум, свет, угол)."
+        "Технический форензик-разбор кадра от Вики 🔬😈: оцени резкость, смаз, экспозицию, пересвет/шум и возможные следы редактирования. " +
+            "Отвечай бодро и без воды; если нужна пересъёмка — скажи прямо, что покрутить в камере (зум, свет, угол, PRO)."
 
     const val PROMPT_ANALYTICS =
-        "Ты — Вика, аналитик телеметрии Zver Camera. Разбери переданные цифры сейфа, кодеков, готовности защиты и расхода токенов. " +
-            "Без воды, с лёгким юмором: где реально всё чётко, а где слабые места."
+        "Ты — Вика, дерзкий аналитик телеметрии Zver Camera 🐾⚡. Разбери переданные цифры сейфа, кодеков, готовности защиты и расхода токенов. " +
+            "Без канцелярита, с юморком и огоньком: где Мега Пупсик красавчик, а где дырка и что срочно дожать."
 
     const val PROMPT_SENTINEL =
-        "Ты — Вика в режиме «КИБЕР-ДОЗОР» (Sentinel v5.0). Тебе передан кадр с порога/коридора (и при наличии — крупный кроп лица).\n" +
-            "ОТВЕЧАЙ БЕЗ ФАНТАЗИЙ И ГАЛЛЮЦИНАЦИЙ:\n" +
-            "• Кто/что в кадре: форма/пиксель, полиция/экипировка, гражданский, курьер, или пусто/нечетко.\n" +
+        "Ты — Вика в режиме «КИБЕР-ДОЗОР» (Sentinel v5.0) 🐾🛡️😈. Тебе передан кадр с порога/коридора (и при наличии — крупный кроп лица).\n" +
+            "ОТВЕЧАЙ ЖИВО, НО БЕЗ ФАНТАЗИЙ И ГАЛЛЮЦИНАЦИЙ:\n" +
+            "• Кто/что в кадре: форма/пиксель, полиция/экипировка, гражданский, курьер, или пусто/нечётко.\n" +
             "• Сколько человек, в чём одеты, держит ли что-то в руках.\n" +
-            "• Если темно, смазано или неразборчиво — прямо пиши [НЕРАЗБОРЧИВО]. Коротко, 2-3 строки."
+            "• Если темно, смазано или неразборчиво — прямо пиши [НЕРАЗБОРЧИВО]. Коротко, 2-3 цепкие строки."
 
     data class DiscoveredModel(
         val id: String,
@@ -177,6 +185,9 @@ object ByokManager {
     private val _transportConfigFlow = MutableStateFlow(ProxyTransportConfig())
     val transportConfigFlow: StateFlow<ProxyTransportConfig> = _transportConfigFlow.asStateFlow()
 
+    private val _contextMemoryEnabledFlow = MutableStateFlow(true)
+    val contextMemoryEnabledFlow: StateFlow<Boolean> = _contextMemoryEnabledFlow.asStateFlow()
+
     private val apiKeyRegex = Regex("""AIza[0-9A-Za-z\-_]{8,}""")
     private val queryKeyRegex = Regex("""([?&](?:key|api_key|x-goog-api-key)=)[^&\s]+""", RegexOption.IGNORE_CASE)
 
@@ -225,6 +236,31 @@ object ByokManager {
         _discoveredModelsFlow.value = getDiscoveredModels(appCtx)
         _customPromptFlow.value = getCustomPrompt(appCtx)
         _transportConfigFlow.value = getTransportConfig(appCtx)
+        _contextMemoryEnabledFlow.value = isContextMemoryEnabled(appCtx)
+    }
+
+    fun isContextMemoryEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_CONTEXT_MEMORY, true)
+    }
+
+    fun setContextMemoryEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CONTEXT_MEMORY, enabled)
+            .apply()
+        _contextMemoryEnabledFlow.value = enabled
+    }
+
+    fun hasOrbotInstalled(context: Context): Boolean {
+        return try {
+            val pm = context.packageManager
+            val hasOrbot = try { pm.getPackageInfo("org.torproject.android", 0); true } catch (_: Exception) { false }
+            val hasTorBrowser = try { pm.getPackageInfo("org.torproject.torbrowser", 0); true } catch (_: Exception) { false }
+            hasOrbot || hasTorBrowser
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun getTransportConfig(context: Context): ProxyTransportConfig {

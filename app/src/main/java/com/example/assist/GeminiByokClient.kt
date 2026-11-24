@@ -15,14 +15,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.Socket
 import java.util.Arrays
 import java.util.concurrent.TimeUnit
 
 /**
  * GeminiByokClient:
  * Direct user-initiated REST client to Google Gemini API (v1beta) using user's own BYOK key.
- * - Strict TLS 1.3 / 1.2 ConnectionSpecs, zero HTTP disk cache, zero logging of headers/keys.
- * - Optional Orbot/Tor SOCKS5 (127.0.0.1:9050) or custom SOCKS5 transport.
+ * - Strict TLS 1.3 / 1.2 ConnectionSpecs, zero HTTP disk cache, zero redirects (protects API key header).
+ * - Optional Orbot/Tor SOCKS5 (127.0.0.1:9050) or custom SOCKS5 transport + real handshake probe.
  * - Key is passed exclusively via `x-goog-api-key` header and wiped immediately.
  */
 object GeminiByokClient {
@@ -30,9 +31,18 @@ object GeminiByokClient {
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     private const val ANONYMOUS_USER_AGENT = "Zver/1.0"
 
+    data class ProxyProbeResult(
+        val reachable: Boolean,
+        val socks5HandshakeOk: Boolean,
+        val latencyMs: Long,
+        val detailRu: String
+    )
+
     private val directClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectionSpecs(listOf(ConnectionSpec.RESTRICTED_TLS, ConnectionSpec.MODERN_TLS))
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(50, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
@@ -66,6 +76,8 @@ object GeminiByokClient {
         val proxy = resolveEffectiveProxy(config)
         val built = OkHttpClient.Builder()
             .connectionSpecs(listOf(ConnectionSpec.RESTRICTED_TLS, ConnectionSpec.MODERN_TLS))
+            .followRedirects(false)
+            .followSslRedirects(false)
             .proxy(proxy)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(80, TimeUnit.SECONDS)
@@ -75,6 +87,67 @@ object GeminiByokClient {
         cachedProxyKey = cacheId
         cachedProxyClient = built
         return built
+    }
+
+    /**
+     * Performs a lightweight local TCP + SOCKS5 greeting handshake (0x05, 0x01, 0x00)
+     * without leaking any DNS query or API key outside the device.
+     */
+    suspend fun probeSocks5Proxy(
+        config: ByokManager.ProxyTransportConfig,
+        timeoutMs: Int = 2500
+    ): ProxyProbeResult = withContext(Dispatchers.IO) {
+        if (config.mode == ByokManager.TransportMode.DIRECT_TLS) {
+            return@withContext ProxyProbeResult(
+                reachable = true,
+                socks5HandshakeOk = false,
+                latencyMs = 0L,
+                detailRu = "Выбран прямой TLS 1.3 (локальный прокси не требуется)"
+            )
+        }
+        val host = config.host.trim().ifEmpty { ByokManager.DEFAULT_TOR_HOST }
+        val port = config.port.coerceIn(1, 65535)
+        val start = System.currentTimeMillis()
+        var socket: Socket? = null
+        return@withContext try {
+            socket = Socket()
+            socket.soTimeout = timeoutMs
+            socket.connect(InetSocketAddress(host, port), timeoutMs)
+            val out = socket.getOutputStream()
+            val inp = socket.getInputStream()
+            // SOCKS5 client greeting: version=5, nMethods=1, method=0x00 (NO AUTH)
+            out.write(byteArrayOf(0x05, 0x01, 0x00))
+            out.flush()
+            val resp = ByteArray(2)
+            val read = inp.read(resp)
+            val latency = System.currentTimeMillis() - start
+            val socksOk = read == 2 && resp[0] == 0x05.toByte() && resp[1] != 0xFF.toByte()
+            if (socksOk) {
+                ProxyProbeResult(
+                    reachable = true,
+                    socks5HandshakeOk = true,
+                    latencyMs = latency,
+                    detailRu = "✅ SOCKS5 ($host:$port) отвечает • handshake ${latency} мс"
+                )
+            } else {
+                ProxyProbeResult(
+                    reachable = true,
+                    socks5HandshakeOk = false,
+                    latencyMs = latency,
+                    detailRu = "⚠️ Порт $host:$port открыт, но ответ не SOCKS5 (code=${if (read >= 2) resp[1].toInt() and 0xFF else -1})"
+                )
+            }
+        } catch (e: Exception) {
+            val latency = System.currentTimeMillis() - start
+            ProxyProbeResult(
+                reachable = false,
+                socks5HandshakeOk = false,
+                latencyMs = latency,
+                detailRu = "❌ Прокси $host:$port недоступен (${e.javaClass.simpleName}: ${e.message ?: "connection failed"})"
+            )
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
+        }
     }
 
     data class GenerationResponse(
@@ -221,6 +294,40 @@ object GeminiByokClient {
         return score
     }
 
+    internal fun buildContentsJsonArray(
+        currentParts: JSONArray,
+        historyTurns: List<Pair<String, String>> = emptyList(),
+        maxTurns: Int = 4
+    ): JSONArray {
+        val contents = JSONArray()
+        val trimmedHistory = historyTurns.takeLast(maxTurns)
+        for ((uTurn, mTurn) in trimmedHistory) {
+            val uClean = uTurn.trim().take(400)
+            val mClean = mTurn.trim().take(700)
+            if (uClean.isNotEmpty() && mClean.isNotEmpty()) {
+                contents.put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().put(JSONObject().apply { put("text", uClean) }))
+                    }
+                )
+                contents.put(
+                    JSONObject().apply {
+                        put("role", "model")
+                        put("parts", JSONArray().put(JSONObject().apply { put("text", mClean) }))
+                    }
+                )
+            }
+        }
+        contents.put(
+            JSONObject().apply {
+                put("role", "user")
+                put("parts", currentParts)
+            }
+        )
+        return contents
+    }
+
     suspend fun generateContent(
         apiKeyChars: CharArray,
         modelId: String,
@@ -229,7 +336,8 @@ object GeminiByokClient {
         imageBytes: ByteArray? = null,
         imageMimeType: String = "image/webp",
         extraImages: List<Pair<ByteArray, String>> = emptyList(),
-        transportConfig: ByokManager.ProxyTransportConfig = ByokManager.ProxyTransportConfig()
+        transportConfig: ByokManager.ProxyTransportConfig = ByokManager.ProxyTransportConfig(),
+        historyTurns: List<Pair<String, String>> = emptyList()
     ): Result<GenerationResponse> = withContext(Dispatchers.IO) {
         val activeClient = buildClientForTransport(transportConfig)
         val keyCopy = apiKeyChars.clone()
@@ -287,15 +395,7 @@ object GeminiByokClient {
                         }
                     )
                 }
-                put(
-                    "contents",
-                    JSONArray().put(
-                        JSONObject().apply {
-                            put("role", "user")
-                            put("parts", parts)
-                        }
-                    )
-                )
+                put("contents", buildContentsJsonArray(parts, historyTurns))
                 put(
                     "generationConfig",
                     JSONObject().apply {

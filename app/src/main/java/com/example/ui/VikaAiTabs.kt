@@ -39,6 +39,7 @@ import com.example.assist.GeminiByokClient
 import com.example.privacy.LocalSymbiosisCvEngine
 import com.example.security.SecureClipboard
 import com.example.security.VaultAnalytics
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -104,7 +105,7 @@ internal fun ColumnScope.VikaTasksTabContent(
                 .padding(10.dp)
         ) {
             Text(
-                text = if (!isOnlineNow) "🔴 ОФЛАЙН -> РАБОТАЮТ 6 МАЛЫШЕЙ" else "⚡ КЛЮЧ НЕ ЗАДАН (ОФЛАЙН-МАЛЫШИ АКТИВНЫ)",
+                text = if (!isOnlineNow) "🔴 ОФЛАЙН -> РАБОТАЮТ 6 МАЛИПУСИКОВ" else "⚡ КЛЮЧ НЕ ЗАДАН (ОФЛАЙН-МАЛИПУСИКИ АКТИВНЫ)",
                 color = TabAmber,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
@@ -113,7 +114,7 @@ internal fun ColumnScope.VikaTasksTabContent(
             Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = if (!isOnlineNow) {
-                    "Интернета нет — жми «⚡ Малыши Офлайн» или любой чип: 6 локальных нейронок разберут кадр/видео без сети."
+                    "Интернета нет — жми «⚡ Малипусики Офлайн» или любой чип: 6 локальных нейронок разберут кадр/видео без сети."
                 } else {
                     "Можно сразу гонять 6 локальных нейронок офлайн или вставить свой Gemini ключ во вкладке «Ключ и Модели»."
                 },
@@ -169,8 +170,11 @@ internal fun ColumnScope.VikaTasksTabContent(
             .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        VikaQuickTaskChip("⚡ Малыши Офлайн") {
-            onExecuteTask("Полный локальный разбор малышами", true, false, true, null)
+        VikaQuickTaskChip("⚡ Малипусики Офлайн") {
+            onExecuteTask("Полный локальный разбор малипусиками", true, false, true, null)
+        }
+        VikaQuickTaskChip("🛰️ OPSEC-сканер") {
+            onExecuteTask("Проверь OPSEC поверхность угроз: дисплеи, adb, dns", false, false, true, null)
         }
         VikaQuickTaskChip("👁️ Разбор кадра") {
             onExecuteTask("Разбери что на кадре: ключевые детали, риски и чё делать дальше.", frameMode != AiFrameMode.TEXT_ONLY, false, false, null)
@@ -208,7 +212,7 @@ internal fun ColumnScope.VikaTasksTabContent(
                     Icon(Icons.Default.Psychology, contentDescription = "Вика", tint = TabCyan.copy(alpha = 0.7f), modifier = Modifier.size(44.dp))
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Выбери режим сверху:\n• «🖼️ ВСЯ» -> чистый полный разбор только в Gemini\n• «🎯 +КРОП» -> симбиоз 6-NN (кроп лица/объекта + теги) + Gemini\n• «✂️ БЕЗ ФОНА» -> прячет фон перед отправкой\n• Нет сети или сдох лимит -> авто-подхват 6 локальных малышей!",
+                        text = "Выбери режим сверху:\n• «🖼️ ВСЯ» -> чистый полный разбор только в Gemini\n• «🎯 +КРОП» -> симбиоз 6-NN (кроп лица/объекта + теги) + Gemini\n• «✂️ БЕЗ ФОНА» -> прячет фон перед отправкой\n• Нет сети или сдох лимит -> авто-подхват 6 локальных малипусиков!",
                         color = TabMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -568,6 +572,8 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
     context: Context,
     hasKey: Boolean,
     isStrongBoxSupported: Boolean,
+    isOrbotInstalled: Boolean,
+    contextMemoryEnabled: Boolean,
     selectedModel: String,
     discoveredModels: List<ByokManager.DiscoveredModel>,
     customPrompt: String,
@@ -579,11 +585,14 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
     onDeleteKey: () -> Unit,
     onStatusMessage: (String) -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     var apiKeyInput by remember { mutableStateOf("") }
     var manualModelInput by remember { mutableStateOf("") }
     var modelFilter by remember { mutableStateOf("ALL") }
     var proxyHostInput by remember(transportConfig.host) { mutableStateOf(transportConfig.host) }
     var proxyPortInput by remember(transportConfig.port) { mutableStateOf(transportConfig.port.toString()) }
+    var isProbingProxy by remember { mutableStateOf(false) }
+    var proxyProbeResult by remember { mutableStateOf<GeminiByokClient.ProxyProbeResult?>(null) }
 
     Column(
         modifier = Modifier
@@ -664,7 +673,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
 
         Text("1B. ЗАШИФРОВАННЫЙ КАНАЛ (TLS 1.3 / TOR SOCKS5)", color = TabCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text(
-            "Все запросы идут только по TLS 1.3/1.2, без HTTP-кеша и с анонимным User-Agent. При желании заверни трафик в локальный Orbot (127.0.0.1:9050).",
+            text = "Все запросы идут только по TLS 1.3/1.2 без HTTP-кеша, без редиректов и с анонимным User-Agent. Orbot в системе: ${if (isOrbotInstalled) "НАЙДЕН ✅" else "не установлен"}.",
             color = TabMuted,
             fontSize = 10.sp
         )
@@ -685,6 +694,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                         .background(if (sel) TabGreen else TabCard)
                         .border(1.dp, if (sel) TabGreen else TabBorder, RoundedCornerShape(8.dp))
                         .clickable {
+                            proxyProbeResult = null
                             val next = when (tm) {
                                 ByokManager.TransportMode.DIRECT_TLS -> transportConfig.copy(mode = tm)
                                 ByokManager.TransportMode.TOR_ORBOT_SOCKS5 -> ByokManager.ProxyTransportConfig(
@@ -742,6 +752,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                             port = p
                         )
                         ByokManager.saveTransportConfig(context, updated)
+                        proxyProbeResult = null
                         onStatusMessage("ПРОКСИ: ${updated.describeShort()}")
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = TabCyan),
@@ -751,6 +762,85 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                     Text("ОК", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                 }
             }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = {
+                        if (isProbingProxy) return@Button
+                        isProbingProxy = true
+                        val p = proxyPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: ByokManager.DEFAULT_TOR_PORT
+                        val targetCfg = transportConfig.copy(
+                            host = proxyHostInput.trim().ifEmpty { ByokManager.DEFAULT_TOR_HOST },
+                            port = p
+                        )
+                        scope.launch {
+                            val res = GeminiByokClient.probeSocks5Proxy(targetCfg)
+                            proxyProbeResult = res
+                            isProbingProxy = false
+                            onStatusMessage(res.detailRu)
+                        }
+                    },
+                    enabled = !isProbingProxy,
+                    colors = ButtonDefaults.buttonColors(containerColor = TabCard),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(40.dp).testTag("byok_probe_proxy_btn")
+                ) {
+                    Text(
+                        text = if (isProbingProxy) "ПРОВЕРКА..." else "🔌 ПРОВЕРИТЬ ПРОКСИ",
+                        color = TabCyan,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp
+                    )
+                }
+                proxyProbeResult?.let { pr ->
+                    Text(
+                        text = pr.detailRu,
+                        color = if (pr.socks5HandshakeOk) TabGreen else TabRed,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(TabCard)
+                .border(1.dp, if (contextMemoryEnabled) TabGreen.copy(alpha = 0.45f) else TabBorder, RoundedCornerShape(8.dp))
+                .clickable {
+                    ByokManager.setContextMemoryEnabled(context, !contextMemoryEnabled)
+                    onStatusMessage("КОНТЕКСТ ДИАЛОГА: ${if (!contextMemoryEnabled) "ВКЛ (4 хода)" else "ВЫКЛ (1 ход)"}")
+                }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .testTag("byok_context_memory_toggle"),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Text("🧠 Контекст диалога (до 4 ходов в ОЗУ)", color = Color.White, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                Text("Передаёт недавние текстовые вопросы-ответы текущей сессии, на диск не пишется.", color = TabMuted, fontSize = 9.sp)
+            }
+            Switch(
+                checked = contextMemoryEnabled,
+                onCheckedChange = {
+                    ByokManager.setContextMemoryEnabled(context, it)
+                    onStatusMessage("КОНТЕКСТ ДИАЛОГА: ${if (it) "ВКЛ (4 хода)" else "ВЫКЛ (1 ход)"}")
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.Black,
+                    checkedTrackColor = TabGreen,
+                    uncheckedThumbColor = TabMuted,
+                    uncheckedTrackColor = TabBorder
+                )
+            )
         }
 
         HorizontalDivider(color = TabBorder)
@@ -897,6 +987,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
         ) {
             listOf(
                 "Вика База" to ByokManager.DEFAULT_PROMPT,
+                "🔥 Вика Юмор" to ByokManager.PROMPT_VIKA_TURBO,
                 "Дозор" to ByokManager.PROMPT_SENTINEL,
                 "OSINT" to ByokManager.PROMPT_OSINT,
                 "OCR" to ByokManager.PROMPT_OCR,
