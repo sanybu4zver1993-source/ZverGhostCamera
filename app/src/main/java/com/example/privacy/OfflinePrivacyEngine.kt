@@ -63,6 +63,12 @@ object OfflinePrivacyEngine {
         val extractedText: String
     )
 
+    data class OsintTextHit(
+        val region: NormalizedRegion,
+        val matchedLabels: List<String>,
+        val riskWeight: Int
+    )
+
     fun moveRegionClamped(rect: RectF, dxNorm: Float, dyNorm: Float): RectF {
         val w = absRectWidth(rect).coerceIn(0.02f, 1f)
         val h = absRectHeight(rect).coerceIn(0.02f, 1f)
@@ -130,7 +136,7 @@ object OfflinePrivacyEngine {
                 }
         }
 
-    suspend fun detectTextOffline(bitmap: Bitmap): Pair<List<NormalizedRegion>, String> =
+    suspend fun detectTextWithContentOffline(bitmap: Bitmap): Pair<List<Pair<NormalizedRegion, String>>, String> =
         suspendCancellableCoroutine { cont ->
             val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
             val input = InputImage.fromBitmap(bitmap, 0)
@@ -139,9 +145,9 @@ object OfflinePrivacyEngine {
 
             recognizer.process(input)
                 .addOnSuccessListener { visionText ->
-                    val blocks = visionText.textBlocks.mapIndexedNotNull { idx, block ->
+                    val entries = visionText.textBlocks.mapIndexedNotNull { idx, block ->
                         val b = block.boundingBox ?: return@mapIndexedNotNull null
-                        NormalizedRegion(
+                        val region = NormalizedRegion(
                             id = "txt_$idx",
                             rect = RectF(
                                 (b.left / w).coerceIn(0f, 1f),
@@ -151,15 +157,21 @@ object OfflinePrivacyEngine {
                             ),
                             kind = RegionKind.TEXT
                         )
+                        region to block.text
                     }
                     recognizer.close()
-                    if (cont.isActive) cont.resume(Pair(blocks, visionText.text))
+                    if (cont.isActive) cont.resume(Pair(entries, visionText.text))
                 }
                 .addOnFailureListener {
                     recognizer.close()
                     if (cont.isActive) cont.resume(Pair(emptyList(), ""))
                 }
         }
+
+    suspend fun detectTextOffline(bitmap: Bitmap): Pair<List<NormalizedRegion>, String> {
+        val (entries, raw) = detectTextWithContentOffline(bitmap)
+        return Pair(entries.map { it.first }, raw)
+    }
 
     suspend fun analyzeFullOffline(bitmap: Bitmap): DetectionResult {
         val faces = detectFacesOffline(bitmap)
@@ -196,6 +208,47 @@ object OfflinePrivacyEngine {
             alt = !alt
         }
         return sum % 10 == 0
+    }
+
+    fun classifySensitiveText(text: String): List<String> {
+        if (text.isBlank()) return emptyList()
+        val matched = mutableListOf<String>()
+        if (SECRET_KEY_REGEX.containsMatchIn(text)) matched.add("Секрет/пароль")
+        val hasValidCard = CARD_CANDIDATE_REGEX.findAll(text).any { m ->
+            passesLuhn(m.value.filter { it.isDigit() })
+        }
+        if (hasValidCard) matched.add("Карта (Luhn)")
+        if (PLATE_REGEX.containsMatchIn(text)) matched.add("Госномер")
+        if (PHONE_REGEX.containsMatchIn(text)) matched.add("Телефон")
+        if (COORD_REGEX.containsMatchIn(text)) matched.add("Координаты")
+        if (EMAIL_REGEX.containsMatchIn(text)) matched.add("E-mail")
+        return matched
+    }
+
+    fun analyzeSensitiveOsintBlocksFromEntries(
+        entries: List<Pair<NormalizedRegion, String>>
+    ): List<OsintTextHit> {
+        return entries.mapNotNull { (region, text) ->
+            val labels = classifySensitiveText(text)
+            if (labels.isEmpty()) {
+                null
+            } else {
+                val weight = labels.sumOf { label ->
+                    when (label) {
+                        "Секрет/пароль" -> 45
+                        "Карта (Luhn)" -> 40
+                        "Госномер" -> 35
+                        "Телефон" -> 25
+                        else -> 20
+                    }
+                }.coerceAtMost(100)
+                OsintTextHit(
+                    region = region,
+                    matchedLabels = labels,
+                    riskWeight = weight
+                )
+            }
+        }
     }
 
     fun assessOsintRisks(detection: DetectionResult): OsintRiskReport {

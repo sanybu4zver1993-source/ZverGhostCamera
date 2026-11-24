@@ -1,5 +1,9 @@
 package com.example.security
 
+import android.content.Context
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 /**
@@ -65,9 +69,23 @@ object SentinelEngine {
 
     fun getConfig(): SentinelConfig = synchronized(lock) { config }
 
+    fun loadPersistedConfig(context: Context): SentinelConfig = synchronized(lock) {
+        config = ZverPrefs.loadSentinelConfig(context)
+        config
+    }
+
     fun updateConfig(transform: (SentinelConfig) -> SentinelConfig): SentinelConfig = synchronized(lock) {
         config = transform(config)
         config
+    }
+
+    fun updateAndPersistConfig(
+        context: Context,
+        transform: (SentinelConfig) -> SentinelConfig
+    ): SentinelConfig {
+        val next = updateConfig(transform)
+        ZverPrefs.saveSentinelConfig(context, next)
+        return next
     }
 
     fun isArmed(): Boolean = synchronized(lock) { armed }
@@ -93,6 +111,30 @@ object SentinelEngine {
     fun logEvent(kind: EventKind, message: String, facesCount: Int = 0, nowMs: Long = System.currentTimeMillis()) {
         synchronized(lock) {
             addEventLocked(kind, message, nowMs, facesCount)
+        }
+    }
+
+    fun clearEvents() {
+        synchronized(lock) {
+            events.clear()
+        }
+    }
+
+    fun buildReportText(): String {
+        val snapshot = getEvents()
+        val cfg = getConfig()
+        val armedNow = isArmed()
+        val fmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        return buildString {
+            appendLine("=== ZVER SENTINEL LOG ===")
+            appendLine("Статус: ${if (armedNow) "НА ПОСТУ" else "ОЖИДАНИЕ"} | Порог=${cfg.lingerThresholdSec}с | Стук=${cfg.knockTriggerEnabled} | НочьCLAHE=${cfg.autoNightClaheEnabled}")
+            if (snapshot.isEmpty()) {
+                appendLine("Событий нет")
+            } else {
+                snapshot.forEach { ev ->
+                    appendLine("${fmt.format(Date(ev.timestampMs))} [${ev.kind.tagRu}] ${ev.message}")
+                }
+            }
         }
     }
 

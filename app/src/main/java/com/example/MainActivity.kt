@@ -155,11 +155,14 @@ class MainActivity : ComponentActivity() {
             isScreenBeingRecorded.value = false
         }
         try {
-            if (ZverPrefs.isAutoLockOnBackground(this)) {
+            if (!isChangingConfigurations && ZverPrefs.isAutoLockOnBackground(this)) {
                 GhostCryptoVault.lockSession()
                 ByokManager.clearSessionMemory()
                 SentinelEngine.clearSession()
                 com.example.security.SecureClipboard.clearIfOwned(this)
+                if (CamouflageManager.getCurrentCamouflage(this) == CamouflageManager.CamouflageMode.CALCULATOR) {
+                    onLockGateTrigger?.invoke()
+                }
             }
         } catch (_: Throwable) {}
     }

@@ -553,6 +553,16 @@ object GhostCryptoVault {
         return targetFile
     }
 
+    /**
+     * Writes plaintext bytes exclusively into a standard .GCF file in the active Vault profile
+     * without re-appending to MonoVault (used when restoring a Monolith record into .GCF).
+     */
+    fun writeDecryptedBytesToGcfCopy(context: Context, plainBytes: ByteArray, prefix: String = MEDIA_PHOTO): File {
+        return writeEncryptedAtomically(context, prefix) { stream ->
+            stream.write(plainBytes)
+        }
+    }
+
     fun isGcf2File(file: File): Boolean {
         if (!file.exists() || file.length() < GcfChunkedCodec.HEADER_SIZE) return false
         return try {

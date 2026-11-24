@@ -198,9 +198,10 @@ fun GhostCameraScreen(
 
     // Sentinel v5.0 ("КИБЕР-ДОЗОР") States
     var sentinelArmed by remember { mutableStateOf(SentinelEngine.isArmed()) }
-    var sentinelConfig by remember { mutableStateOf(SentinelEngine.getConfig()) }
+    var sentinelConfig by remember { mutableStateOf(SentinelEngine.loadPersistedConfig(context)) }
     var sentinelEvents by remember { mutableStateOf(SentinelEngine.getEvents()) }
     var sentinelJobActive by remember { mutableStateOf(false) }
+    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
 
     // CyberVisorEngine ("БИО-ВИЗОР / КИБЕР-СКАНЕР") + Dual-Output OpenGL ES 3.0 Renderer
     val cyberVisorEngine = remember { CyberVisorEngine() }
@@ -1641,15 +1642,24 @@ fun GhostCameraScreen(
                 )
                 val plane = imageProxy.planes[0]
 
+                var nextLaplacian: Double? = null
+                var nextExpoTelemetry: AntiBlurSensorEngine.LiveExposureTelemetry? = null
+                var clearZebra = false
+                var nextPeakingPoints: List<Offset>? = null
+                var clearPeaking = false
+                var nextMotion: AntiBlurSensorEngine.MotionTelemetry? = null
+                var nextSentinelStepLabel: String? = null
+                var nextGpuVisorTel: com.example.visor.VisorTelemetry? = null
+                var nextCpuVisorState: Triple<android.graphics.Bitmap, com.example.visor.VisorTelemetry, Long>? = null
+
                 if (plan.runSharpnessAndExpo) {
-                    val variance = antiBlurEngine.calculateCenterRoiLaplacianVariance(
+                    nextLaplacian = antiBlurEngine.calculateCenterRoiLaplacianVariance(
                         yBuffer = plane.buffer,
                         width = imageProxy.width,
                         height = imageProxy.height,
                         rowStride = plane.rowStride,
                         targetRoiSize = 400
                     )
-                    telemetry.liveLaplacianVariance = variance
 
                     if (analyzerFlags.useGpuShader &&
                         (analyzerFlags.visorMode == VisorMode.THERMAL_LUT || analyzerFlags.visorMode == VisorMode.NIGHT_GAMMA)
@@ -1665,7 +1675,7 @@ fun GhostCameraScreen(
                     }
 
                     if (needExpo) {
-                        val expoTelemetry = antiBlurEngine.computeHistogramAndZebra(
+                        nextExpoTelemetry = antiBlurEngine.computeHistogramAndZebra(
                             yBuffer = plane.buffer,
                             width = imageProxy.width,
                             height = imageProxy.height,
@@ -1674,24 +1684,13 @@ fun GhostCameraScreen(
                             zebraThreshold = analyzerFlags.zebraThreshold,
                             collectZebra = analyzerFlags.zebraEnabled && !analyzerFlags.useGpuShader
                         )
-                        telemetry.overexposedPercent = expoTelemetry.overexposedPct
-                        telemetry.underexposedPercent = expoTelemetry.underexposedPct
-                        if (analyzerFlags.histogramEnabled) {
-                            telemetry.liveHistogramBins32 = expoTelemetry.bins32
-                            telemetry.liveMeanLuma = expoTelemetry.meanLuma
-                        }
-                        if (analyzerFlags.zebraEnabled && !analyzerFlags.useGpuShader) {
-                            telemetry.liveZebraPoints = expoTelemetry.zebraHotspots
-                        } else if (telemetry.liveZebraPoints.isNotEmpty()) {
-                            telemetry.liveZebraPoints = emptyList()
-                        }
                     } else if (telemetry.liveZebraPoints.isNotEmpty()) {
-                        telemetry.liveZebraPoints = emptyList()
+                        clearZebra = true
                     }
                 }
 
                 if (plan.runCpuPeaking) {
-                    telemetry.peakingPoints = antiBlurEngine.computeFocusPeakingPoints(
+                    nextPeakingPoints = antiBlurEngine.computeFocusPeakingPoints(
                         yBuffer = plane.buffer,
                         width = imageProxy.width,
                         height = imageProxy.height,
@@ -1699,7 +1698,7 @@ fun GhostCameraScreen(
                         rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     )
                 } else if ((!needPeaking || analyzerFlags.useGpuShader) && telemetry.peakingPoints.isNotEmpty()) {
-                    telemetry.peakingPoints = emptyList()
+                    clearPeaking = true
                 }
 
                 if (plan.runSentinel) {
@@ -1711,9 +1710,7 @@ fun GhostCameraScreen(
                         previousGrid = previousMotionGrid
                     )
                     previousMotionGrid = motion.grid
-                    telemetry.sentinelMotionScore = motion.motionScore
-                    telemetry.sentinelAvgLuma = motion.avgLuma
-                    telemetry.sentinelIsNight = motion.isLowLight
+                    nextMotion = motion
 
                     val sentinelRes = SentinelEngine.evaluateMotionFrame(
                         nowMs = nowMs,
@@ -1739,13 +1736,13 @@ fun GhostCameraScreen(
                         }
                         is SentinelEngine.SentinelStepResult.Tracking -> {
                             val thr = SentinelEngine.getConfig().lingerThresholdSec
-                            telemetry.sentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
+                            nextSentinelStepLabel = "ЦЕЛЬ: ${sentinelRes.elapsedMs / 1000}с / ${thr}с"
                         }
                         is SentinelEngine.SentinelStepResult.Cooldown -> {
-                            telemetry.sentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
+                            nextSentinelStepLabel = "ПАУЗА: ${sentinelRes.remainingSec}с"
                         }
                         SentinelEngine.SentinelStepResult.Idle -> {
-                            telemetry.sentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
+                            nextSentinelStepLabel = if (SentinelEngine.isArmed()) "ОХРАНА: ЧИСТО" else "ОЖИДАНИЕ"
                         }
                     }
                 } else if (!needSentinel) {
@@ -1772,7 +1769,7 @@ fun GhostCameraScreen(
                             )
                             if (tel != null && analysisScheduler.isGenerationCurrent(dispatchGen)) {
                                 glRenderer.poseWireframe = tel.poseWireframe
-                                telemetry.gpuVisorTelemetry = tel
+                                nextGpuVisorTel = tel
                             }
                         }
                     } else {
@@ -1787,8 +1784,47 @@ fun GhostCameraScreen(
                                 visorVideoRecorder.enqueueFrame(res.bitmap, wf)
                             }
                             val tick = visorTickCounter.incrementAndGet()
-                            telemetry.visorDisplayState = Triple(res.bitmap, res.telemetry, tick)
+                            nextCpuVisorState = Triple(res.bitmap, res.telemetry, tick)
                         }
+                    }
+                }
+
+                if (nextLaplacian != null || nextExpoTelemetry != null || clearZebra ||
+                    nextPeakingPoints != null || clearPeaking || nextMotion != null ||
+                    nextSentinelStepLabel != null || nextGpuVisorTel != null || nextCpuVisorState != null
+                ) {
+                    val histFlag = analyzerFlags.histogramEnabled
+                    val zebraCpuFlag = analyzerFlags.zebraEnabled && !analyzerFlags.useGpuShader
+                    mainHandler.post {
+                        nextLaplacian?.let { telemetry.liveLaplacianVariance = it }
+                        nextExpoTelemetry?.let { expo ->
+                            telemetry.overexposedPercent = expo.overexposedPct
+                            telemetry.underexposedPercent = expo.underexposedPct
+                            if (histFlag) {
+                                telemetry.liveHistogramBins32 = expo.bins32
+                                telemetry.liveMeanLuma = expo.meanLuma
+                            }
+                            if (zebraCpuFlag) {
+                                telemetry.liveZebraPoints = expo.zebraHotspots
+                            } else if (telemetry.liveZebraPoints.isNotEmpty()) {
+                                telemetry.liveZebraPoints = emptyList()
+                            }
+                        }
+                        if (clearZebra && telemetry.liveZebraPoints.isNotEmpty()) {
+                            telemetry.liveZebraPoints = emptyList()
+                        }
+                        nextPeakingPoints?.let { telemetry.peakingPoints = it }
+                        if (clearPeaking && telemetry.peakingPoints.isNotEmpty()) {
+                            telemetry.peakingPoints = emptyList()
+                        }
+                        nextMotion?.let { m ->
+                            telemetry.sentinelMotionScore = m.motionScore
+                            telemetry.sentinelAvgLuma = m.avgLuma
+                            telemetry.sentinelIsNight = m.isLowLight
+                        }
+                        nextSentinelStepLabel?.let { telemetry.sentinelStepLabel = it }
+                        nextGpuVisorTel?.let { telemetry.gpuVisorTelemetry = it }
+                        nextCpuVisorState?.let { telemetry.visorDisplayState = it }
                     }
                 }
             } finally {
@@ -2314,21 +2350,28 @@ fun GhostCameraScreen(
                     4 -> 6
                     else -> 2
                 }
-                sentinelConfig = SentinelEngine.updateConfig { it.copy(lingerThresholdSec = nextSec) }
+                sentinelConfig = SentinelEngine.updateAndPersistConfig(context) { it.copy(lingerThresholdSec = nextSec) }
             },
             onToggleSentinelKnock = {
-                sentinelConfig = SentinelEngine.updateConfig { it.copy(knockTriggerEnabled = !it.knockTriggerEnabled) }
+                sentinelConfig = SentinelEngine.updateAndPersistConfig(context) { it.copy(knockTriggerEnabled = !it.knockTriggerEnabled) }
             },
             onToggleSentinelClaheNight = {
-                sentinelConfig = SentinelEngine.updateConfig { it.copy(autoNightClaheEnabled = !it.autoNightClaheEnabled) }
+                sentinelConfig = SentinelEngine.updateAndPersistConfig(context) { it.copy(autoNightClaheEnabled = !it.autoNightClaheEnabled) }
+            },
+            onToggleSentinelTwoStageCrop = {
+                sentinelConfig = SentinelEngine.updateAndPersistConfig(context) { it.copy(twoStageFaceCropEnabled = !it.twoStageFaceCropEnabled) }
             },
             onToggleSentinelAiTriage = {
                 if (!hasByokKey) {
                     vikaSheetInitialTab = VikaSheetTab.KEYS_MODELS
                     showVikaSheet = true
                 } else {
-                    sentinelConfig = SentinelEngine.updateConfig { it.copy(aiTriageEnabled = !it.aiTriageEnabled) }
+                    sentinelConfig = SentinelEngine.updateAndPersistConfig(context) { it.copy(aiTriageEnabled = !it.aiTriageEnabled) }
                 }
+            },
+            onClearSentinelEvents = {
+                SentinelEngine.clearEvents()
+                sentinelEvents = SentinelEngine.getEvents()
             },
             onStealthGuard = {
                 if (selectedCameraMode != "STEALTH") previousCameraMode = "SENTINEL"

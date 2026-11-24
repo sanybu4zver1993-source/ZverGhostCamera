@@ -8,6 +8,7 @@ import android.net.Uri
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -117,6 +118,7 @@ fun GhostVaultDialog(
     var filterType by remember { mutableStateOf(VaultIndexEngine.VaultFilterType.ALL) }
     var ramShots by remember { mutableStateOf(GhostCryptoVault.listRamShots()) }
     var monoRecords by remember { mutableStateOf(emptyList<MonoVaultEngine.StoredRecord>()) }
+    var monoStats by remember { mutableStateOf<MonoVaultEngine.ZoneStats?>(null) }
 
     var selectedFile by remember { mutableStateOf<File?>(null) }
     var selectedRamId by remember { mutableStateOf<String?>(null) }
@@ -184,7 +186,7 @@ fun GhostVaultDialog(
 
     fun refreshFiles() {
         scope.launch {
-            val (files, idxMap, ram, monoPurged) = withContext(Dispatchers.IO) {
+            val (files, idxMap, ram, monoTuple) = withContext(Dispatchers.IO) {
                 val prof = GhostCryptoVault.activeProfile
                 val purged = VaultIndexEngine.purgeExpiredFiles(context, prof)
                 val f = GhostCryptoVault.listVaultFiles(context, prof)
@@ -196,7 +198,8 @@ fun GhostVaultDialog(
                     MonoVaultEngine.VolumeType.DECOY
                 }
                 val m = MonoVaultEngine.listRecords(context, vol)
-                listOf(f, idx, r, Pair(m, purged))
+                val mStats = MonoVaultEngine.getZoneStats(context, vol)
+                listOf(f, idx, r, Triple(m, purged, mStats))
             }
             @Suppress("UNCHECKED_CAST")
             vaultFiles = files as List<File>
@@ -205,10 +208,11 @@ fun GhostVaultDialog(
             @Suppress("UNCHECKED_CAST")
             ramShots = ram as List<GhostCryptoVault.RamShot>
             @Suppress("UNCHECKED_CAST")
-            val pair = monoPurged as Pair<List<MonoVaultEngine.StoredRecord>, Int>
-            monoRecords = pair.first
-            if (pair.second > 0) {
-                statusMessage = "⏳ АВТО-ШРЕДЕР TTL: УНИЧТОЖЕНО ${pair.second} ФАЙЛ(ОВ)"
+            val triple = monoTuple as Triple<List<MonoVaultEngine.StoredRecord>, Int, MonoVaultEngine.ZoneStats>
+            monoRecords = triple.first
+            monoStats = triple.third
+            if (triple.second > 0) {
+                statusMessage = "⏳ АВТО-ШРЕДЕР TTL: УНИЧТОЖЕНО ${triple.second} ФАЙЛ(ОВ)"
             }
             onVaultUpdated()
         }
@@ -329,6 +333,19 @@ fun GhostVaultDialog(
             decorFitsSystemWindows = false
         )
     ) {
+        BackHandler(enabled = !isPinBusy && !isWiping) {
+            if (selectedFile != null || selectedRamId != null || selectedMonoId != null) {
+                cleanupPreviewMedia()
+                selectedFile = null
+                selectedRamId = null
+                selectedMonoId = null
+                selectedMonoSigValid = null
+            } else {
+                cleanupPreviewMedia()
+                GhostCryptoVault.lockSession()
+                onDismiss()
+            }
+        }
         val dialogView = LocalView.current
         DisposableEffect(Unit) {
             val dialogWindow = (dialogView.parent as? DialogWindowProvider)?.window
@@ -630,11 +647,14 @@ fun GhostVaultDialog(
                                 fontSize = 12.sp
                             )
                         }
-                        IconButton(onClick = {
-                            cleanupPreviewMedia()
-                            GhostCryptoVault.lockSession()
-                            onDismiss()
-                        }) {
+                        IconButton(
+                            onClick = {
+                                cleanupPreviewMedia()
+                                GhostCryptoVault.lockSession()
+                                onDismiss()
+                            },
+                            modifier = Modifier.size(48.dp).testTag("vault_close_btn")
+                        ) {
                             Icon(Icons.Default.Close, contentDescription = "Close", tint = CyberMuted)
                         }
                     }
@@ -901,6 +921,37 @@ fun GhostVaultDialog(
                                     Icon(Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(14.dp), tint = CyberGreen)
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("ОТПРАВИТЬ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
+                                }
+
+                                if (selectedMonoId != null && decryptedRawBytes != null) {
+                                    Button(
+                                        onClick = {
+                                            val raw = decryptedRawBytes ?: return@Button
+                                            scope.launch {
+                                                try {
+                                                    val copied = withContext(Dispatchers.IO) {
+                                                        GhostCryptoVault.writeDecryptedBytesToGcfCopy(
+                                                            context = context,
+                                                            plainBytes = raw,
+                                                            prefix = GhostCryptoVault.MEDIA_PHOTO
+                                                        )
+                                                    }
+                                                    statusMessage = "✅ ВОССТАНОВЛЕНО В .GCF: ${copied.name}"
+                                                    refreshFiles()
+                                                } catch (e: Exception) {
+                                                    statusMessage = "ОШИБКА ПЕРЕНОСА В .GCF: ${e.message}"
+                                                }
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CyberAmber.copy(alpha = 0.22f)),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("vault_mono_restore_btn")
+                                    ) {
+                                        Icon(Icons.Default.Restore, contentDescription = "В .GCF", modifier = Modifier.size(14.dp), tint = CyberAmber)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("В .GCF", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberAmber)
+                                    }
                                 }
 
                                 if (selectedMonoId == null) {
@@ -1209,6 +1260,41 @@ fun GhostVaultDialog(
                                     ) {
                                         Text("READ-ONLY ДИАГНОСТИКА КЛЮЧА", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
                                     }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    OutlinedButton(
+                                        onClick = {
+                                            isRunningVaultDiag = true
+                                            scope.launch {
+                                                try {
+                                                    val (usedKind, copyFile) = withContext(Dispatchers.IO) {
+                                                        val prefix = if (GhostCryptoVault.isVideoFile(failedFile)) GhostCryptoVault.MEDIA_VIDEO else GhostCryptoVault.MEDIA_PHOTO
+                                                        val dest = File(
+                                                            GhostCryptoVault.activeProfile.getDirectory(context),
+                                                            "${prefix}_rec_${System.currentTimeMillis()}.gcf"
+                                                        )
+                                                        val kind = GhostCryptoVault.recoverGcfFileToCopy(
+                                                            context = context,
+                                                            sourceEncryptedFile = failedFile,
+                                                            outputCopyFile = dest,
+                                                            reencryptTargetKey = GhostCryptoVault.getActiveVaultKey(context)
+                                                        )
+                                                        kind to dest
+                                                    }
+                                                    statusMessage = "✅ КОПИЯ ВОССТАНОВЛЕНА (${usedKind.labelRu}) -> ${copyFile.name}"
+                                                    refreshFiles()
+                                                } catch (e: Exception) {
+                                                    statusMessage = "ВОССТАНОВЛЕНИЕ НЕУДАЧНО: ${e.message}"
+                                                } finally {
+                                                    isRunningVaultDiag = false
+                                                }
+                                            }
+                                        },
+                                        enabled = !isRunningVaultDiag,
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier.testTag("vault_recover_copy_btn")
+                                    ) {
+                                        Text("ВОССТАНОВИТЬ КОПИЮ (НОВЫЙ .GCF)", color = CyberGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    }
                                 }
                             }
 
@@ -1232,6 +1318,34 @@ fun GhostVaultDialog(
                             )
                         }
                     } else if (activeTab == VaultTab.MONOLITH) {
+                        monoStats?.let { st ->
+                            val usedKb = st.totalPayloadBytes / 1024L
+                            val capMb = st.zoneCapacityBytes / (1024L * 1024L)
+                            val fileMb = st.containerFileBytes / (1024L * 1024L)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                                    .background(CyberSurface, RoundedCornerShape(6.dp))
+                                    .border(1.dp, CyberAmber.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("vault_mono_stats_banner")
+                            ) {
+                                Text(
+                                    text = "ЗОНА ${st.volume.name} • ЗАПИСЕЙ: ${st.recordCount} • ДАННЫЕ: $usedKb КБ / $capMb МБ",
+                                    color = CyberAmber,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
+                                Text(
+                                    text = "Контейнер storage_block.bin: ${if (st.containerExists) "${fileMb} МБ • AAD+ECDSA" else "не создан"}",
+                                    color = CyberMuted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
                         if (monoRecords.isEmpty()) {
                             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 Text(

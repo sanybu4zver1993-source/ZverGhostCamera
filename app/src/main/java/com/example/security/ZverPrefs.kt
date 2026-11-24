@@ -38,6 +38,13 @@ object ZverPrefs {
     private const val KEY_GYRO_EIS_ENABLED = "gyro_eis_lite_enabled"
     private const val KEY_TIMELAPSE_INTERVAL_MS = "timelapse_interval_ms"
     private const val KEY_LAST_CRASH_BREADCRUMB = "last_crash_breadcrumb"
+    private const val KEY_SENTINEL_LINGER_SEC = "sentinel_linger_sec"
+    private const val KEY_SENTINEL_COOLDOWN_SEC = "sentinel_cooldown_sec"
+    private const val KEY_SENTINEL_MOTION_PCT = "sentinel_motion_pct"
+    private const val KEY_SENTINEL_KNOCK = "sentinel_knock_enabled"
+    private const val KEY_SENTINEL_NIGHT_CLAHE = "sentinel_night_clahe"
+    private const val KEY_SENTINEL_AI_TRIAGE = "sentinel_ai_triage"
+    private const val KEY_SENTINEL_TWO_STAGE_CROP = "sentinel_two_stage_crop"
 
     enum class VolumeKeyAction(val labelRu: String) {
         SHUTTER_OR_VIDEO("Кадр / Видео"),
@@ -353,5 +360,31 @@ object ZverPrefs {
                 .remove(KEY_LAST_CRASH_BREADCRUMB)
                 .apply()
         } catch (_: Throwable) {}
+    }
+
+    fun loadSentinelConfig(context: Context): SentinelEngine.SentinelConfig {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return SentinelEngine.SentinelConfig(
+            lingerThresholdSec = prefs.getInt(KEY_SENTINEL_LINGER_SEC, 4).coerceIn(1, 15),
+            cooldownSec = prefs.getInt(KEY_SENTINEL_COOLDOWN_SEC, 25).coerceIn(5, 120),
+            motionPercentThreshold = prefs.getInt(KEY_SENTINEL_MOTION_PCT, 8).coerceIn(2, 40),
+            knockTriggerEnabled = prefs.getBoolean(KEY_SENTINEL_KNOCK, true),
+            autoNightClaheEnabled = prefs.getBoolean(KEY_SENTINEL_NIGHT_CLAHE, true),
+            aiTriageEnabled = prefs.getBoolean(KEY_SENTINEL_AI_TRIAGE, false),
+            twoStageFaceCropEnabled = prefs.getBoolean(KEY_SENTINEL_TWO_STAGE_CROP, true)
+        )
+    }
+
+    fun saveSentinelConfig(context: Context, config: SentinelEngine.SentinelConfig) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_SENTINEL_LINGER_SEC, config.lingerThresholdSec.coerceIn(1, 15))
+            .putInt(KEY_SENTINEL_COOLDOWN_SEC, config.cooldownSec.coerceIn(5, 120))
+            .putInt(KEY_SENTINEL_MOTION_PCT, config.motionPercentThreshold.coerceIn(2, 40))
+            .putBoolean(KEY_SENTINEL_KNOCK, config.knockTriggerEnabled)
+            .putBoolean(KEY_SENTINEL_NIGHT_CLAHE, config.autoNightClaheEnabled)
+            .putBoolean(KEY_SENTINEL_AI_TRIAGE, config.aiTriageEnabled)
+            .putBoolean(KEY_SENTINEL_TWO_STAGE_CROP, config.twoStageFaceCropEnabled)
+            .apply()
     }
 }

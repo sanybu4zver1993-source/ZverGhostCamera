@@ -13,6 +13,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -106,11 +108,11 @@ fun DecoyCalculatorScreen(
 
     fun pressEquals() {
         if (isUnlocking) return
-        // Check stealth PIN trigger ONLY when user hasn't started an arithmetic expression
+        // Check stealth PIN trigger ONLY when user hasn't started an arithmetic expression,
+        // without exposing any "checking..." UI state to an onlooker.
         if (pendingOp == null && firstOperand == null && display.all { it.isDigit() } && display.length in 4..8) {
             val candidate = display
             isUnlocking = true
-            historyLine = "Проверка..."
             scope.launch {
                 val unlocked = withContext(Dispatchers.Default) {
                     val configured = GhostCryptoVault.isConfigured(context)
@@ -124,10 +126,13 @@ fun DecoyCalculatorScreen(
                     }
                 }
                 isUnlocking = false
-                historyLine = ""
                 if (unlocked) {
+                    historyLine = ""
                     display = "0"
                     onUnlocked()
+                } else {
+                    historyLine = "$candidate ="
+                    resetOnNextDigit = true
                 }
             }
             return
@@ -222,12 +227,27 @@ fun DecoyCalculatorScreen(
                             else -> Color.White
                         }
 
+                        val a11yLabel = when (label) {
+                            "AC" -> "Сброс"
+                            "⌫" -> "Удалить символ"
+                            "%" -> "Процент"
+                            "÷" -> "Разделить"
+                            "×" -> "Умножить"
+                            "-" -> "Минус"
+                            "+" -> "Плюс"
+                            "±" -> "Смена знака"
+                            "=" -> "Равно"
+                            "." -> "Точка"
+                            else -> "Цифра $label"
+                        }
+
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .heightIn(min = 64.dp)
                                 .clip(CircleShape)
                                 .background(bg)
+                                .semantics { contentDescription = a11yLabel }
                                 .testTag("calc_btn_$label")
                                 .clickable {
                                     when (label) {

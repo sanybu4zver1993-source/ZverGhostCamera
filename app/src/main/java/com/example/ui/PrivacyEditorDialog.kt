@@ -203,6 +203,7 @@ fun PrivacyEditorDialog(
             decorFitsSystemWindows = false
         )
     ) {
+        BackHandler(onBack = onDismiss)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -224,7 +225,10 @@ fun PrivacyEditorDialog(
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp
                 )
-                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(48.dp).testTag("obscura_close_btn")
+                ) {
                     Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = EdMuted)
                 }
             }
@@ -265,6 +269,47 @@ fun PrivacyEditorDialog(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            isProcessing = true
+                            val (faces, sensitiveHits, rawText, allBlocks) = withContext(Dispatchers.Default) {
+                                val f = OfflinePrivacyEngine.detectFacesOffline(sourceBitmap)
+                                val (entries, raw) = OfflinePrivacyEngine.detectTextWithContentOffline(sourceBitmap)
+                                val hits = OfflinePrivacyEngine.analyzeSensitiveOsintBlocksFromEntries(entries)
+                                listOf(f, hits, raw, entries.map { it.first })
+                            }
+                            @Suppress("UNCHECKED_CAST")
+                            val foundFaces = faces as List<OfflinePrivacyEngine.NormalizedRegion>
+                            @Suppress("UNCHECKED_CAST")
+                            val osintHits = sensitiveHits as List<OfflinePrivacyEngine.OsintTextHit>
+                            @Suppress("UNCHECKED_CAST")
+                            val textRegions = allBlocks as List<OfflinePrivacyEngine.NormalizedRegion>
+                            val raw = rawText as String
+
+                            val existingIds = regions.map { it.id }.toSet()
+                            val toAdd = (foundFaces + osintHits.map { it.region }).filter { it.id !in existingIds }
+                            regions = regions + toAdd
+                            osintReport = OfflinePrivacyEngine.assessOsintRisks(
+                                OfflinePrivacyEngine.DetectionResult(
+                                    faces = foundFaces,
+                                    textBlocks = textRegions,
+                                    extractedText = raw
+                                )
+                            )
+                            isProcessing = false
+                            statusText = "Авто-OSINT: лиц ${foundFaces.size}, опасного текста ${osintHits.size}"
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = EdGreen.copy(alpha = 0.22f)),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("obscura_auto_osint_btn")
+                ) {
+                    Icon(Icons.Default.AutoFixHigh, contentDescription = "Авто-OSINT", tint = EdGreen, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("АВТО-OSINT", color = EdGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                }
+
                 Button(
                     onClick = {
                         scope.launch {
@@ -345,7 +390,8 @@ fun PrivacyEditorDialog(
                         statusText = if (invertMode) "ИНВЕРСИЯ: скрыт весь фон кроме выделенных зон" else "Обычный режим: скрываются только зоны"
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = if (invertMode) EdCyan else EdSurface),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("obscura_invert_btn")
                 ) {
                     Text(
                         if (invertMode) "ИНВЕРСИЯ: ВКЛ" else "ИНВЕРСИЯ",
@@ -362,7 +408,8 @@ fun PrivacyEditorDialog(
                         statusText = "Все рамки сброшены"
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdSurface),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("obscura_reset_btn")
                 ) {
                     Text("СБРОС (${regions.size})", color = EdRed, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }

@@ -66,6 +66,15 @@ object MonoVaultEngine {
         val signatureValid: Boolean
     )
 
+    data class ZoneStats(
+        val volume: VolumeType,
+        val recordCount: Int,
+        val totalPayloadBytes: Long,
+        val zoneCapacityBytes: Long,
+        val containerExists: Boolean,
+        val containerFileBytes: Long
+    )
+
     fun getContainerFile(context: Context): File {
         return File(context.filesDir, CONTAINER_NAME)
     }
@@ -416,10 +425,10 @@ object MonoVaultEngine {
         val file = getContainerFile(context)
         if (!file.exists()) return emptyList()
 
-        val key = getOrCreateKey(volume.keyAlias)
         val records = mutableListOf<StoredRecord>()
 
         try {
+            val key = getOrCreateKey(volume.keyAlias)
             RandomAccessFile(file, "r").use { raf ->
                 val zoneStart = volume.baseOffset
                 val zoneEnd = zoneStart + volume.maxSize
@@ -462,6 +471,21 @@ object MonoVaultEngine {
         } catch (_: Exception) {}
 
         return records.sortedByDescending { it.timestamp }
+    }
+
+    fun getZoneStats(context: Context, volume: VolumeType): ZoneStats {
+        val file = getContainerFile(context)
+        val exists = file.exists()
+        val fileLen = if (exists) file.length() else 0L
+        val recs = listRecords(context, volume)
+        return ZoneStats(
+            volume = volume,
+            recordCount = recs.size,
+            totalPayloadBytes = recs.sumOf { it.sizeBytes },
+            zoneCapacityBytes = volume.maxSize,
+            containerExists = exists,
+            containerFileBytes = fileLen
+        )
     }
 
     /**

@@ -233,6 +233,27 @@ object SelfTestEngine {
             detail = "TLS 1.3/1.2 Restricted + RamCache=0 + No-PII Headers"
         )
 
+        // 8. Anti-Forensics / Runtime Integrity
+        val secStatus = AntiForensicsGuard.assessDeviceSecurity(context)
+        val antiStatus = when {
+            secStatus.isDebuggerAttached -> CheckStatus.FAIL
+            secStatus.isRooted || secStatus.isTestKeys -> CheckStatus.WARN
+            else -> CheckStatus.PASS
+        }
+        val antiSummary = when {
+            secStatus.isDebuggerAttached -> "Обнаружен отладчик (Debugger подключён)"
+            secStatus.isRooted -> "Обнаружен Root / su (повышенный риск ОЗУ)"
+            secStatus.isTestKeys -> "Сборка test-keys / эмулятор"
+            else -> "Чистая среда: без отладчика и root"
+        }
+        items += SelfTestItem(
+            id = "anti_forensics",
+            title = "Анти-Форензика & Целостность",
+            status = antiStatus,
+            summary = antiSummary,
+            detail = "Debugger=${secStatus.isDebuggerAttached}, Root=${secStatus.isRooted}, TestKeys=${secStatus.isTestKeys}"
+        )
+
         val passCount = items.count { it.status == CheckStatus.PASS }
         val warnCount = items.count { it.status == CheckStatus.WARN }
         val failCount = items.count { it.status == CheckStatus.FAIL }

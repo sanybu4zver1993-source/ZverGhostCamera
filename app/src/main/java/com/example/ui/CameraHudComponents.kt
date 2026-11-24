@@ -1032,7 +1032,9 @@ internal fun CameraBottomControlDeck(
     onCycleSentinelLinger: () -> Unit,
     onToggleSentinelKnock: () -> Unit,
     onToggleSentinelClaheNight: () -> Unit,
+    onToggleSentinelTwoStageCrop: () -> Unit,
     onToggleSentinelAiTriage: () -> Unit,
+    onClearSentinelEvents: () -> Unit,
     onStealthGuard: () -> Unit,
     onSelectVisorMode: (VisorMode) -> Unit,
     onSavePulseMetrics: (Int, Int?) -> Unit,
@@ -1083,7 +1085,9 @@ internal fun CameraBottomControlDeck(
                 onCycleLinger = onCycleSentinelLinger,
                 onToggleKnock = onToggleSentinelKnock,
                 onToggleClaheNight = onToggleSentinelClaheNight,
+                onToggleTwoStageCrop = onToggleSentinelTwoStageCrop,
                 onToggleAiTriage = onToggleSentinelAiTriage,
+                onClearEvents = onClearSentinelEvents,
                 onStealthGuard = onStealthGuard
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -1541,7 +1545,9 @@ private fun SentinelControlCardLeaf(
     onCycleLinger: () -> Unit,
     onToggleKnock: () -> Unit,
     onToggleClaheNight: () -> Unit,
+    onToggleTwoStageCrop: () -> Unit,
     onToggleAiTriage: () -> Unit,
+    onClearEvents: () -> Unit,
     onStealthGuard: () -> Unit
 ) {
     SentinelControlCard(
@@ -1557,7 +1563,9 @@ private fun SentinelControlCardLeaf(
         onCycleLinger = onCycleLinger,
         onToggleKnock = onToggleKnock,
         onToggleClaheNight = onToggleClaheNight,
+        onToggleTwoStageCrop = onToggleTwoStageCrop,
         onToggleAiTriage = onToggleAiTriage,
+        onClearEvents = onClearEvents,
         onStealthGuard = onStealthGuard
     )
 }
@@ -1576,9 +1584,13 @@ internal fun SentinelControlCard(
     onCycleLinger: () -> Unit,
     onToggleKnock: () -> Unit,
     onToggleClaheNight: () -> Unit,
+    onToggleTwoStageCrop: () -> Unit = {},
     onToggleAiTriage: () -> Unit,
+    onClearEvents: () -> Unit = {},
     onStealthGuard: () -> Unit
 ) {
+    var showAllEvents by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1629,22 +1641,55 @@ internal fun SentinelControlCard(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            SentinelChip("Фильтр ${config.lingerThresholdSec}с", active = true, accent = NeonYellow, onClick = onCycleLinger)
-            SentinelChip("Стук", active = config.knockTriggerEnabled, accent = CyberGreen, onClick = onToggleKnock)
-            SentinelChip("CLAHE Ночь", active = config.autoNightClaheEnabled, accent = NeonCyan, onClick = onToggleClaheNight)
+            SentinelChip(
+                label = "Фильтр ${config.lingerThresholdSec}с",
+                active = true,
+                accent = NeonYellow,
+                modifier = Modifier.testTag("sentinel_linger_chip"),
+                onClick = onCycleLinger
+            )
+            SentinelChip(
+                label = "Стук",
+                active = config.knockTriggerEnabled,
+                accent = CyberGreen,
+                modifier = Modifier.testTag("sentinel_knock_chip"),
+                onClick = onToggleKnock
+            )
+            SentinelChip(
+                label = "CLAHE Ночь",
+                active = config.autoNightClaheEnabled,
+                accent = NeonCyan,
+                modifier = Modifier.testTag("sentinel_clahe_chip"),
+                onClick = onToggleClaheNight
+            )
+            SentinelChip(
+                label = "2-Stage Кроп",
+                active = config.twoStageFaceCropEnabled,
+                accent = CyberGreen,
+                modifier = Modifier.testTag("sentinel_crop_chip"),
+                onClick = onToggleTwoStageCrop
+            )
             SentinelChip(
                 label = if (!hasByokKey) "ИИ (нет ключа)" else "ИИ-триаж",
                 active = config.aiTriageEnabled && hasByokKey,
                 accent = NeonCyan,
+                modifier = Modifier.testTag("sentinel_ai_chip"),
                 onClick = onToggleAiTriage
             )
-            SentinelChip("Стелс-пост", active = false, accent = CyberRed, onClick = onStealthGuard)
+            SentinelChip(
+                label = "Стелс-пост",
+                active = false,
+                accent = CyberRed,
+                modifier = Modifier.testTag("sentinel_stealth_chip"),
+                onClick = onStealthGuard
+            )
         }
 
         if (events.isNotEmpty()) {
             val timeFmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+            val visibleEvents = if (showAllEvents) events.take(8) else events.take(3)
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                events.take(3).forEach { ev ->
+                visibleEvents.forEach { ev ->
                     val col = when (ev.kind) {
                         SentinelEngine.EventKind.LINGER_ALARM, SentinelEngine.EventKind.KNOCK_ALARM -> CyberRed
                         SentinelEngine.EventKind.AI_VERDICT -> NeonCyan
@@ -1659,6 +1704,35 @@ internal fun SentinelControlCard(
                         maxLines = 2
                     )
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (events.size > 3) {
+                        Text(
+                            text = if (showAllEvents) "Свернуть лог" else "Весь лог (${events.size})",
+                            color = NeonCyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp,
+                            modifier = Modifier
+                                .clickable { showAllEvents = !showAllEvents }
+                                .padding(vertical = 2.dp)
+                                .testTag("sentinel_expand_log_btn")
+                        )
+                    }
+                    Text(
+                        text = "Очистить лог",
+                        color = CyberMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        modifier = Modifier
+                            .clickable(onClick = onClearEvents)
+                            .padding(vertical = 2.dp)
+                            .testTag("sentinel_clear_log_btn")
+                    )
+                }
             }
         }
     }
@@ -1669,6 +1743,7 @@ internal fun SentinelChip(
     label: String,
     active: Boolean,
     accent: Color,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     Text(
@@ -1677,7 +1752,7 @@ internal fun SentinelChip(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Bold,
         fontSize = 9.sp,
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(8.dp))
             .background(if (active) accent else CyberSurface)
             .border(1.dp, if (active) accent else CyberBorder, RoundedCornerShape(8.dp))
