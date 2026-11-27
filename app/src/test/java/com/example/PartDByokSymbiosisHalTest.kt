@@ -177,12 +177,12 @@ class PartDByokSymbiosisHalTest {
         assertEquals("Every offline intent domain must produce a distinct answer", replies.size, replies.distinct().size)
         assertTrue(replies[0].contains("ДОЗОР"))
         assertTrue(replies[1].contains("zver://sentinel"))
-        assertTrue(replies[2].contains("KeyStore"))
+        assertTrue(replies[2].contains("Ключ в хранилище"))
         assertTrue(replies[3].contains("МОНОЛИТ"))
-        assertTrue(replies[4].contains("HAL="))
-        assertTrue(replies[5].contains("Duress-PIN"))
+        assertTrue(replies[4].contains("уровень="))
+        assertTrue(replies[5].contains("Тревожный код"))
         assertTrue(replies[6].contains("АУДИТ"))
-        assertTrue(replies[7].contains("OCR_TEXT"))
+        assertTrue(replies[7].contains("Чтение текста"))
 
         val mockReport = LocalSymbiosisCvEngine.SymbiosisReport(
             faces = emptyList(),

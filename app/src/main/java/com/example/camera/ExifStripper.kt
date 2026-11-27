@@ -277,7 +277,8 @@ object ExifStripper {
         normalizedRect: android.graphics.RectF,
         paddingRatio: Float = 0.40f,
         applyAntiGlare: Boolean = true,
-        maxCropDim: Int = 640
+        maxCropDim: Int = 640,
+        qualityOverride: Int = 82
     ): CleanBitmapResult? {
         val w = sourceBitmap.width
         val h = sourceBitmap.height
@@ -314,7 +315,8 @@ object ExifStripper {
                 recycleSource = true,
                 preset = CompressionPreset.ULTRA_TINY,
                 antiPrnu = false,
-                applyDehaze = applyAntiGlare
+                applyDehaze = applyAntiGlare,
+                qualityOverride = qualityOverride
             )
         } finally {
             if (!crop.isRecycled) crop.recycle()

@@ -844,7 +844,8 @@ class CaptureManager(
                             sourceBitmap = if (applyClahe) ExifStripper.applyContrastDehaze(baseForFull) else baseForFull,
                             recycleSource = false,
                             preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                            antiPrnu = false
+                            antiPrnu = false,
+                            qualityOverride = 82
                         )
                         fullBytesOut = procFull.cleanBytes
                         fullMimeOut = if (procFull.isWebP) "image/webp" else "image/jpeg"
@@ -864,7 +865,8 @@ class CaptureManager(
                                     normalizedRect = roi,
                                     paddingRatio = 0.40f,
                                     applyAntiGlare = true,
-                                    maxCropDim = 640
+                                    maxCropDim = 768,
+                                    qualityOverride = 84
                                 )
                                 if (cropRes != null) {
                                     cropBytes = cropRes.cleanBytes
@@ -877,7 +879,7 @@ class CaptureManager(
                             rawJpeg = rawShot.bytes,
                             rotationDegrees = rawShot.rotationDegrees,
                             applyDehaze = applyClahe,
-                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                            preset = ExifStripper.CompressionPreset.BALANCED,
                             antiPrnu = false
                         )
                         fullBytesOut = processedFull.cleanJpegBytes
@@ -889,7 +891,7 @@ class CaptureManager(
                         rawJpeg = rawShot.bytes,
                         rotationDegrees = rawShot.rotationDegrees,
                         applyDehaze = applyClahe,
-                        preset = ExifStripper.CompressionPreset.ULTRA_TINY,
+                        preset = ExifStripper.CompressionPreset.BALANCED,
                         antiPrnu = false
                     )
                     fullBytesOut = processedFull.cleanJpegBytes

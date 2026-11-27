@@ -322,15 +322,15 @@ class Stage1PartAAndByokTest {
         assertNotEquals(ocrOut, osintOut)
         assertNotEquals(osintOut, dozorOut)
         assertNotEquals(dozorOut, opticsOut)
-        assertTrue(ocrOut.contains("OCR ЭКСТРАКТОР") && ocrOut.contains("Чек #4812"))
-        assertTrue(osintOut.contains("OSINT-ПАЛЕВО"))
+        assertTrue(ocrOut.contains("ЧТЕНИЕ ТЕКСТА") && ocrOut.contains("Чек #4812"))
+        assertTrue(osintOut.contains("ПОИСК УТЕЧЕК"))
         assertTrue(dozorOut.contains("КИБЕР-ДОЗОР"))
         assertTrue(opticsOut.contains("ОПТИКА И ФОРЕНЗИК"))
 
         val textTor = LocalSymbiosisCvEngine.buildOfflineTextOnlyReply(context, "Как работает канал через Tor и ключ?")
         val textZvb = LocalSymbiosisCvEngine.buildOfflineTextOnlyReply(context, "Как перенести бэкап .zvb на другой телефон?")
         assertNotEquals(textTor, textZvb)
-        assertTrue(textTor.contains("SOCKS5"))
+        assertTrue(textTor.contains("СОКС5"))
         assertTrue(textZvb.contains("GCF2"))
     }
 }

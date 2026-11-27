@@ -36,6 +36,7 @@ import com.example.camera.VideoKeyframeExtractor
 import com.example.privacy.LocalSymbiosisCvEngine
 import com.example.security.VaultAnalytics
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -225,21 +226,21 @@ fun VikaAiSheet(
 
             ByokManager.addChatEntry(
                 ByokManager.AiChatEntry(
-                    modelId = "6-NN ОФЛАЙН",
+                    modelId = "6 нейросетей офлайн",
                     userTask = userTask.ifBlank { "Анализ малипусиками" },
                     replyText = textOut,
                     hadImage = report != null,
                     latencyMs = System.currentTimeMillis() - t0,
                     totalTokens = 0,
                     isError = false,
-                    engineBadge = if (report != null) "⚡ МАЛИПУСИКИ 6-NN ОФЛАЙН" else "⚡ ВИКА ОФЛАЙН (0 БАЙТ)"
+                    engineBadge = if (report != null) "⚡ МАЛИПУСИКИ (ОФЛАЙН)" else "⚡ ВИКА ОФЛАЙН (0 БАЙТ)"
                 )
             )
             refreshTelemetryAsync()
         } catch (e: Exception) {
             ByokManager.addChatEntry(
                 ByokManager.AiChatEntry(
-                    modelId = "6-NN ОФЛАЙН",
+                    modelId = "6 нейросетей офлайн",
                     userTask = userTask,
                     replyText = "Ошибка локальных малипусиков: ${e.message}",
                     hadImage = false,
@@ -299,7 +300,7 @@ fun VikaAiSheet(
                     var mimeType = "image/webp"
                     val extraCrops = mutableListOf<Pair<ByteArray, String>>()
                     var dossierNote = ""
-                    var engineBadge = if (includeImage) "GEMINI ЧИСТЫЙ" else "GEMINI ТЕКСТ"
+                    var engineBadge = if (includeImage) "ОБЛАКО ЧИСТОЕ" else "ОБЛАКО ТЕКСТ"
                     var labelSuffix = ""
 
                     if (includeImage) {
@@ -334,7 +335,7 @@ fun VikaAiSheet(
                                 " (${vidPkg.durationSec}с, ${vidPkg.keyframes.size} ключевых кадров)"
                             }
                             dossierNote = "\n[ВИДЕО-АНАЛИЗ$trimNote]\n$cvDossier"
-                            engineBadge = "GEMINI + 🎬 ВИДЕО (${vidPkg.keyframes.size}к)"
+                            engineBadge = "ОБЛАКО + 🎬 ВИДЕО (${vidPkg.keyframes.size}к)"
                             labelSuffix = " (видео ${vidPkg.durationSec}с)"
                         } else if (externalBitmap != null) {
                             when (frameMode) {
@@ -343,13 +344,14 @@ fun VikaAiSheet(
                                         ExifStripper.processBitmapClean(
                                             sourceBitmap = externalBitmap,
                                             recycleSource = false,
-                                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                                            antiPrnu = false
+                                            preset = ExifStripper.CompressionPreset.BALANCED,
+                                            antiPrnu = false,
+                                            qualityOverride = 82
                                         )
                                     }
                                     imageBytes = proc.cleanBytes.also { allBuffers.add(it) }
                                     mimeType = if (proc.isWebP) "image/webp" else "image/jpeg"
-                                    engineBadge = "GEMINI ЧИСТЫЙ"
+                                    engineBadge = "ОБЛАКО ЧИСТОЕ"
                                 }
                                 AiFrameMode.BG_ISOLATE -> {
                                     val iso = withContext(Dispatchers.Default) {
@@ -360,8 +362,9 @@ fun VikaAiSheet(
                                         ExifStripper.processBitmapClean(
                                             sourceBitmap = iso.bitmap,
                                             recycleSource = false,
-                                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                                            antiPrnu = false
+                                            preset = ExifStripper.CompressionPreset.BALANCED,
+                                            antiPrnu = false,
+                                            qualityOverride = 82
                                         )
                                     }
                                     imageBytes = proc.cleanBytes.also { allBuffers.add(it) }
@@ -371,8 +374,8 @@ fun VikaAiSheet(
                                     }
                                     cachedLocalReport = report
                                     dossierNote = "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(report)}" +
-                                        if (iso.hasForegroundSubject) "\n[Фон размыт локально (SelfieSeg)]" else "\n[Человек не выделен, оставлен полный кадр]"
-                                    engineBadge = "GEMINI + ✂️ БЕЗ ФОНА"
+                                        if (iso.hasForegroundSubject) "\n[Фон размыт на устройстве]" else "\n[Человек не выделен, оставлен полный кадр]"
+                                    engineBadge = "ОБЛАКО + ✂️ БЕЗ ФОНА"
                                     labelSuffix = " (без фона)"
                                 }
                                 AiFrameMode.SYMBIOSIS_CROP -> {
@@ -380,8 +383,9 @@ fun VikaAiSheet(
                                         ExifStripper.processBitmapClean(
                                             sourceBitmap = externalBitmap,
                                             recycleSource = false,
-                                            preset = ExifStripper.CompressionPreset.ULTRA_TINY,
-                                            antiPrnu = false
+                                            preset = ExifStripper.CompressionPreset.BALANCED,
+                                            antiPrnu = false,
+                                            qualityOverride = 82
                                         )
                                     }
                                     imageBytes = proc.cleanBytes.also { allBuffers.add(it) }
@@ -399,7 +403,8 @@ fun VikaAiSheet(
                                                 normalizedRect = roi,
                                                 paddingRatio = 0.40f,
                                                 applyAntiGlare = true,
-                                                maxCropDim = 640
+                                                maxCropDim = 768,
+                                                qualityOverride = 84
                                             )
                                         }
                                         if (cropRes != null) {
@@ -410,7 +415,7 @@ fun VikaAiSheet(
                                             labelSuffix = " (+кроп: ${report.bestRoiKindLabel()})"
                                         }
                                     }
-                                    engineBadge = "GEMINI + 6-NN СИМБИОЗ"
+                                    engineBadge = "ОБЛАКО + 6-НН СИМБИОЗ"
                                 }
                                 AiFrameMode.TEXT_ONLY -> Unit
                             }
@@ -428,16 +433,20 @@ fun VikaAiSheet(
                                 "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}"
                             }.orEmpty()
                             engineBadge = when (frameMode) {
-                                AiFrameMode.FULL_ONLY -> "GEMINI ЧИСТЫЙ (ПРЕВЬЮ)"
-                                AiFrameMode.BG_ISOLATE -> "GEMINI + ✂️ БЕЗ ФОНА (ПРЕВЬЮ)"
-                                AiFrameMode.SYMBIOSIS_CROP -> "GEMINI + 6-NN СИМБИОЗ (ПРЕВЬЮ)"
-                                AiFrameMode.TEXT_ONLY -> "GEMINI ТЕКСТ"
+                                AiFrameMode.FULL_ONLY -> "ОБЛАКО ЧИСТОЕ (СНИМОК)"
+                                AiFrameMode.BG_ISOLATE -> "ОБЛАКО + ✂️ БЕЗ ФОНА (СНИМОК)"
+                                AiFrameMode.SYMBIOSIS_CROP -> "ОБЛАКО + 6-НН СИМБИОЗ (СНИМОК)"
+                                AiFrameMode.TEXT_ONLY -> "ОБЛАКО ТЕКСТ"
                             }
                             labelSuffix = stagedPreview.note
                         } else if (onCaptureTwoStageFrame != null && frameMode != AiFrameMode.TEXT_ONLY) {
                             val needCrop = frameMode == AiFrameMode.SYMBIOSIS_CROP
                             val needIso = frameMode == AiFrameMode.BG_ISOLATE
-                            val twoStage = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                            var twoStage = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                            if (twoStage == null) {
+                                delay(180)
+                                twoStage = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                            }
                             if (twoStage != null) {
                                 imageBytes = twoStage.fullBytes.also { allBuffers.add(it) }
                                 mimeType = twoStage.fullMimeType
@@ -447,16 +456,16 @@ fun VikaAiSheet(
                                 }
                                 cachedLocalReport = twoStage.symbiosisReport
                                 when (frameMode) {
-                                    AiFrameMode.FULL_ONLY -> engineBadge = "GEMINI ЧИСТЫЙ"
+                                    AiFrameMode.FULL_ONLY -> engineBadge = "ОБЛАКО ЧИСТОЕ"
                                     AiFrameMode.BG_ISOLATE -> {
-                                        engineBadge = "GEMINI + ✂️ БЕЗ ФОНА"
+                                        engineBadge = "ОБЛАКО + ✂️ БЕЗ ФОНА"
                                         labelSuffix = if (twoStage.backgroundIsolated) " (фон скрыт)" else ""
                                         dossierNote = twoStage.symbiosisReport?.let {
                                             "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}"
                                         }.orEmpty()
                                     }
                                     AiFrameMode.SYMBIOSIS_CROP -> {
-                                        engineBadge = "GEMINI + 6-NN СИМБИОЗ"
+                                        engineBadge = "ОБЛАКО + 6-НН СИМБИОЗ"
                                         dossierNote = twoStage.symbiosisReport?.let {
                                             "\n${LocalSymbiosisCvEngine.buildCompactGeminiDossier(it)}"
                                         }.orEmpty()
@@ -468,11 +477,33 @@ fun VikaAiSheet(
                                 }
                             }
                         } else if (onCaptureLiveFrame != null && frameMode != AiFrameMode.TEXT_ONLY) {
-                            val captured = onCaptureLiveFrame.invoke()
+                            var captured = onCaptureLiveFrame.invoke()
+                            if (captured == null) {
+                                delay(180)
+                                captured = onCaptureLiveFrame.invoke()
+                            }
                             if (captured != null) {
                                 imageBytes = captured.first.also { allBuffers.add(it) }
                                 mimeType = captured.second
                             }
+                        }
+
+                        if (frameMode != AiFrameMode.TEXT_ONLY && (imageBytes == null || imageBytes!!.isEmpty())) {
+                            ByokManager.addChatEntry(
+                                ByokManager.AiChatEntry(
+                                    modelId = selectedModel,
+                                    userTask = userTask,
+                                    replyText = "Кадр с камеры не захвачен — в сеть ничего не отправлено. Повтори запрос или сначала зафиксируй кадр кнопкой «📷 КАДР».",
+                                    hadImage = false,
+                                    latencyMs = 0L,
+                                    totalTokens = 0,
+                                    isError = true,
+                                    engineBadge = "НЕТ КАДРА"
+                                )
+                            )
+                            onStatusMessage("Кадр не захвачен — отправка отменена")
+                            refreshTelemetryAsync()
+                            return@launch
                         }
                     }
 
@@ -491,7 +522,14 @@ fun VikaAiSheet(
                     }
 
                     val turnsHistory = if (contextMemoryEnabled) {
-                        chatFeed.filter { !it.isError && it.replyText.isNotBlank() }
+                        chatFeed.filter {
+                            !it.isError &&
+                                it.replyText.isNotBlank() &&
+                                !it.engineBadge.contains("МАЛИПУСИКИ", ignoreCase = true) &&
+                                !it.engineBadge.contains("ОФЛАЙН", ignoreCase = true) &&
+                                !it.engineBadge.contains("СТАТИСТИКА", ignoreCase = true) &&
+                                !it.engineBadge.contains("НЕТ КАДРА", ignoreCase = true)
+                        }
                             .take(4)
                             .reversed()
                             .map { it.userTask to it.replyText }
@@ -527,7 +565,7 @@ fun VikaAiSheet(
                         if (GeminiByokClient.isQuotaOrNetworkFailure(msg)) {
                             runOfflineSymbiosisFallback(
                                 userTask = userTask,
-                                fallbackReason = "Gemini перегружен/недоступен: ${msg.take(45)}",
+                                fallbackReason = "Облако перегружено/недоступно: ${msg.take(45)}",
                                 includeImage = includeImage,
                                 precomputedReport = cachedLocalReport,
                                 systemOverride = systemOverride
@@ -569,7 +607,11 @@ fun VikaAiSheet(
                 if (onCaptureTwoStageFrame != null) {
                     val needCrop = frameMode == AiFrameMode.SYMBIOSIS_CROP
                     val needIso = frameMode == AiFrameMode.BG_ISOLATE
-                    val two = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                    var two = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                    if (two == null) {
+                        delay(180)
+                        two = onCaptureTwoStageFrame.invoke(needCrop, needIso)
+                    }
                     if (two != null) {
                         val bmp = withContext(Dispatchers.Default) {
                             BitmapFactory.decodeByteArray(two.fullBytes, 0, two.fullBytes.size)
@@ -586,7 +628,11 @@ fun VikaAiSheet(
                         )
                     }
                 } else if (onCaptureLiveFrame != null) {
-                    val cap = onCaptureLiveFrame.invoke()
+                    var cap = onCaptureLiveFrame.invoke()
+                    if (cap == null) {
+                        delay(180)
+                        cap = onCaptureLiveFrame.invoke()
+                    }
                     if (cap != null) {
                         val bmp = withContext(Dispatchers.Default) {
                             BitmapFactory.decodeByteArray(cap.first, 0, cap.first.size)
@@ -646,11 +692,13 @@ fun VikaAiSheet(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "ВИКА AI // BYOK & АНАЛИТИКА",
+                                text = "ВИКА ИИ // СВОЙ КЛЮЧ И РАЗБОР",
                                 color = Color.White,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                         Spacer(modifier = Modifier.height(2.dp))
@@ -659,7 +707,7 @@ fun VikaAiSheet(
                             color = if (hasKey) CyberCyan else CyberAmber,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -782,7 +830,7 @@ fun VikaAiSheet(
                                         }
                                         ByokManager.addChatEntry(
                                             ByokManager.AiChatEntry(
-                                                modelId = "ОФЛАЙН ТЕЛЕМЕТРИЯ",
+                                                modelId = "Локальная статистика",
                                                 userTask = "Аудит статистики сейфа и защиты (без сети/ключа)",
                                                 replyText = offlineSummary,
                                                 hadImage = false,

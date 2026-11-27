@@ -43,9 +43,9 @@ object GeminiByokClient {
             .connectionSpecs(listOf(ConnectionSpec.RESTRICTED_TLS, ConnectionSpec.MODERN_TLS))
             .followRedirects(false)
             .followSslRedirects(false)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(50, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
             .cache(null)
             .build()
     }
@@ -79,9 +79,9 @@ object GeminiByokClient {
             .followRedirects(false)
             .followSslRedirects(false)
             .proxy(proxy)
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(80, TimeUnit.SECONDS)
-            .writeTimeout(45, TimeUnit.SECONDS)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(45, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
             .cache(null)
             .build()
         cachedProxyKey = cacheId
@@ -244,7 +244,7 @@ object GeminiByokClient {
                         endpoint = "/v1beta/models?page=${pages + 1}",
                         httpCode = resp.code,
                         latencyMs = latency,
-                        detail = "raw=${modelsArr.length()}, generateContent=$pageAdded, nextPage=${nextToken != null}",
+                        detail = "всего=${modelsArr.length()}, текстовых=$pageAdded, след=${nextToken != null}",
                         secretKey = keyString
                     )
                     pageToken = if (nextToken != null && seenTokens.add(nextToken)) nextToken else null
@@ -328,6 +328,35 @@ object GeminiByokClient {
         return contents
     }
 
+    internal fun shouldUseFastThinkingCap(modelId: String): Boolean {
+        val low = modelId.lowercase()
+        if (low.contains("gemma") || low.contains("1.0") || low.contains("1.5")) return false
+        return low.contains("2.5") ||
+            low.contains("gemini-3") ||
+            low.contains("gemini-4") ||
+            low.contains("hydrogen") ||
+            low.contains("thinking")
+    }
+
+    internal fun buildGenerationConfig(
+        modelId: String,
+        allowThinkingConfig: Boolean = true
+    ): JSONObject {
+        return JSONObject().apply {
+            put("temperature", 0.35)
+            put("maxOutputTokens", 1200)
+            if (allowThinkingConfig && shouldUseFastThinkingCap(modelId)) {
+                val budget = if (modelId.lowercase().contains("pro")) 128 else 0
+                put(
+                    "thinkingConfig",
+                    JSONObject().apply {
+                        put("thinkingBudget", budget)
+                    }
+                )
+            }
+        }
+    }
+
     suspend fun generateContent(
         apiKeyChars: CharArray,
         modelId: String,
@@ -386,99 +415,116 @@ object GeminiByokClient {
             }
             parts.put(JSONObject().apply { put("text", userPrompt) })
 
-            val payload = JSONObject().apply {
-                if (systemPrompt.isNotBlank()) {
-                    put(
-                        "system_instruction",
-                        JSONObject().apply {
-                            put("parts", JSONArray().put(JSONObject().apply { put("text", systemPrompt) }))
-                        }
-                    )
-                }
-                put("contents", buildContentsJsonArray(parts, historyTurns))
-                put(
-                    "generationConfig",
-                    JSONObject().apply {
-                        put("temperature", 0.35)
-                        put("maxOutputTokens", 1200)
+            val contentsArr = buildContentsJsonArray(parts, historyTurns)
+            var useThinkingConfig = shouldUseFastThinkingCap(cleanModel)
+
+            for (attempt in 0..1) {
+                val payload = JSONObject().apply {
+                    if (systemPrompt.isNotBlank()) {
+                        put(
+                            "system_instruction",
+                            JSONObject().apply {
+                                put("parts", JSONArray().put(JSONObject().apply { put("text", systemPrompt) }))
+                            }
+                        )
                     }
-                )
-            }
+                    put("contents", contentsArr)
+                    put("generationConfig", buildGenerationConfig(cleanModel, allowThinkingConfig = useThinkingConfig))
+                }
 
-            val req = Request.Builder()
-                .url("$BASE_URL/models/$cleanModel:generateContent")
-                .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
-                .header("User-Agent", ANONYMOUS_USER_AGENT)
-                .addHeader("x-goog-api-key", keyString)
-                .build()
+                val req = Request.Builder()
+                    .url("$BASE_URL/models/$cleanModel:generateContent")
+                    .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                    .header("User-Agent", ANONYMOUS_USER_AGENT)
+                    .addHeader("x-goog-api-key", keyString)
+                    .build()
 
-            activeClient.newCall(req).execute().use { resp ->
-                val latency = System.currentTimeMillis() - startMs
-                val bodyStr = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    val errMsg = ByokManager.sanitizeForLog(extractApiError(bodyStr, resp.code), keyString)
+                activeClient.newCall(req).execute().use { resp ->
+                    val latency = System.currentTimeMillis() - startMs
+                    val bodyStr = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        val lowBody = bodyStr.lowercase()
+                        if (attempt == 0 && useThinkingConfig && resp.code == 400 &&
+                            (lowBody.contains("thinking") || lowBody.contains("budget") || lowBody.contains("unknown name"))
+                        ) {
+                            useThinkingConfig = false
+                            return@use
+                        }
+                        val errMsg = ByokManager.sanitizeForLog(extractApiError(bodyStr, resp.code), keyString)
+                        ByokManager.recordHttpLog(
+                            method = "POST",
+                            endpoint = "/v1beta/models/$cleanModel:generateContent",
+                            httpCode = resp.code,
+                            latencyMs = latency,
+                            detail = errMsg,
+                            secretKey = keyString
+                        )
+                        ByokManager.recordStats(cleanModel, 0, 0, 0, latency, success = false)
+                        return@withContext Result.failure(IllegalStateException(errMsg))
+                    }
+
+                    val root = JSONObject(bodyStr)
+                    val candidates = root.optJSONArray("candidates")
+                    val sb = StringBuilder()
+                    val fallbackSb = StringBuilder()
+                    if (candidates != null && candidates.length() > 0) {
+                        val c0 = candidates.getJSONObject(0)
+                        val contentParts = c0.optJSONObject("content")?.optJSONArray("parts")
+                        if (contentParts != null) {
+                            for (i in 0 until contentParts.length()) {
+                                val pObj = contentParts.getJSONObject(i)
+                                val t = pObj.optString("text", "")
+                                if (t.isNotBlank()) {
+                                    if (pObj.optBoolean("thought", false)) {
+                                        if (fallbackSb.isNotEmpty()) fallbackSb.append("\n")
+                                        fallbackSb.append(t.trim())
+                                    } else {
+                                        if (sb.isNotEmpty()) sb.append("\n")
+                                        sb.append(t.trim())
+                                    }
+                                }
+                            }
+                        }
+                        if (sb.isEmpty() && fallbackSb.isNotEmpty()) {
+                            sb.append(fallbackSb)
+                        }
+                        if (sb.isEmpty()) {
+                            val finishReason = c0.optString("finishReason", "")
+                            if (finishReason.isNotBlank()) {
+                                sb.append("Модель остановила вывод ($finishReason).")
+                            }
+                        }
+                    }
+
+                    val usage = root.optJSONObject("usageMetadata")
+                    val promptTok = usage?.optInt("promptTokenCount", 0) ?: 0
+                    val outTok = usage?.optInt("candidatesTokenCount", 0) ?: 0
+                    val totalTok = usage?.optInt("totalTokenCount", promptTok + outTok) ?: (promptTok + outTok)
+
+                    val finalText = sb.toString().ifBlank { "Пустой ответ от модели ($cleanModel)." }
                     ByokManager.recordHttpLog(
                         method = "POST",
                         endpoint = "/v1beta/models/$cleanModel:generateContent",
                         httpCode = resp.code,
                         latencyMs = latency,
-                        detail = errMsg,
+                        detail = "токены=$totalTok (вход=$promptTok, выход=$outTok), кадр=${if (imageBytes != null) "да" else "нет"}",
                         secretKey = keyString
                     )
-                    ByokManager.recordStats(cleanModel, 0, 0, 0, latency, success = false)
-                    return@withContext Result.failure(IllegalStateException(errMsg))
-                }
+                    ByokManager.recordStats(cleanModel, promptTok, outTok, totalTok, latency, success = true)
 
-                val root = JSONObject(bodyStr)
-                val candidates = root.optJSONArray("candidates")
-                val sb = StringBuilder()
-                if (candidates != null && candidates.length() > 0) {
-                    val c0 = candidates.getJSONObject(0)
-                    val contentParts = c0.optJSONObject("content")?.optJSONArray("parts")
-                    if (contentParts != null) {
-                        for (i in 0 until contentParts.length()) {
-                            val t = contentParts.getJSONObject(i).optString("text", "")
-                            if (t.isNotBlank()) {
-                                if (sb.isNotEmpty()) sb.append("\n")
-                                sb.append(t.trim())
-                            }
-                        }
-                    }
-                    if (sb.isEmpty()) {
-                        val finishReason = c0.optString("finishReason", "")
-                        if (finishReason.isNotBlank()) {
-                            sb.append("Модель остановила вывод ($finishReason).")
-                        }
-                    }
-                }
-
-                val usage = root.optJSONObject("usageMetadata")
-                val promptTok = usage?.optInt("promptTokenCount", 0) ?: 0
-                val outTok = usage?.optInt("candidatesTokenCount", 0) ?: 0
-                val totalTok = usage?.optInt("totalTokenCount", promptTok + outTok) ?: (promptTok + outTok)
-
-                val finalText = sb.toString().ifBlank { "Пустой ответ от модели ($cleanModel)." }
-                ByokManager.recordHttpLog(
-                    method = "POST",
-                    endpoint = "/v1beta/models/$cleanModel:generateContent",
-                    httpCode = resp.code,
-                    latencyMs = latency,
-                    detail = "tokens=$totalTok (in=$promptTok, out=$outTok), img=${imageBytes != null}",
-                    secretKey = keyString
-                )
-                ByokManager.recordStats(cleanModel, promptTok, outTok, totalTok, latency, success = true)
-
-                Result.success(
-                    GenerationResponse(
-                        text = finalText,
-                        modelId = cleanModel,
-                        promptTokens = promptTok,
-                        outputTokens = outTok,
-                        totalTokens = totalTok,
-                        latencyMs = latency
+                    return@withContext Result.success(
+                        GenerationResponse(
+                            text = finalText,
+                            modelId = cleanModel,
+                            promptTokens = promptTok,
+                            outputTokens = outTok,
+                            totalTokens = totalTok,
+                            latencyMs = latency
+                        )
                     )
-                )
+                }
             }
+            return@withContext Result.failure(IllegalStateException("Запрос к модели ($cleanModel) не завершён."))
         } catch (e: Exception) {
             val latency = System.currentTimeMillis() - startMs
             val mapped = ByokManager.sanitizeForLog(mapNetworkError(e), keyString)
@@ -491,7 +537,7 @@ object GeminiByokClient {
                 secretKey = keyString
             )
             ByokManager.recordStats(cleanModel, 0, 0, 0, latency, success = false)
-            Result.failure(IllegalStateException(mapped))
+            return@withContext Result.failure(IllegalStateException(mapped))
         } finally {
             Arrays.fill(keyCopy, '0')
         }

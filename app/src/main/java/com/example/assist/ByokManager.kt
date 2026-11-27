@@ -48,9 +48,9 @@ object ByokManager {
     const val DEFAULT_TOR_PORT = 9050
 
     enum class TransportMode(val labelRu: String, val badgeRu: String) {
-        DIRECT_TLS("Прямой TLS 1.3 (без кеша)", "🔒 TLS 1.3"),
-        TOR_ORBOT_SOCKS5("Orbot / Tor SOCKS5 (127.0.0.1:9050)", "🧅 TOR SOCKS5"),
-        CUSTOM_SOCKS5("Свой SOCKS5 прокси", "🛡️ SOCKS5")
+        DIRECT_TLS("Прямой защищённый канал (без кеша)", "🔒 Прямой канал"),
+        TOR_ORBOT_SOCKS5("Тор Orbot прокси (127.0.0.1:9050)", "🧅 Тор-прокси"),
+        CUSTOM_SOCKS5("Свой прокси СОКС5", "🛡️ Свой прокси")
     }
 
     data class ProxyTransportConfig(
@@ -60,8 +60,8 @@ object ByokManager {
     ) {
         fun describeShort(): String = when (mode) {
             TransportMode.DIRECT_TLS -> mode.badgeRu
-            TransportMode.TOR_ORBOT_SOCKS5 -> "🧅 TOR ${host}:${port}"
-            TransportMode.CUSTOM_SOCKS5 -> "🛡️ SOCKS5 ${host}:${port}"
+            TransportMode.TOR_ORBOT_SOCKS5 -> "🧅 Тор ${host}:${port}"
+            TransportMode.CUSTOM_SOCKS5 -> "🛡️ Прокси ${host}:${port}"
         }
     }
 
@@ -135,7 +135,7 @@ object ByokManager {
         val latencyMs: Long,
         val totalTokens: Int,
         val isError: Boolean = false,
-        val engineBadge: String = "GEMINI"
+        val engineBadge: String = "ОБЛАКО"
     )
 
     data class SanitizedHttpLog(
@@ -300,13 +300,13 @@ object ByokManager {
             return
         }
         _isFetchingModelsFlow.value = true
-        _modelFetchStatusFlow.value = "Запрос моделей к Gemini API..."
+        _modelFetchStatusFlow.value = "Запрос списка моделей по ключу..."
 
         appIoScope.launch {
             val keyToUse = explicitKeyChars ?: decryptKey(appCtx)
             if (keyToUse == null || keyToUse.isEmpty()) {
                 _isFetchingModelsFlow.value = false
-                _modelFetchStatusFlow.value = "Ключ не найден в KeyStore"
+                _modelFetchStatusFlow.value = "Ключ не найден в хранилище"
                 return@launch
             }
             val transportCfg = getTransportConfig(appCtx)
@@ -320,11 +320,11 @@ object ByokManager {
                 saveDiscoveredModels(appCtx, list)
                 val currentModel = getModelName(appCtx)
                 val statusMsg = when {
-                    list.isEmpty() -> "Ключ рабочий, но модели generateContent не вернулись"
+                    list.isEmpty() -> "Ключ рабочий, но текстово-визуальные модели не вернулись"
                     list.any { it.id == currentModel } ->
-                        "Загружено моделей: ${list.size} • выбрана $currentModel (подтверждена)"
+                        "Загружено моделей: ${list.size} • выбрана $currentModel (активна)"
                     else ->
-                        "Загружено моделей: ${list.size} • выбранная $currentModel НЕ найдена в списке (подмена отключена, выберите вручную)"
+                        "Загружено моделей: ${list.size} • текущая $currentModel не в списке (выбери ниже)"
                 }
                 _modelFetchStatusFlow.value = statusMsg
             }.onFailure { err ->
@@ -543,7 +543,7 @@ object ByokManager {
             .apply()
         _hasKeyFlow.value = false
         _discoveredModelsFlow.value = emptyList()
-        _modelFetchStatusFlow.value = "Ключ удалён из KeyStore"
+        _modelFetchStatusFlow.value = "Ключ удалён из хранилища"
         try {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             if (ks.containsAlias(KS_ALIAS)) ks.deleteEntry(KS_ALIAS)

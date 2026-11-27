@@ -6,7 +6,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -72,6 +71,7 @@ internal data class VikaStagedPreviewState(
     val mode: AiFrameMode? = null
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ColumnScope.VikaTasksTabContent(
     context: Context,
@@ -114,9 +114,9 @@ internal fun ColumnScope.VikaTasksTabContent(
             Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = if (!isOnlineNow) {
-                    "Интернета нет — жми «⚡ Малипусики Офлайн» или любой чип: 6 локальных нейронок разберут кадр/видео без сети."
+                    "Интернета нет — жми «⚡ Малипусики Офлайн» или любой чип: 6 локальных нейросетей разберут кадр или видео без сети."
                 } else {
-                    "Можно сразу гонять 6 локальных нейронок офлайн или вставить свой Gemini ключ во вкладке «Ключ и Модели»."
+                    "Можно сразу гонять 6 локальных нейросетей офлайн или вставить свой ключ во вкладке «🔑 Ключи»."
                 },
                 color = Color.White,
                 fontSize = 10.sp
@@ -129,7 +129,7 @@ internal fun ColumnScope.VikaTasksTabContent(
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth().height(40.dp)
                 ) {
-                    Text("ВСТАВИТЬ GEMINI КЛЮЧ", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Text("ВСТАВИТЬ СВОЙ КЛЮЧ", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
                 }
             }
         }
@@ -164,28 +164,29 @@ internal fun ColumnScope.VikaTasksTabContent(
         Spacer(modifier = Modifier.height(8.dp))
     }
 
-    Row(
+    FlowRow(
         modifier = Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+            .testTag("vika_quick_tasks_flow"),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         VikaQuickTaskChip("⚡ Малипусики Офлайн") {
             onExecuteTask("Полный локальный разбор малипусиками", true, false, true, null)
         }
-        VikaQuickTaskChip("🛰️ OPSEC-сканер") {
-            onExecuteTask("Проверь OPSEC поверхность угроз: дисплеи, adb, dns", false, false, true, null)
+        VikaQuickTaskChip("🛰️ Сканер угроз") {
+            onExecuteTask("Проверка угроз устройства: внешние экраны, отладка, сети", false, false, true, null)
         }
         VikaQuickTaskChip("👁️ Разбор кадра") {
             onExecuteTask("Разбери что на кадре: ключевые детали, риски и чё делать дальше.", frameMode != AiFrameMode.TEXT_ONLY, false, false, null)
         }
         VikaQuickTaskChip("🛡️ Дозор-триаж") {
-            onExecuteTask("Оцени обстановку на кадре: кто в кадре, форма/гражданка, уровень угрозы.", frameMode != AiFrameMode.TEXT_ONLY, false, false, ByokManager.PROMPT_SENTINEL)
+            onExecuteTask("Оцени обстановку на кадре: кто в кадре, форма или гражданка, уровень угрозы.", frameMode != AiFrameMode.TEXT_ONLY, false, false, ByokManager.PROMPT_SENTINEL)
         }
-        VikaQuickTaskChip("📝 OCR текста") {
+        VikaQuickTaskChip("📝 Чтение текста") {
             onExecuteTask("Вытащи весь текст, даты, цифры и печати без выдумок.", frameMode != AiFrameMode.TEXT_ONLY, false, false, ByokManager.PROMPT_OCR)
         }
-        VikaQuickTaskChip("🚗 OSINT-палево") {
+        VikaQuickTaskChip("🚗 Поиск утечек") {
             onExecuteTask("Проверь на палево: номера, вывески, ориентиры, лица, отражения.", frameMode != AiFrameMode.TEXT_ONLY, false, false, ByokManager.PROMPT_OSINT)
         }
         VikaQuickTaskChip("📊 Аудит статы") {
@@ -206,13 +207,13 @@ internal fun ColumnScope.VikaTasksTabContent(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 24.dp),
+                        .padding(vertical = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Icon(Icons.Default.Psychology, contentDescription = "Вика", tint = TabCyan.copy(alpha = 0.7f), modifier = Modifier.size(44.dp))
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Выбери режим сверху:\n• «🖼️ ВСЯ» -> чистый полный разбор только в Gemini\n• «🎯 +КРОП» -> симбиоз 6-NN (кроп лица/объекта + теги) + Gemini\n• «✂️ БЕЗ ФОНА» -> прячет фон перед отправкой\n• Нет сети или сдох лимит -> авто-подхват 6 локальных малипусиков!",
+                        text = "Выбери режим сверху:\n• «🖼️ ВСЯ» -> чистый полный кадр только в облако\n• «🎯 +КРОП» -> локальный поиск цели (кроп + теги) + облако\n• «✂️ БЕЗ ФОНА» -> размывает фон на устройстве перед отправкой\n• Нет сети или сдох лимит -> авто-подхват 6 локальных малипусиков!",
                         color = TabMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -225,7 +226,7 @@ internal fun ColumnScope.VikaTasksTabContent(
                 VikaChatMessageCard(
                     entry = msg,
                     onCopy = {
-                        SecureClipboard.copySensitive(context, "Zver Vika AI", msg.replyText)
+                        SecureClipboard.copySensitive(context, "Ответ Вики ИИ", msg.replyText)
                         onStatusMessage("ОТВЕТ СКОПИРОВАН (АВТО-ОЧИСТКА 45с)")
                     }
                 )
@@ -329,16 +330,18 @@ private fun VikaVideoModeSelectorRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun VikaPhotoModeSelectorRow(
     frameMode: AiFrameMode,
     onFrameModeChange: (AiFrameMode) -> Unit
 ) {
-    Row(
+    FlowRow(
         modifier = Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+            .testTag("vika_photo_modes_flow"),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         listOf(
             Triple(AiFrameMode.FULL_ONLY, "🖼️ ВСЯ", TabGreen),
@@ -401,7 +404,8 @@ private fun VikaFramePreviewBar(
                     .border(1.dp, TabGreen.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
             )
             Column(modifier = Modifier.weight(1f)) {
-                val sizeInfo = stagedPreview.bytes?.let { "${it.size / 1024} КБ (${stagedPreview.mime})" } ?: "Из Сейфа"
+                val fmtRu = if (stagedPreview.mime.contains("webp", ignoreCase = true)) "ВебП" else "ЖПЕГ"
+                val sizeInfo = stagedPreview.bytes?.let { "${it.size / 1024} КБ ($fmtRu)" } ?: "Из Сейфа"
                 Text(
                     text = "КАДР ГОТОВ: ${activeThumbBmp.width}x${activeThumbBmp.height}",
                     color = TabGreen,
@@ -414,7 +418,7 @@ private fun VikaFramePreviewBar(
                     color = TabMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -480,13 +484,13 @@ internal fun ColumnScope.VikaAnalyticsTabContent(
             Text("📦 СЕЙФ И СЖАТИЕ КОДЕКА", color = TabGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
             Spacer(modifier = Modifier.height(8.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                VikaStatTile("ДИСК (.GCF)", "${localSnap.diskFilesCount} шт", VaultAnalytics.formatBytesHuman(localSnap.diskTotalBytes), TabGreen, Modifier.weight(1f))
-                VikaStatTile("ОЗУ (RAM)", "${localSnap.ramShotsCount} шт", VaultAnalytics.formatBytesHuman(localSnap.ramTotalBytes), TabCyan, Modifier.weight(1f))
+                VikaStatTile("ДИСК (СЕЙФ)", "${localSnap.diskFilesCount} шт", VaultAnalytics.formatBytesHuman(localSnap.diskTotalBytes), TabGreen, Modifier.weight(1f))
+                VikaStatTile("ОЗУ (ПАМЯТЬ)", "${localSnap.ramShotsCount} шт", VaultAnalytics.formatBytesHuman(localSnap.ramTotalBytes), TabCyan, Modifier.weight(1f))
             }
             Spacer(modifier = Modifier.height(8.dp))
             val avgText = if (localSnap.avgPhotoKb > 0) "${localSnap.avgPhotoKb} КБ (экономия ~${localSnap.estimatedSavedPercent}%)" else "нет снятых фото"
             Text("• Фото / Видео: ${localSnap.diskPhotosCount + localSnap.ramPhotosCount} фото / ${localSnap.diskVideosCount + localSnap.ramVideosCount} видео", color = Color.White, fontSize = 11.sp)
-            Text("• Пресет: ${localSnap.activePreset.labelRu} • Anti-PRNU: ${if (localSnap.antiPrnuActive) "ВКЛ" else "ВЫКЛ"}", color = TabMuted, fontSize = 11.sp)
+            Text("• Пресет: ${localSnap.activePreset.labelRu} • Анти-шум матрицы: ${if (localSnap.antiPrnuActive) "ВКЛ" else "ВЫКЛ"}", color = TabMuted, fontSize = 11.sp)
             Text("• Средний кадр: $avgText", color = TabCyan, fontSize = 11.sp)
         }
 
@@ -543,12 +547,12 @@ internal fun ColumnScope.VikaAnalyticsTabContent(
                 .border(1.dp, TabBorder, RoundedCornerShape(12.dp))
                 .padding(12.dp)
         ) {
-            Text("⚡ BYOK AI СЕССИЯ", color = TabCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("⚡ ОБЛАЧНАЯ СЕССИЯ", color = TabCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
             Spacer(modifier = Modifier.height(6.dp))
             Text("• Модель: $selectedModel (доступно по ключу: $discoveredModelsCount)", color = Color.White, fontSize = 11.sp)
             Text("• Запросы: ${aiStats.queriesCount} (успех: ${aiStats.successCount} / ошибки: ${aiStats.errorCount})", color = TabMuted, fontSize = 11.sp)
             Text("• Токены: ${aiStats.totalTokens} (вход ${aiStats.totalPromptTokens} + выход ${aiStats.totalOutputTokens})", color = TabCyan, fontSize = 11.sp)
-            Text("• Последний пинг API: ${aiStats.lastLatencyMs} мс", color = TabMuted, fontSize = 11.sp)
+            Text("• Последний отклик сети: ${aiStats.lastLatencyMs} мс", color = TabMuted, fontSize = 11.sp)
 
             Spacer(modifier = Modifier.height(10.dp))
             Button(
@@ -570,6 +574,7 @@ internal fun ColumnScope.VikaAnalyticsTabContent(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ColumnScope.VikaKeysModelsTabContent(
     context: Context,
@@ -603,9 +608,9 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("1. GEMINI API КЛЮЧ (BYOK)", color = TabGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+        Text("1. СВОЙ КЛЮЧ ДОСТУПА", color = TabGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
         Text(
-            "Шифруется в KeyStore устройства (${if (isStrongBoxSupported) "StrongBox" else "TEE"}). При сохранении сразу подтягивает живой список моделей твоего ключа.",
+            "Шифруется в хранилище устройства (${if (isStrongBoxSupported) "аппаратный чип" else "защищённая среда"}). При сохранении сразу подтягивает живой список моделей твоего ключа.",
             color = TabMuted,
             fontSize = 10.sp
         )
@@ -613,7 +618,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
         OutlinedTextField(
             value = apiKeyInput,
             onValueChange = { apiKeyInput = it },
-            label = { Text(if (hasKey) "Ключ в KeyStore (введи новый для замены)" else "Вставь Gemini API ключ (AIza...)", fontSize = 11.sp) },
+            label = { Text(if (hasKey) "Ключ сохранён (введи новый для замены)" else "Вставь свой ключ от нейросети (AIza...)", fontSize = 11.sp) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             colors = OutlinedTextFieldDefaults.colors(
@@ -674,15 +679,18 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
 
         HorizontalDivider(color = TabBorder)
 
-        Text("1B. ЗАШИФРОВАННЫЙ КАНАЛ (TLS 1.3 / TOR SOCKS5)", color = TabCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text("1Б. ЗАШИФРОВАННЫЙ КАНАЛ (ТЛС / ТОР СОКС5)", color = TabCyan, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text(
-            text = "Все запросы идут только по TLS 1.3/1.2 без HTTP-кеша, без редиректов и с анонимным User-Agent. Orbot в системе: ${if (isOrbotInstalled) "НАЙДЕН ✅" else "не установлен"}.",
+            text = "Все запросы идут только по шифрованному каналу без сетевого кеша, без перенаправлений и со скрытым заголовком. Тор-клиент в системе: ${if (isOrbotInstalled) "НАЙДЕН ✅" else "не установлен"}.",
             color = TabMuted,
             fontSize = 10.sp
         )
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("byok_transport_flow"),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             ByokManager.TransportMode.values().forEach { tm ->
                 val sel = transportConfig.mode == tm
@@ -724,7 +732,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                 OutlinedTextField(
                     value = proxyHostInput,
                     onValueChange = { proxyHostInput = it },
-                    label = { Text("Хост SOCKS5", fontSize = 10.sp) },
+                    label = { Text("Хост СОКС5", fontSize = 10.sp) },
                     singleLine = true,
                     modifier = Modifier.weight(1.4f),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -850,11 +858,12 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
 
         Text("2. ДОСТУПНЫЕ МОДЕЛИ КЛЮЧА (${discoveredModels.size})", color = TabGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
 
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            listOf("ALL" to "Все", "HYDROGEN" to "Hydrogen", "FLASH" to "Flash", "PRO" to "Pro").forEach { (k, lbl) ->
+            listOf("ALL" to "Все", "FAST" to "Быстрые", "HYDROGEN" to "Водород", "PRO" to "Мощные").forEach { (k, lbl) ->
                 val sel = modelFilter == k
                 Text(
                     text = lbl,
@@ -876,7 +885,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
             discoveredModels.filter { m ->
                 when (modelFilter) {
                     "HYDROGEN" -> m.id.contains("hydrogen", ignoreCase = true) || m.displayName.contains("hydrogen", ignoreCase = true)
-                    "FLASH" -> m.id.contains("flash", ignoreCase = true)
+                    "FAST" -> m.id.contains("flash", ignoreCase = true) || m.id.contains("lite", ignoreCase = true)
                     "PRO" -> m.id.contains("pro", ignoreCase = true)
                     else -> true
                 }
@@ -885,7 +894,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
 
         if (filteredModels.isEmpty()) {
             Text(
-                text = if (hasKey) "Нажми кнопку обновления (↻) чтобы подтянуть модели ключа, либо впиши ID модели ниже вручную." else "Список подтянется сразу после ввода ключа.",
+                text = if (hasKey) "Нажми кнопку обновления (↻) чтобы подтянуть модели ключа, либо впиши код модели ниже вручную." else "Список подтянется сразу после ввода ключа.",
                 color = TabMuted,
                 fontSize = 10.sp
             )
@@ -916,7 +925,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                                 fontSize = 11.sp
                             )
                             Text(
-                                text = "${m.displayName} • in:${m.inputTokenLimit / 1000}k / out:${m.outputTokenLimit / 1000}k",
+                                text = "${m.displayName} • вход:${m.inputTokenLimit / 1000}К / выход:${m.outputTokenLimit / 1000}К",
                                 color = TabMuted,
                                 fontSize = 9.sp,
                                 maxLines = 1,
@@ -939,7 +948,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
             OutlinedTextField(
                 value = manualModelInput,
                 onValueChange = { manualModelInput = it },
-                label = { Text("Или вписать ID вручную (напр. gemini-4-hydrogen)", fontSize = 10.sp) },
+                label = { Text("Или вписать код модели вручную", fontSize = 10.sp) },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -973,28 +982,29 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("3. ПРОМПТ ВИКИ (ПО УМОЛЧАНИЮ)", color = TabGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("3. ИНСТРУКЦИЯ ВИКИ (ПО УМОЛЧАНИЮ)", color = TabGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
             TextButton(
                 onClick = {
                     ByokManager.saveCustomPrompt(context, ByokManager.DEFAULT_PROMPT)
-                    onStatusMessage("ПРОМПТ СБРОШЕН НА БАЗУ ВИКИ")
+                    onStatusMessage("ИНСТРУКЦИЯ СБРОШЕНА НА БАЗУ ВИКИ")
                 }
             ) {
                 Text("СБРОС", color = TabCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             listOf(
                 "Вика База" to ByokManager.DEFAULT_PROMPT,
                 "🔥 Вика Юмор" to ByokManager.PROMPT_VIKA_TURBO,
                 "Дозор" to ByokManager.PROMPT_SENTINEL,
-                "OSINT" to ByokManager.PROMPT_OSINT,
-                "OCR" to ByokManager.PROMPT_OCR,
-                "Форензик" to ByokManager.PROMPT_FORENSIC,
+                "Утечки" to ByokManager.PROMPT_OSINT,
+                "Текст" to ByokManager.PROMPT_OCR,
+                "Оптика" to ByokManager.PROMPT_FORENSIC,
                 "Аналитик" to ByokManager.PROMPT_ANALYTICS
             ).forEach { (title, pText) ->
                 Text(
@@ -1009,7 +1019,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                         .border(1.dp, TabCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
                         .clickable {
                             ByokManager.saveCustomPrompt(context, pText)
-                            onStatusMessage("ПРОМПТ: $title")
+                            onStatusMessage("ИНСТРУКЦИЯ: $title")
                         }
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 )
@@ -1036,7 +1046,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "4. HTTP-ЖУРНАЛ API (${httpLogs.size}, БЕЗ КЛЮЧЕЙ)",
+                "4. СЕТЕВОЙ ЖУРНАЛ (${httpLogs.size}, БЕЗ КЛЮЧЕЙ)",
                 color = TabCyan,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
@@ -1046,17 +1056,17 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                 TextButton(onClick = {
                     val txt = httpLogs.joinToString("\n") { l ->
                         val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(l.timestampMs))
-                        "[$ts] ${l.method} ${l.endpoint} -> HTTP ${l.httpCode} (${l.latencyMs}ms): ${l.detail}"
+                        "[$ts] ${l.method} ${l.endpoint} -> Код ${l.httpCode} (${l.latencyMs} мс): ${l.detail}"
                     }
-                    SecureClipboard.copySensitive(context, "Zver Gemini HTTP Log", txt)
-                    onStatusMessage("HTTP-ЖУРНАЛ СКОПИРОВАН (45с)")
+                    SecureClipboard.copySensitive(context, "Сетевой журнал Вики", txt)
+                    onStatusMessage("ЖУРНАЛ СКОПИРОВАН (45с)")
                 }) {
                     Text("КОПИРОВАТЬ", color = TabGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }
             }
         }
         if (httpLogs.isEmpty()) {
-            Text("Пока нет HTTP-вызовов в текущей сессии.", color = TabMuted, fontSize = 10.sp)
+            Text("Пока нет сетевых запросов в текущей сессии.", color = TabMuted, fontSize = 10.sp)
         } else {
             Column(
                 modifier = Modifier
@@ -1070,7 +1080,7 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
                     val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(l.timestampMs))
                     val codeColor = if (l.httpCode in 200..299) TabGreen else TabRed
                     Text(
-                        text = "[$ts] HTTP ${l.httpCode} (${l.latencyMs}мс) ${l.method} ${l.endpoint}\n  ${l.detail}",
+                        text = "[$ts] Код ${l.httpCode} (${l.latencyMs}мс) ${l.method} ${l.endpoint}\n  ${l.detail}",
                         color = codeColor,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp,
@@ -1086,12 +1096,12 @@ internal fun ColumnScope.VikaKeysModelsTabContent(
 private fun VikaQuickTaskChip(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .height(40.dp)
+            .heightIn(min = 38.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(TabCard)
             .border(1.dp, TabCyan.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = 10.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -1099,7 +1109,9 @@ private fun VikaQuickTaskChip(label: String, onClick: () -> Unit) {
             color = TabCyan,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp
+            fontSize = 10.sp,
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -1133,6 +1145,11 @@ private fun VikaChatMessageCard(
     val timeStr = remember(entry.timestampMs) {
         SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(entry.timestampMs))
     }
+    val attachmentBadge = when {
+        entry.hadImage && entry.engineBadge.contains("ВИДЕО", ignoreCase = true) -> "🎬 Видеокадры переданы"
+        entry.hadImage -> "📸 Кадр передан"
+        else -> "💬 Без фото"
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1159,6 +1176,7 @@ private fun VikaChatMessageCard(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = timeStr,
                 color = TabMuted,
@@ -1166,6 +1184,14 @@ private fun VikaChatMessageCard(
                 fontSize = 9.sp
             )
         }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = attachmentBadge,
+            color = if (entry.hadImage) TabGreen else TabMuted,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp
+        )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = entry.replyText,
@@ -1180,12 +1206,12 @@ private fun VikaChatMessageCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "[${entry.engineBadge}] • ${entry.modelId} • ${entry.latencyMs}мс • ${entry.totalTokens}t",
+                text = "[${entry.engineBadge}] • ${entry.modelId} • ${entry.latencyMs}мс • ${entry.totalTokens} ток.",
                 color = TabMuted,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 8.sp,
                 modifier = Modifier.weight(1f),
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
