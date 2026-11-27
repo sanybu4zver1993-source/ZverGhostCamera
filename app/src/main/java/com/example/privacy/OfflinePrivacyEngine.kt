@@ -28,9 +28,9 @@ import kotlin.math.roundToInt
 object OfflinePrivacyEngine {
 
     enum class RedactionStyle(val labelRu: String) {
-        BLACKOUT("БЛЭКАУТ"),
+        BLACKOUT("ЗАЛИВКА"),
         PIXELATE("МОЗАИКА"),
-        BLUR("БЛЮР"),
+        BLUR("РАЗМЫТИЕ"),
         MASK("МАСКА")
     }
 
@@ -41,7 +41,7 @@ object OfflinePrivacyEngine {
         CAT("🐱 КОТ", "🐱"),
         BEAR("🐻 МЕДВЕДЬ", "🐻"),
         SKULL("💀 ЧЕРЕП", "💀"),
-        CUSTOM_PNG("🖼 СВОЯ PNG", "🖼")
+        CUSTOM_PNG("🖼 СВОЯ КАРТИНКА", "🖼")
     }
 
     enum class RegionKind {
@@ -94,6 +94,76 @@ object OfflinePrivacyEngine {
             (cx + halfW).coerceIn(0f, maxW * 1.15f),
             (cy + halfH).coerceIn(0f, maxH * 1.15f)
         )
+    }
+
+    /**
+     * Returns a lightweight preview bitmap bounded by [maxDim] so live slider drags & box edits
+     * render smoothly without stalling on multi-megapixel camera bitmaps.
+     */
+    fun createPreviewBitmap(source: Bitmap, maxDim: Int = 1080): Bitmap {
+        val w = source.width
+        val h = source.height
+        if (w <= maxDim && h <= maxDim) {
+            return if (source.config == Bitmap.Config.ARGB_8888) {
+                source
+            } else {
+                source.copy(Bitmap.Config.ARGB_8888, false)
+            }
+        }
+        val scale = maxDim.toFloat() / max(w, h).toFloat()
+        val pw = (w * scale).roundToInt().coerceAtLeast(1)
+        val ph = (h * scale).roundToInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(source, pw, ph, true)
+    }
+
+    /**
+     * Computes Intersection-over-Union (0f..1f) between two normalized rectangles.
+     */
+    fun computeRectIoU(a: RectF, b: RectF): Float {
+        val al = min(a.left, a.right)
+        val at = min(a.top, a.bottom)
+        val ar = max(a.left, a.right)
+        val ab = max(a.top, a.bottom)
+        val bl = min(b.left, b.right)
+        val bt = min(b.top, b.bottom)
+        val br = max(b.left, b.right)
+        val bb = max(b.top, b.bottom)
+
+        val interW = (min(ar, br) - max(al, bl)).coerceAtLeast(0f)
+        val interH = (min(ab, bb) - max(at, bt)).coerceAtLeast(0f)
+        val interArea = interW * interH
+        if (interArea <= 0f) return 0f
+        val unionArea = ((ar - al) * (ab - at)) + ((br - bl) * (bb - bt)) - interArea
+        return if (unionArea <= 0f) 0f else (interArea / unionArea).coerceIn(0f, 1f)
+    }
+
+    /**
+     * Merges [incoming] detected regions into [existing] without duplicating overlapping zones
+     * or reusing colliding sequential IDs ("face_0", "txt_0").
+     */
+    fun mergeUniqueRegions(
+        existing: List<NormalizedRegion>,
+        incoming: List<NormalizedRegion>,
+        iouThreshold: Float = 0.55f
+    ): List<NormalizedRegion> {
+        if (incoming.isEmpty()) return existing
+        val result = existing.toMutableList()
+        val usedIds = existing.map { it.id }.toMutableSet()
+        var seq = 1
+        for (cand in incoming) {
+            val isDuplicate = result.any { prev ->
+                prev.kind == cand.kind && computeRectIoU(prev.rect, cand.rect) >= iouThreshold
+            }
+            if (isDuplicate) continue
+            var uniqueId = cand.id
+            while (uniqueId in usedIds) {
+                uniqueId = "${cand.id}_$seq"
+                seq++
+            }
+            usedIds.add(uniqueId)
+            result.add(cand.copy(id = uniqueId))
+        }
+        return result
     }
 
     private fun absRectWidth(r: RectF): Float = max(r.left, r.right) - min(r.left, r.right)

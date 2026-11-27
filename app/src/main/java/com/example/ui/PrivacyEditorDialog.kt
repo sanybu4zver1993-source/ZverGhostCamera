@@ -49,6 +49,7 @@ import com.example.crypto.GhostCryptoVault
 import com.example.privacy.OfflinePrivacyEngine
 import com.example.security.ZverPrefs
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Arrays
@@ -71,6 +72,7 @@ private val EdMuted = Color(0xFF8FA3B0)
  * - 4 Styles (Blackout, Pixelate, Blur, Cyber Mask) + Invert Mode (blur everything EXCEPT boxes).
  * - Saves scrubbed WebP/JPEG directly into Encrypted Vault or RAM-Only, or shares ephemerally.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PrivacyEditorDialog(
     sourceBitmap: Bitmap,
@@ -81,6 +83,7 @@ fun PrivacyEditorDialog(
     val scope = rememberCoroutineScope()
 
     var regions by remember { mutableStateOf<List<OfflinePrivacyEngine.NormalizedRegion>>(emptyList()) }
+    var selectedRegionId by remember { mutableStateOf<String?>(null) }
     var style by remember { mutableStateOf(OfflinePrivacyEngine.RedactionStyle.PIXELATE) }
     var maskPreset by remember { mutableStateOf(OfflinePrivacyEngine.MaskPreset.CLOWN) }
     var maskScale by remember { mutableStateOf(1.15f) }
@@ -89,8 +92,12 @@ fun PrivacyEditorDialog(
     var preset by remember { mutableStateOf(ZverPrefs.getCompressionPreset(context)) }
     var antiPrnu by remember { mutableStateOf(ZverPrefs.isAntiPrnuEnabled(context)) }
     var isProcessing by remember { mutableStateOf(false) }
-    var statusText by remember { mutableStateOf("Обнаружь лица/текст или обведи область пальцем") }
+    var statusText by remember { mutableStateOf("Нажми авто-поиск или обведи область пальцем") }
     var osintReport by remember { mutableStateOf<OfflinePrivacyEngine.OsintRiskReport?>(null) }
+
+    val previewBaseBitmap = remember(sourceBitmap) {
+        OfflinePrivacyEngine.createPreviewBitmap(sourceBitmap, maxDim = 1080)
+    }
 
     val customMaskPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -126,9 +133,9 @@ fun PrivacyEditorDialog(
                 maskPreset = OfflinePrivacyEngine.MaskPreset.CUSTOM_PNG
                 style = OfflinePrivacyEngine.RedactionStyle.MASK
                 statusText = if (hasAlpha) {
-                    "Своя PNG-маска загружена (${loadedBmp.width}x${loadedBmp.height})"
+                    "Своя маска загружена (${loadedBmp.width}x${loadedBmp.height})"
                 } else {
-                    "Картинка загружена (без прозрачного фона — лучше PNG с альфой)"
+                    "Картинка загружена (без прозрачного фона — лучше с прозрачностью)"
                 }
             } else {
                 statusText = "Не удалось загрузить свою маску"
@@ -146,15 +153,21 @@ fun PrivacyEditorDialog(
     var movingLiveRect by remember { mutableStateOf<RectF?>(null) }
     val latestRegions by rememberUpdatedState(regions)
 
-    // Re-render redacted preview cleanly in background whenever regions/style/mask/invert change
-    LaunchedEffect(regions, style, invertMode, maskPreset, maskScale, customMaskBitmap, sourceBitmap) {
+    // Smooth off-thread preview rendering on bounded previewBaseBitmap; full-res runs on Save/Share.
+    LaunchedEffect(regions, style, invertMode, maskPreset, maskScale, customMaskBitmap, previewBaseBitmap) {
         if (regions.isEmpty()) {
-            previewBitmap?.let { if (it != sourceBitmap) it.recycle() }
+            val prev = previewBitmap
             previewBitmap = null
+            if (prev != null && prev != sourceBitmap && prev != previewBaseBitmap && !prev.isRecycled) {
+                prev.recycle()
+            }
         } else {
+            if (style == OfflinePrivacyEngine.RedactionStyle.MASK) {
+                delay(24)
+            }
             val rendered = withContext(Dispatchers.Default) {
                 OfflinePrivacyEngine.applyRedactions(
-                    source = sourceBitmap,
+                    source = previewBaseBitmap,
                     regions = regions,
                     style = style,
                     invertMode = invertMode,
@@ -165,8 +178,16 @@ fun PrivacyEditorDialog(
             }
             val prev = previewBitmap
             previewBitmap = rendered
-            if (prev != null && prev != sourceBitmap && !prev.isRecycled) {
+            if (prev != null && prev != sourceBitmap && prev != previewBaseBitmap && !prev.isRecycled) {
                 prev.recycle()
+            }
+        }
+    }
+
+    DisposableEffect(previewBaseBitmap) {
+        onDispose {
+            if (previewBaseBitmap !== sourceBitmap && !previewBaseBitmap.isRecycled) {
+                previewBaseBitmap.recycle()
             }
         }
     }
@@ -174,7 +195,7 @@ fun PrivacyEditorDialog(
     DisposableEffect(Unit) {
         onDispose {
             previewBitmap?.let {
-                if (it != sourceBitmap && !it.isRecycled) it.recycle()
+                if (it != sourceBitmap && it != previewBaseBitmap && !it.isRecycled) it.recycle()
             }
             customMaskBitmap?.let {
                 if (!it.isRecycled) it.recycle()
@@ -218,7 +239,7 @@ fun PrivacyEditorDialog(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "🎭 OBSCURA-РЕДАКТОР (ОФФЛАЙН)",
+                    "🎭 РЕДАКТОР «ОБСКУРА» (ОФФЛАЙН)",
                     color = EdGreen,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
@@ -251,7 +272,7 @@ fun PrivacyEditorDialog(
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "⚠ OSINT-РИСК (${rep.riskScore}%): ${rep.warnings.joinToString(" • ")}",
+                            text = "⚠ РИСК УТЕЧКИ (${rep.riskScore}%): ${rep.warnings.joinToString(" • ")}",
                             color = Color(0xFFFFB74D),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 9.sp,
@@ -261,12 +282,13 @@ fun PrivacyEditorDialog(
                 }
             }
 
-            // Detection Action Row
-            Row(
+            // Detection Action Flow (wraps cleanly without clipping on narrow screens)
+            FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .testTag("obscura_actions_flow"),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Button(
                     onClick = {
@@ -286,9 +308,12 @@ fun PrivacyEditorDialog(
                             val textRegions = allBlocks as List<OfflinePrivacyEngine.NormalizedRegion>
                             val raw = rawText as String
 
-                            val existingIds = regions.map { it.id }.toSet()
-                            val toAdd = (foundFaces + osintHits.map { it.region }).filter { it.id !in existingIds }
-                            regions = regions + toAdd
+                            val prevCount = regions.size
+                            regions = OfflinePrivacyEngine.mergeUniqueRegions(
+                                regions,
+                                foundFaces + osintHits.map { it.region }
+                            )
+                            val addedCount = (regions.size - prevCount).coerceAtLeast(0)
                             osintReport = OfflinePrivacyEngine.assessOsintRisks(
                                 OfflinePrivacyEngine.DetectionResult(
                                     faces = foundFaces,
@@ -297,16 +322,20 @@ fun PrivacyEditorDialog(
                                 )
                             )
                             isProcessing = false
-                            statusText = "Авто-OSINT: лиц ${foundFaces.size}, опасного текста ${osintHits.size}"
+                            statusText = if (addedCount == 0 && (foundFaces.isNotEmpty() || osintHits.isNotEmpty())) {
+                                "Все найденные лица и утечки уже отмечены (${regions.size})"
+                            } else {
+                                "Авто-поиск: лиц ${foundFaces.size}, опасного текста ${osintHits.size}"
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdGreen.copy(alpha = 0.22f)),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("obscura_auto_osint_btn")
+                    modifier = Modifier.height(34.dp).testTag("obscura_auto_osint_btn")
                 ) {
-                    Icon(Icons.Default.AutoFixHigh, contentDescription = "Авто-OSINT", tint = EdGreen, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.AutoFixHigh, contentDescription = "Авто-утечки", tint = EdGreen, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("АВТО-OSINT", color = EdGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Text("АВТО-УТЕЧКИ", color = EdGreen, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
                 }
 
                 Button(
@@ -316,16 +345,22 @@ fun PrivacyEditorDialog(
                             val found = withContext(Dispatchers.Default) {
                                 OfflinePrivacyEngine.detectFacesOffline(sourceBitmap)
                             }
-                            regions = regions + found
+                            val prevCount = regions.size
+                            regions = OfflinePrivacyEngine.mergeUniqueRegions(regions, found)
+                            val added = (regions.size - prevCount).coerceAtLeast(0)
                             isProcessing = false
-                            statusText = if (found.isEmpty()) "Лица не найдены — обведи пальцем" else "Найдено лиц: ${found.size}"
+                            statusText = when {
+                                found.isEmpty() -> "Лица не найдены — обведи пальцем"
+                                added == 0 -> "Все найденные лица уже закрыты (${regions.size})"
+                                else -> "Добавлено лиц: $added (всего зон ${regions.size})"
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdSurface),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("obscura_detect_faces")
+                    modifier = Modifier.height(34.dp).testTag("obscura_detect_faces")
                 ) {
-                    Icon(Icons.Default.Face, contentDescription = "Лица", tint = EdGreen, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.Face, contentDescription = "Лица", tint = EdGreen, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("АВТО-ЛИЦА", color = EdGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }
@@ -337,7 +372,9 @@ fun PrivacyEditorDialog(
                             val (found, rawText) = withContext(Dispatchers.Default) {
                                 OfflinePrivacyEngine.detectTextOffline(sourceBitmap)
                             }
-                            regions = regions + found
+                            val prevCount = regions.size
+                            regions = OfflinePrivacyEngine.mergeUniqueRegions(regions, found)
+                            val added = (regions.size - prevCount).coerceAtLeast(0)
                             val det = OfflinePrivacyEngine.DetectionResult(
                                 faces = regions.filter { it.kind == OfflinePrivacyEngine.RegionKind.FACE },
                                 textBlocks = found,
@@ -345,14 +382,18 @@ fun PrivacyEditorDialog(
                             )
                             osintReport = OfflinePrivacyEngine.assessOsintRisks(det)
                             isProcessing = false
-                            statusText = if (found.isEmpty()) "Блоки текста не найдены" else "Найдено текстовых зон: ${found.size}"
+                            statusText = when {
+                                found.isEmpty() -> "Блоки текста не найдены"
+                                added == 0 -> "Все текстовые зоны уже выделены (${regions.size})"
+                                else -> "Добавлено текстовых зон: $added"
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdSurface),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("obscura_detect_text")
+                    modifier = Modifier.height(34.dp).testTag("obscura_detect_text")
                 ) {
-                    Icon(Icons.Default.DocumentScanner, contentDescription = "Текст", tint = EdCyan, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.DocumentScanner, contentDescription = "Текст", tint = EdCyan, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("АВТО-ТЕКСТ", color = EdCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }
@@ -361,26 +402,26 @@ fun PrivacyEditorDialog(
                     onClick = {
                         scope.launch {
                             isProcessing = true
-                            val targetBmp = previewBitmap ?: sourceBitmap
+                            val targetBmp = previewBitmap ?: previewBaseBitmap
                             val full = withContext(Dispatchers.Default) {
                                 OfflinePrivacyEngine.analyzeFullOffline(targetBmp)
                             }
                             osintReport = OfflinePrivacyEngine.assessOsintRisks(full)
                             isProcessing = false
                             statusText = if ((osintReport?.warnings ?: emptyList()).isEmpty()) {
-                                "OSINT-линтер: чистый кадр (утечек не найдено)"
+                                "Проверка утечек: кадр чист (угроз не найдено)"
                             } else {
-                                "OSINT-линтер: найдено угроз ${osintReport!!.warnings.size}"
+                                "Проверка утечек: найдено угроз ${osintReport!!.warnings.size}"
                             }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdSurface),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("obscura_osint_lint")
+                    modifier = Modifier.height(34.dp).testTag("obscura_osint_lint")
                 ) {
-                    Icon(Icons.Default.Security, contentDescription = "OSINT", tint = Color(0xFFFFB74D), modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.Security, contentDescription = "Проверка утечек", tint = Color(0xFFFFB74D), modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("OSINT-ЛИНТ", color = Color(0xFFFFB74D), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                    Text("УТЕЧКИ", color = Color(0xFFFFB74D), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }
 
                 Button(
@@ -390,7 +431,7 @@ fun PrivacyEditorDialog(
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = if (invertMode) EdCyan else EdSurface),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("obscura_invert_btn")
+                    modifier = Modifier.height(34.dp).testTag("obscura_invert_btn")
                 ) {
                     Text(
                         if (invertMode) "ИНВЕРСИЯ: ВКЛ" else "ИНВЕРСИЯ",
@@ -404,11 +445,12 @@ fun PrivacyEditorDialog(
                 Button(
                     onClick = {
                         regions = emptyList()
+                        selectedRegionId = null
                         statusText = "Все рамки сброшены"
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdSurface),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("obscura_reset_btn")
+                    modifier = Modifier.height(34.dp).testTag("obscura_reset_btn")
                 ) {
                     Text("СБРОС (${regions.size})", color = EdRed, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                 }
@@ -420,23 +462,26 @@ fun PrivacyEditorDialog(
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .heightIn(min = 180.dp)
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(10.dp))
                     .background(Color.Black)
                     .border(1.dp, EdBorder, RoundedCornerShape(10.dp))
                     .onSizeChanged { canvasSize = it }
-                    .pointerInput(regions, canvasSize) {
+                    .pointerInput(canvasSize) {
                         detectTapGestures { tap ->
                             val bounds = getDisplayBoxBounds()
-                            val nx = ((tap.x - bounds.left) / bounds.width()).coerceIn(0f, 1f)
-                            val ny = ((tap.y - bounds.top) / bounds.height()).coerceIn(0f, 1f)
-                            val hit = regions.lastOrNull { r ->
+                            val nx = ((tap.x - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            val ny = ((tap.y - bounds.top) / bounds.height().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            val hit = latestRegions.lastOrNull { r ->
                                 nx in min(r.rect.left, r.rect.right)..max(r.rect.left, r.rect.right) &&
                                     ny in min(r.rect.top, r.rect.bottom)..max(r.rect.top, r.rect.bottom)
                             }
                             if (hit != null) {
-                                regions = regions - hit
-                                statusText = "Удалена 1 зона (осталось ${regions.size})"
+                                selectedRegionId = hit.id
+                                statusText = "Зона выбрана — тяни пальцем или жми «Удалить»"
+                            } else {
+                                selectedRegionId = null
                             }
                         }
                     }
@@ -456,6 +501,7 @@ fun PrivacyEditorDialog(
                                 }
                                 if (hit != null) {
                                     movingRegionId = hit.id
+                                    selectedRegionId = hit.id
                                     movingOriginalRect = RectF(hit.rect)
                                     movingLiveRect = RectF(hit.rect)
                                     statusText = "Перемещение зоны..."
@@ -492,13 +538,13 @@ fun PrivacyEditorDialog(
                                     regions = regions.map { reg ->
                                         if (reg.id == targetMoveId) reg.copy(rect = finalMovedRect) else reg
                                     }
-                                    statusText = "Зона перемещена (всего ${regions.size}; тап — удалить)"
+                                    statusText = "Зона сдвинута (всего ${regions.size}; тап — выбрать)"
                                 } else if (s != null && e != null) {
                                     val bounds = getDisplayBoxBounds()
-                                    val l = ((min(s.x, e.x) - bounds.left) / bounds.width()).coerceIn(0f, 1f)
-                                    val t = ((min(s.y, e.y) - bounds.top) / bounds.height()).coerceIn(0f, 1f)
-                                    val r = ((max(s.x, e.x) - bounds.left) / bounds.width()).coerceIn(0f, 1f)
-                                    val b = ((max(s.y, e.y) - bounds.top) / bounds.height()).coerceIn(0f, 1f)
+                                    val l = ((min(s.x, e.x) - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                                    val t = ((min(s.y, e.y) - bounds.top) / bounds.height().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                                    val r = ((max(s.x, e.x) - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                                    val b = ((max(s.y, e.y) - bounds.top) / bounds.height().coerceAtLeast(1f)).coerceIn(0f, 1f)
                                     if (r - l > 0.03f && b - t > 0.03f) {
                                         val newRegion = OfflinePrivacyEngine.NormalizedRegion(
                                             id = "man_${UUID.randomUUID().toString().take(6)}",
@@ -506,7 +552,8 @@ fun PrivacyEditorDialog(
                                             kind = OfflinePrivacyEngine.RegionKind.MANUAL
                                         )
                                         regions = regions + newRegion
-                                        statusText = "Добавлена зона (всего ${regions.size}; тап — удалить, драг — сдвиг)"
+                                        selectedRegionId = newRegion.id
+                                        statusText = "Добавлена зона (всего ${regions.size}; тап — выбрать, драг — сдвиг)"
                                     }
                                 }
                             },
@@ -521,7 +568,7 @@ fun PrivacyEditorDialog(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                val bmpToDraw = previewBitmap ?: sourceBitmap
+                val bmpToDraw = previewBitmap ?: previewBaseBitmap
                 Image(
                     bitmap = bmpToDraw.asImageBitmap(),
                     contentDescription = "Редактируемое изображение",
@@ -529,22 +576,40 @@ fun PrivacyEditorDialog(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Draw region outlines + active move preview + active new marquee
+                // Draw region outlines + active selection/move preview + active new marquee
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val bounds = getDisplayBoxBounds()
                     for (reg in regions) {
                         val isMovingThis = reg.id == movingRegionId
+                        val isSelectedThis = reg.id == selectedRegionId
                         val rRect = if (isMovingThis && movingLiveRect != null) movingLiveRect!! else reg.rect
                         val rx = bounds.left + rRect.left * bounds.width()
                         val ry = bounds.top + rRect.top * bounds.height()
                         val rw = (rRect.right - rRect.left) * bounds.width()
                         val rh = (rRect.bottom - rRect.top) * bounds.height()
                         drawRect(
-                            color = if (isMovingThis) Color(0xFFFFC107) else if (reg.kind == OfflinePrivacyEngine.RegionKind.FACE) EdGreen else EdCyan,
+                            color = when {
+                                isMovingThis || isSelectedThis -> Color(0xFFFFEA00)
+                                reg.kind == OfflinePrivacyEngine.RegionKind.FACE -> EdGreen
+                                else -> EdCyan
+                            },
                             topLeft = Offset(rx, ry),
                             size = Size(rw, rh),
-                            style = Stroke(width = if (isMovingThis) 2.5.dp.toPx() else 1.5.dp.toPx())
+                            style = Stroke(width = if (isMovingThis || isSelectedThis) 2.5.dp.toPx() else 1.5.dp.toPx())
                         )
+                        if (isSelectedThis && style == OfflinePrivacyEngine.RedactionStyle.MASK) {
+                            val sc = maskScale.coerceIn(0.6f, 2.2f)
+                            val cx = rx + rw * 0.5f
+                            val cy = ry + rh * 0.5f
+                            val sw = rw * sc
+                            val sh = rh * sc
+                            drawRect(
+                                color = EdCyan.copy(alpha = 0.7f),
+                                topLeft = Offset(cx - sw * 0.5f, cy - sh * 0.5f),
+                                size = Size(sw, sh),
+                                style = Stroke(width = 1.dp.toPx())
+                            )
+                        }
                     }
 
                     val ds = dragStart
@@ -564,14 +629,50 @@ fun PrivacyEditorDialog(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            val selectedRegion = regions.firstOrNull { it.id == selectedRegionId }
+            if (selectedRegion != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF1A222C))
+                        .border(1.dp, Color(0xFFFFEA00).copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🎯 Зона выбрана • двигай пальцем по фото",
+                        color = Color(0xFFFFEA00),
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            regions = regions.filterNot { it.id == selectedRegion.id }
+                            selectedRegionId = null
+                            statusText = "Удалена 1 зона (осталось ${regions.size})"
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = EdRed),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                        modifier = Modifier.height(34.dp).testTag("obscura_delete_selected_btn")
+                    ) {
+                        Text("🗑 УДАЛИТЬ", color = Color.White, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    }
+                }
+            }
 
-            // Style Chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Style Chips (wraps cleanly so nothing clips)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 OfflinePrivacyEngine.RedactionStyle.values().forEach { s ->
                     val isSel = style == s
@@ -588,7 +689,7 @@ fun PrivacyEditorDialog(
                             .clickable {
                                 style = s
                                 if (s == OfflinePrivacyEngine.RedactionStyle.MASK && regions.isEmpty()) {
-                                    statusText = "Выбери маску и размер! Для авто-наложения нажми АВТО-ЛИЦА или обведи пальцем"
+                                    statusText = "Выбери маску и размер! Для авто-наложения жми АВТО-ЛИЦА или обведи пальцем"
                                 }
                             }
                             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -597,7 +698,7 @@ fun PrivacyEditorDialog(
                 }
 
                 Text(
-                    text = if (antiPrnu) "ANTI-PRNU: ВКЛ" else "ANTI-PRNU: ВЫКЛ",
+                    text = if (antiPrnu) "АНТИ-ШУМ: ВКЛ" else "АНТИ-ШУМ: ВЫКЛ",
                     color = if (antiPrnu) Color.Black else EdMuted,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
@@ -671,9 +772,9 @@ fun PrivacyEditorDialog(
                         FilledTonalButton(
                             onClick = { maskScale = (maskScale - 0.10f).coerceIn(0.6f, 2.2f) },
                             contentPadding = PaddingValues(0.dp),
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(44.dp).testTag("obscura_mask_scale_minus")
                         ) {
-                            Text("−", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("−", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                         Slider(
                             value = maskScale,
@@ -691,22 +792,21 @@ fun PrivacyEditorDialog(
                         FilledTonalButton(
                             onClick = { maskScale = (maskScale + 0.10f).coerceIn(0.6f, 2.2f) },
                             contentPadding = PaddingValues(0.dp),
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(44.dp).testTag("obscura_mask_scale_plus")
                         ) {
-                            Text("+", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("+", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Compression Presets Row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            // Compression Presets Flow
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 ExifStripper.CompressionPreset.values().forEach { cp ->
                     val isSel = preset == cp
@@ -728,7 +828,7 @@ fun PrivacyEditorDialog(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Save & Share Row
+            // Save & Share Row (renders at FULL original sourceBitmap resolution!)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -738,14 +838,34 @@ fun PrivacyEditorDialog(
                         scope.launch {
                             isProcessing = true
                             try {
-                                val targetBmp = previewBitmap ?: sourceBitmap
-                                val processed = withContext(Dispatchers.IO) {
-                                    ExifStripper.processBitmapClean(
-                                        sourceBitmap = targetBmp,
-                                        recycleSource = false,
-                                        preset = preset,
-                                        antiPrnu = antiPrnu
-                                    )
+                                val fullResRendered = withContext(Dispatchers.Default) {
+                                    if (regions.isEmpty()) {
+                                        sourceBitmap
+                                    } else {
+                                        OfflinePrivacyEngine.applyRedactions(
+                                            source = sourceBitmap,
+                                            regions = regions,
+                                            style = style,
+                                            invertMode = invertMode,
+                                            maskPreset = maskPreset,
+                                            maskScale = maskScale,
+                                            customMaskBitmap = customMaskBitmap
+                                        )
+                                    }
+                                }
+                                val processed = try {
+                                    withContext(Dispatchers.IO) {
+                                        ExifStripper.processBitmapClean(
+                                            sourceBitmap = fullResRendered,
+                                            recycleSource = false,
+                                            preset = preset,
+                                            antiPrnu = antiPrnu
+                                        )
+                                    }
+                                } finally {
+                                    if (fullResRendered !== sourceBitmap && !fullResRendered.isRecycled) {
+                                        fullResRendered.recycle()
+                                    }
                                 }
                                 try {
                                     val kb = processed.cleanBytes.size / 1024
@@ -756,7 +876,7 @@ fun PrivacyEditorDialog(
                                         withContext(Dispatchers.IO) {
                                             GhostCryptoVault.encryptBytesToVault(context, processed.cleanBytes, GhostCryptoVault.MEDIA_PHOTO)
                                         }
-                                        onSavedToVault("Анонимный кадр (${kb} КБ, 0 EXIF) зашифрован в Сейф!")
+                                        onSavedToVault("Анонимный кадр (${kb} КБ, 0 метаданных) зашифрован в Сейф!")
                                     }
                                     onDismiss()
                                 } finally {
@@ -770,11 +890,12 @@ fun PrivacyEditorDialog(
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdGreen),
-                    modifier = Modifier.weight(1f).testTag("obscura_save_btn")
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("obscura_save_btn")
                 ) {
                     Icon(Icons.Default.Lock, contentDescription = "Сохранить", tint = Color.Black, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("В СЕЙФ (0 EXIF)", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    Text("В СЕЙФ (ЧИСТО)", color = Color.Black, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 }
 
                 Button(
@@ -782,14 +903,34 @@ fun PrivacyEditorDialog(
                         scope.launch {
                             isProcessing = true
                             try {
-                                val targetBmp = previewBitmap ?: sourceBitmap
-                                val processed = withContext(Dispatchers.IO) {
-                                    ExifStripper.processBitmapClean(
-                                        sourceBitmap = targetBmp,
-                                        recycleSource = false,
-                                        preset = preset,
-                                        antiPrnu = antiPrnu
-                                    )
+                                val fullResRendered = withContext(Dispatchers.Default) {
+                                    if (regions.isEmpty()) {
+                                        sourceBitmap
+                                    } else {
+                                        OfflinePrivacyEngine.applyRedactions(
+                                            source = sourceBitmap,
+                                            regions = regions,
+                                            style = style,
+                                            invertMode = invertMode,
+                                            maskPreset = maskPreset,
+                                            maskScale = maskScale,
+                                            customMaskBitmap = customMaskBitmap
+                                        )
+                                    }
+                                }
+                                val processed = try {
+                                    withContext(Dispatchers.IO) {
+                                        ExifStripper.processBitmapClean(
+                                            sourceBitmap = fullResRendered,
+                                            recycleSource = false,
+                                            preset = preset,
+                                            antiPrnu = antiPrnu
+                                        )
+                                    }
+                                } finally {
+                                    if (fullResRendered !== sourceBitmap && !fullResRendered.isRecycled) {
+                                        fullResRendered.recycle()
+                                    }
                                 }
                                 try {
                                     val ext = if (processed.isWebP) "webp" else "jpg"
@@ -813,7 +954,8 @@ fun PrivacyEditorDialog(
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EdBorder),
-                    modifier = Modifier.weight(0.8f)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(0.85f).height(48.dp)
                 ) {
                     Icon(Icons.Default.Share, contentDescription = "Поделиться", tint = EdGreen, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
