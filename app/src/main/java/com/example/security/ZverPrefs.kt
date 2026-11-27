@@ -45,6 +45,7 @@ object ZverPrefs {
     private const val KEY_SENTINEL_NIGHT_CLAHE = "sentinel_night_clahe"
     private const val KEY_SENTINEL_AI_TRIAGE = "sentinel_ai_triage"
     private const val KEY_SENTINEL_TWO_STAGE_CROP = "sentinel_two_stage_crop"
+    private const val KEY_EXTERNAL_BRIDGE_ENABLED = "external_bridge_enabled"
 
     enum class VolumeKeyAction(val labelRu: String) {
         SHUTTER_OR_VIDEO("Кадр / Видео"),
@@ -386,5 +387,14 @@ object ZverPrefs {
             .putBoolean(KEY_SENTINEL_AI_TRIAGE, config.aiTriageEnabled)
             .putBoolean(KEY_SENTINEL_TWO_STAGE_CROP, config.twoStageFaceCropEnabled)
             .apply()
+    }
+
+    fun isExternalBridgeEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_EXTERNAL_BRIDGE_ENABLED, false)
+
+    fun setExternalBridgeEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_EXTERNAL_BRIDGE_ENABLED, enabled).apply()
     }
 }

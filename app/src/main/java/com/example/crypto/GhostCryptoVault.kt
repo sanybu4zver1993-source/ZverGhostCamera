@@ -348,6 +348,10 @@ object GhostCryptoVault {
         return key
     }
 
+    fun hasUnlockedPinSession(): Boolean =
+        (activeProfile == VaultProfile.MAIN && activeMainKey != null) ||
+            (activeProfile == VaultProfile.DECOY && activeDecoyKey != null)
+
     fun getActiveVaultKey(context: Context): SecretKey {
         val key = if (activeProfile == VaultProfile.MAIN) activeMainKey else activeDecoyKey
         if (key != null) return key
@@ -464,8 +468,22 @@ object GhostCryptoVault {
         context: Context,
         prefix: String = MEDIA_PHOTO,
         writer: (CipherOutputStream) -> Unit
+    ): File = writeEncryptedAtomicallyWithKey(
+        context = context,
+        explicitKey = getActiveVaultKey(context),
+        explicitProfile = activeProfile,
+        prefix = prefix,
+        writer = writer
+    )
+
+    fun writeEncryptedAtomicallyWithKey(
+        context: Context,
+        explicitKey: SecretKey,
+        explicitProfile: VaultProfile = activeProfile,
+        prefix: String = MEDIA_PHOTO,
+        writer: (CipherOutputStream) -> Unit
     ): File {
-        val vaultDir = activeProfile.getDirectory(context)
+        val vaultDir = explicitProfile.getDirectory(context)
         val baseName = "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
         val tempFile = File(vaultDir, "$baseName.gcf.tmp")
         val targetFile = File(vaultDir, "$baseName.gcf")
@@ -475,7 +493,7 @@ object GhostCryptoVault {
 
         val cipher = Cipher.getInstance(AES_GCM)
         val gcmSpec = GCMParameterSpec(GCM_TAG_LEN, iv)
-        cipher.init(Cipher.ENCRYPT_MODE, getActiveVaultKey(context), gcmSpec)
+        cipher.init(Cipher.ENCRYPT_MODE, explicitKey, gcmSpec)
 
         val fos = FileOutputStream(tempFile)
         try {
@@ -631,19 +649,34 @@ object GhostCryptoVault {
         return EncryptedMediaDataSource(file, getActiveVaultKey(context))
     }
 
-    fun encryptFileToVault(context: Context, sourceFile: File, prefix: String = MEDIA_VIDEO): File {
+    fun encryptFileToVault(context: Context, sourceFile: File, prefix: String = MEDIA_VIDEO): File =
+        encryptFileToVaultWithKey(
+            context = context,
+            sourceFile = sourceFile,
+            explicitKey = getActiveVaultKey(context),
+            explicitProfile = activeProfile,
+            prefix = prefix
+        )
+
+    fun encryptFileToVaultWithKey(
+        context: Context,
+        sourceFile: File,
+        explicitKey: SecretKey,
+        explicitProfile: VaultProfile = activeProfile,
+        prefix: String = MEDIA_VIDEO
+    ): File {
         try {
             val useGcf2 = prefix == MEDIA_VIDEO || sourceFile.length() > 1024L * 1024L
             if (useGcf2) {
-                val vaultDir = activeProfile.getDirectory(context)
+                val vaultDir = explicitProfile.getDirectory(context)
                 val targetFile = File(
                     vaultDir,
                     "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.gcf"
                 )
-                GcfChunkedCodec.encryptFileAtomically(sourceFile, targetFile, getActiveVaultKey(context))
+                GcfChunkedCodec.encryptFileAtomically(sourceFile, targetFile, explicitKey)
                 return targetFile
             }
-            return writeEncryptedAtomically(context, prefix) { out ->
+            return writeEncryptedAtomicallyWithKey(context, explicitKey, explicitProfile, prefix) { out ->
                 FileInputStream(sourceFile).use { input ->
                     input.copyTo(out)
                 }

@@ -145,8 +145,10 @@ fun GhostCameraScreen(
     var textureView by remember { mutableStateOf<TextureView?>(null) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var activeCameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var activePreview by remember { mutableStateOf<Preview?>(null) }
     var activeImageAnalysis by remember { mutableStateOf<ImageAnalysis?>(null) }
     var resumeBindToken by remember { mutableIntStateOf(0) }
+    var pinSessionLockedWarning by remember { mutableStateOf(false) }
 
     val captureExecutor = remember { Executors.newSingleThreadExecutor() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -254,6 +256,7 @@ fun GhostCameraScreen(
     // Video Recording + Part B TimeLapse & Anti-Optics States
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
+    val pendingStopVideoKey = remember { AtomicReference<Pair<javax.crypto.SecretKey, GhostCryptoVault.VaultProfile>?>(null) }
     val visorVideoRecorder = remember { VisorVideoRecorder() }
     var isRecordingVideo by remember { mutableStateOf(false) }
 
@@ -425,8 +428,10 @@ fun GhostCameraScreen(
             val count = GhostCryptoVault.totalVaultItemsCount(context)
             AntiForensicsGuard.assessDeviceSecurity(context)
             MonoVaultEngine.ensureContainerInitialized(context)
+            val lockedWarn = GhostCryptoVault.isConfigured(context) && !GhostCryptoVault.hasUnlockedPinSession()
             withContext(Dispatchers.Main) {
                 vaultCount = count
+                pinSessionLockedWarning = lockedWarn
             }
         }
     }
@@ -545,14 +550,21 @@ fun GhostCameraScreen(
         }
     }
 
-    // Clean shutdown before SurfaceView teardown on pause/stop (prevents BufferQueue abandoned & 700ms camera hang)
+    // Clean shutdown before SurfaceView teardown strictly on ON_STOP (preserves active recordings during transient ON_PAUSE dialogs)
     DisposableEffect(lifecycleOwner) {
-        var wasPausedOrStopped = false
+        var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
-                    wasPausedOrStopped = true
+                Lifecycle.Event.ON_STOP -> {
+                    wasStopped = true
+                    val capturedKey = try { GhostCryptoVault.getActiveVaultKey(context) } catch (_: Exception) { null }
+                    val capturedProfile = GhostCryptoVault.activeProfile
+                    val ramOnlySnapshot = ZverPrefs.isRamOnlyMode(context)
+
                     if (isRecordingVideo && activeRecording != null) {
+                        if (capturedKey != null) {
+                            pendingStopVideoKey.set(capturedKey to capturedProfile)
+                        }
                         try { activeRecording?.stop() } catch (_: Exception) {}
                         activeRecording = null
                         isRecordingVideo = false
@@ -560,11 +572,42 @@ fun GhostCameraScreen(
                     if (visorVideoRecorder.isRecording) {
                         isRecordingVideo = false
                         CoroutineScope(Dispatchers.IO).launch {
+                            var rawMp4: File? = null
+                            var cleanMp4: File? = null
                             try {
-                                visorVideoRecorder.stopAndFinalize(
+                                rawMp4 = visorVideoRecorder.stopAndFinalize(
                                     onBeforeSignalEos = { glRenderer.detachEncoderSurfaceBlocking() }
-                                )?.let { GhostCryptoVault.shredFile(it) }
-                            } catch (_: Exception) {}
+                                )
+                                if (rawMp4 != null && rawMp4.exists() && rawMp4.length() > 0L) {
+                                    val stageDir = GhostCryptoVault.getVideoStageDir(context)
+                                    cleanMp4 = File(stageDir, "visor_bg_${System.currentTimeMillis()}.mp4")
+                                    val sanitized = Mp4Sanitizer.sanitizeMp4File(rawMp4, cleanMp4)
+                                    val targetInput = if (sanitized && cleanMp4.exists()) cleanMp4 else rawMp4
+                                    if (ramOnlySnapshot) {
+                                        GhostCryptoVault.addRamShot(targetInput.readBytes(), isVideo = true)
+                                    } else if (capturedKey != null) {
+                                        GhostCryptoVault.encryptFileToVaultWithKey(
+                                            context = context,
+                                            sourceFile = targetInput,
+                                            explicitKey = capturedKey,
+                                            explicitProfile = capturedProfile,
+                                            prefix = GhostCryptoVault.MEDIA_VIDEO
+                                        )
+                                    }
+                                    GhostCryptoVault.shredFile(rawMp4)
+                                    GhostCryptoVault.shredFile(cleanMp4)
+                                    val newCount = GhostCryptoVault.totalVaultItemsCount(context)
+                                    withContext(Dispatchers.Main) {
+                                        vaultCount = newCount
+                                        lastStatusMessage = "🎥 ВИЗОР MP4 СОХРАНЁН ПЕРЕД УХОДОМ [#$newCount]"
+                                    }
+                                } else {
+                                    rawMp4?.let { GhostCryptoVault.shredFile(it) }
+                                }
+                            } catch (_: Exception) {
+                                rawMp4?.let { GhostCryptoVault.shredFile(it) }
+                                cleanMp4?.let { GhostCryptoVault.shredFile(it) }
+                            }
                         }
                     }
                     if (isTimeLapseRecording || timeLapseRecorder.isRecording) {
@@ -575,24 +618,55 @@ fun GhostCameraScreen(
                         val staleTemp = timeLapseTempFile
                         timeLapseTempFile = null
                         CoroutineScope(Dispatchers.IO).launch {
+                            var cleanMp4: File? = null
                             try {
-                                timeLapseRecorder.stopAndFinalize()?.let { GhostCryptoVault.shredFile(it) }
+                                val finalized = try { timeLapseRecorder.stopAndFinalize() } catch (_: Exception) { null }
+                                val rawMp4 = finalized ?: staleTemp?.takeIf { it.exists() && it.length() > 0L }
+                                if (rawMp4 != null && rawMp4.exists() && rawMp4.length() > 0L) {
+                                    val stageDir = GhostCryptoVault.getVideoStageDir(context)
+                                    cleanMp4 = File(stageDir, "tl_bg_${System.currentTimeMillis()}.mp4")
+                                    val sanitized = Mp4Sanitizer.sanitizeMp4File(rawMp4, cleanMp4)
+                                    val targetInput = if (sanitized && cleanMp4.exists()) cleanMp4 else rawMp4
+                                    if (ramOnlySnapshot) {
+                                        GhostCryptoVault.addRamShot(targetInput.readBytes(), isVideo = true)
+                                    } else if (capturedKey != null) {
+                                        GhostCryptoVault.encryptFileToVaultWithKey(
+                                            context = context,
+                                            sourceFile = targetInput,
+                                            explicitKey = capturedKey,
+                                            explicitProfile = capturedProfile,
+                                            prefix = GhostCryptoVault.MEDIA_VIDEO
+                                        )
+                                    }
+                                    GhostCryptoVault.shredFile(rawMp4)
+                                    GhostCryptoVault.shredFile(cleanMp4)
+                                } else {
+                                    staleTemp?.let { GhostCryptoVault.shredFile(it) }
+                                }
+                            } catch (_: Exception) {
                                 staleTemp?.let { GhostCryptoVault.shredFile(it) }
-                            } catch (_: Exception) {}
+                                cleanMp4?.let { GhostCryptoVault.shredFile(it) }
+                            }
                         }
                     }
-                    if (event == Lifecycle.Event.ON_STOP) {
-                        bindingCoordinator.cancelPendingWatchdog()
-                        glRenderer.detachEncoderSurfaceBlocking()
-                        try { activeImageAnalysis?.clearAnalyzer() } catch (_: Exception) {}
-                        try { activeCameraProvider?.unbindAll() } catch (_: Exception) {}
-                    }
+
+                    bindingCoordinator.cancelPendingWatchdog()
+                    glRenderer.detachEncoderSurfaceBlocking()
+                    try { activePreview?.setSurfaceProvider(null) } catch (_: Exception) {}
+                    activePreview = null
+                    try { activeImageAnalysis?.clearAnalyzer() } catch (_: Exception) {}
+                    activeImageAnalysis = null
+                    try { activeCameraProvider?.unbindAll() } catch (_: Exception) {}
                 }
                 Lifecycle.Event.ON_START -> {
-                    if (wasPausedOrStopped) {
-                        wasPausedOrStopped = false
+                    if (wasStopped) {
+                        wasStopped = false
                         resumeBindToken++
                     }
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    pinSessionLockedWarning =
+                        GhostCryptoVault.isConfigured(context) && !GhostCryptoVault.hasUnlockedPinSession()
                 }
                 else -> {}
             }
@@ -901,7 +975,12 @@ fun GhostCameraScreen(
                             zoomRatio = zoomRatio,
                             photoIqOverride = photoIqProfile,
                             visorMode = visorMode,
-                            visorEngine = cyberVisorEngine
+                            visorEngine = cyberVisorEngine,
+                            gpuSnapshotProvider = if (useGpuVisorPipeline) {
+                                { glRenderer.captureSnapshotBitmap() }
+                            } else {
+                                null
+                            }
                         )
                         vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
                         val kb = result.encryptedSizeBytes / 1024
@@ -953,6 +1032,7 @@ fun GhostCameraScreen(
                 lastStatusMessage = "⛔ МАЛО ПАМЯТИ (${storage.availableMb} МБ < 250 МБ) — ЗАПИСЬ ОТМЕНЕНА"
                 return
             }
+            pendingStopVideoKey.set(null)
             val videoStageDir = GhostCryptoVault.getVideoStageDir(context)
             val tempVideoFile = File(videoStageDir, "raw_video_${System.currentTimeMillis()}.mp4")
             val outputOptions = FileOutputOptions.Builder(tempVideoFile).build()
@@ -988,6 +1068,7 @@ fun GhostCameraScreen(
                             val savedEvenWithLimit = event.error == VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED ||
                                 event.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
                             if ((!event.hasError() || savedEvenWithLimit) && tempVideoFile.exists() && tempVideoFile.length() > 0L) {
+                                val pinnedKeyPair = pendingStopVideoKey.getAndSet(null)
                                 scope.launch(Dispatchers.IO) {
                                     val cleanVideoFile = File(videoStageDir, "clean_video_${System.currentTimeMillis()}.mp4")
                                     try {
@@ -997,6 +1078,14 @@ fun GhostCameraScreen(
                                             val bytes = targetInput.readBytes()
                                             GhostCryptoVault.addRamShot(bytes, isVideo = true)
                                             GhostCryptoVault.shredFile(cleanVideoFile)
+                                        } else if (pinnedKeyPair != null) {
+                                            GhostCryptoVault.encryptFileToVaultWithKey(
+                                                context = context,
+                                                sourceFile = targetInput,
+                                                explicitKey = pinnedKeyPair.first,
+                                                explicitProfile = pinnedKeyPair.second,
+                                                prefix = GhostCryptoVault.MEDIA_VIDEO
+                                            )
                                         } else {
                                             GhostCryptoVault.encryptFileToVault(context, targetInput, prefix = GhostCryptoVault.MEDIA_VIDEO)
                                         }
@@ -1857,6 +1946,8 @@ fun GhostCameraScreen(
         val cameraProvider = withContext(Dispatchers.IO) { cameraProviderFuture.get() }
         activeCameraProvider = cameraProvider
 
+        try { activePreview?.setSurfaceProvider(null) } catch (_: Exception) {}
+        activePreview = null
         glRenderer.resetFirstFrameSignal()
         val preview = Preview.Builder().build().apply {
             if (useGpuVisorPipeline) {
@@ -1865,6 +1956,7 @@ fun GhostCameraScreen(
                 setSurfaceProvider(previewView!!.surfaceProvider)
             }
         }
+        activePreview = preview
         val cameraSelector = CameraSelector.Builder()
             .requireLensFacing(lensFacing)
             .build()
@@ -1992,30 +2084,6 @@ fun GhostCameraScreen(
         try {
             cameraControl?.setExposureCompensationIndex(exposureIndex.coerceIn(proProfile.evRange.first, proProfile.evRange.last))
         } catch (_: Exception) {}
-    }
-
-    if (isStealthBlackoutActive) {
-        StealthBlackoutScreen(
-            mode = stealthCoverMode,
-            isProximityLocked = telemetry.isProximityLocked,
-            onCycleMode = {
-                stealthCoverMode = when (stealthCoverMode) {
-                    StealthCoverMode.BLACKOUT -> StealthCoverMode.LOCKSCREEN_CLOCK
-                    StealthCoverMode.LOCKSCREEN_CLOCK -> StealthCoverMode.BROWSER_MOCK
-                    StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.SYSTEM_UPDATE
-                    StealthCoverMode.SYSTEM_UPDATE -> StealthCoverMode.LOW_BATTERY
-                    StealthCoverMode.LOW_BATTERY -> StealthCoverMode.BLACKOUT
-                }
-            },
-            onCapture = { triggerPhotoCapture() },
-            onExit = {
-                isStealthBlackoutActive = false
-                if (selectedCameraMode == "STEALTH") {
-                    selectedCameraMode = previousCameraMode
-                }
-            }
-        )
-        return
     }
 
     val cameraModes = remember {
@@ -2153,11 +2221,12 @@ fun GhostCameraScreen(
             onPreviewStreaming = { bindingCoordinator.markFirstFrameReceived() }
         )
 
-        VisorLiveOverlayLayer(
-            visorMode = visorMode,
-            useGpuVisorPipeline = useGpuVisorPipeline,
-            telemetry = telemetry
-        )
+        if (!isStealthBlackoutActive) {
+            VisorLiveOverlayLayer(
+                visorMode = visorMode,
+                useGpuVisorPipeline = useGpuVisorPipeline,
+                telemetry = telemetry
+            )
 
         CameraGestureLayer(
             previewView = previewView,
@@ -2344,7 +2413,12 @@ fun GhostCameraScreen(
                 isToolsDrawerOpen = false
                 showPanicConfirm = true
             },
-            onDismissStatus = { lastStatusMessage = null }
+            onDismissStatus = { lastStatusMessage = null },
+            pinSessionLockedWarning = pinSessionLockedWarning,
+            onUnlockPinRequested = {
+                forcePinSetupFlow = false
+                showVaultDialog = true
+            }
         )
 
         CountdownOverlay(countdownRemaining = countdownRemaining)
@@ -2580,6 +2654,30 @@ fun GhostCameraScreen(
                 }
             }
         )
+        }
+
+        if (isStealthBlackoutActive) {
+            StealthBlackoutScreen(
+                mode = stealthCoverMode,
+                isProximityLocked = telemetry.isProximityLocked,
+                onCycleMode = {
+                    stealthCoverMode = when (stealthCoverMode) {
+                        StealthCoverMode.BLACKOUT -> StealthCoverMode.LOCKSCREEN_CLOCK
+                        StealthCoverMode.LOCKSCREEN_CLOCK -> StealthCoverMode.BROWSER_MOCK
+                        StealthCoverMode.BROWSER_MOCK -> StealthCoverMode.SYSTEM_UPDATE
+                        StealthCoverMode.SYSTEM_UPDATE -> StealthCoverMode.LOW_BATTERY
+                        StealthCoverMode.LOW_BATTERY -> StealthCoverMode.BLACKOUT
+                    }
+                },
+                onCapture = { triggerPhotoCapture() },
+                onExit = {
+                    isStealthBlackoutActive = false
+                    if (selectedCameraMode == "STEALTH") {
+                        selectedCameraMode = previousCameraMode
+                    }
+                }
+            )
+        }
 
         CameraDialogsLayer(
             context = context,
@@ -2603,9 +2701,13 @@ fun GhostCameraScreen(
                 showVaultDialog = false
                 forcePinSetupFlow = false
                 vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                pinSessionLockedWarning =
+                    GhostCryptoVault.isConfigured(context) && !GhostCryptoVault.hasUnlockedPinSession()
             },
             onVaultUpdated = {
                 vaultCount = GhostCryptoVault.totalVaultItemsCount(context)
+                pinSessionLockedWarning =
+                    GhostCryptoVault.isConfigured(context) && !GhostCryptoVault.hasUnlockedPinSession()
             },
             onDismissCamouflage = { showCamouflageDialog = false },
             onSelectCamouflage = { mode, ruName ->
@@ -2662,6 +2764,7 @@ fun GhostCameraScreen(
                 sentinelArmed = false
                 sentinelEvents = emptyList()
                 vaultCount = 0
+                pinSessionLockedWarning = false
                 showPanicConfirm = false
                 lastStatusMessage = "СХРОН И КЛЮЧИ ПОЛНОСТЬЮ УНИЧТОЖЕНЫ"
             }

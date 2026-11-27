@@ -310,4 +310,31 @@
 - **Release R8-сборка:** `KEYSTORE_PATH=/tmp/ci_test.jks ... gradle :app:assembleRelease --console=plain` -> **BUILD SUCCESSFUL in 4m 54s** (`minifyReleaseWithR8` + `shrinkResources` пройдены без ошибок, временный `/tmp/ci_test.jks` удалён).
 - **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15) и в GitHub Actions:** реальная работа Night Extension на HAL MT6769Z, качество звука Sonic на роликах из Сейфа, наложение стилизованных масок на реальных фото и выпуск артефактов на GitHub — `UNVERIFIED` до проверки пользователем.
 
+---
 
+## 2026-11-27 — Глубокий аудит камеры/жизненного цикла + Мост для чатов и ИИ (External Bridge & ZverClean Gallery Export)
+
+### 1. Исправления по аудиту камеры, шифрования и памяти
+- **Lifecycle и HAL Surface (`GhostCameraScreen.kt`, `CameraOverlayComponents.kt`):**
+  - В `GhostCameraScreen` убран ранний `return` при активном `isStealthBlackoutActive`: `CameraViewportSurface` остаётся смонтированным под `StealthBlackoutScreen`, исключая уничтожение `SurfaceView`/`TextureView` и краш `BufferQueue has been abandoned` при активной привязке CameraX.
+  - Заменена подписка `previewStreamState.observeForever` в `CameraOverlayComponents.kt` на lifecycle-привязанный `DisposableEffect` (`observe` + `removeObserver`) и добавлен `onRelease` сброс для `PreviewView`/`TextureView`; добавлен `activePreview?.setSurfaceProvider(null)` перед перепривязкой и в `ON_STOP`.
+  - Остановка видеозаписи (`activeRecording`, `visorVideoRecorder`, `timeLapseRecorder`) перенесена с транзитного `ON_PAUSE` строго в `ON_STOP` (системные диалоги больше не обрывают запись); в `ON_STOP` корректные временные MP4 санитизируются и сохраняются с зафиксированным ключом/профилем (`encryptFileToVaultWithKey` + `pendingStopVideoKey` для HAL-видео), а возврат из фона (`ON_START` после `ON_STOP`) увеличивает `resumeBindToken`.
+- **Консистентность ключей Сейфа и фото-захват (`GhostCryptoVault.kt`, `GhostVaultDialog.kt`, `CameraHudComponents.kt`, `GhostCameraScreen.kt`):**
+  - Добавлены `hasUnlockedPinSession()`, `writeEncryptedAtomicallyWithKey(...)` и `encryptFileToVaultWithKey(...)`.
+  - Убраны вызовы `lockSession()` при обычном закрытии `GhostVaultDialog`, чтобы последующие снимки из камеры не шифровались тихо в fallback `AndroidKeyStore` вместо разблокированного `MAIN` PBKDF2.
+  - В `CameraTopHudAndDrawer` добавлен кликабельный баннер `pinSessionLockedWarning` (`"СЕЙФ БЛОК (KEYSTORE) • НАЖМИ ВВЕСТИ ПИН"`), а в `CaptureManager.takeSecurePhoto` передан `gpuSnapshotProvider`.
+- **OOM-защита MP4 (`Mp4Sanitizer.kt`) и сборка (`.env.example`):**
+  - Создан `.env.example` для Secrets Gradle Plugin.
+  - Порог in-memory санитации MP4 снижен со 150 МБ до 48 МБ, добавлены проверка свободной heap-памяти (`length * 3L > freeHeap`) и перехват `OutOfMemoryError`.
+
+### 2. Мост для чатов, Телеграма и ИИ-ассистентов (`ExternalBridgeActivity`, `BridgeManager`, `VaultCleanExporter`)
+- **`BridgeManager.kt` + `AndroidManifest.xml` (`ExternalBridgeActivity.kt`):**
+  - Добавлены отключённые по умолчанию `<activity-alias>` `.ExternalCameraBridgeAlias` (`IMAGE_CAPTURE`, `IMAGE_CAPTURE_SECURE`, `VIDEO_CAPTURE`) и `.ExternalPickerBridgeAlias` (`GET_CONTENT`, `PICK` для `image/*`, `video/*`) без добавления разрешений на чтение хранилища (`READ_EXTERNAL_STORAGE`/`READ_MEDIA_*` отсутствуют).
+  - В `GhostSettingsDialog.kt` добавлен тумблер `"Мост для чатов и ИИ (Телеграм / Браузер)"`.
+  - `ExternalBridgeActivity` позволяет прямо из внешнего приложения снять 0-EXIF фото или очищенный MP4 (с опцией дублирования в Сейф) либо по PIN выбрать ровно 1 файл из Сейфа через `FileProvider` (с авто-блокировкой сессии при выходе, если ранее не была разблокирована).
+- **`VaultCleanExporter.kt` + `GhostVaultDialog.kt` + `GhostSettingsDialog.kt`:**
+  - Для Android 13–15 System Photo Picker добавлен экспорт одного выбранного элемента кнопкой `"В ГАЛЕРЕЮ"` в `Pictures/ZverClean` / `Movies/ZverClean` (zero-permission Scoped Storage `IS_PENDING`, гарантированный 0-EXIF/санитизированный MP4) и кнопка быстрой зачистки `"🧹 УБРАТЬ КОПИИ ZverClean ИЗ ГАЛЕРЕИ"`.
+
+### 3. Верификация
+- **Тесты (`AuditAndExternalBridgeTest.kt` + полный прогон):** `gradle :app:testDebugUnitTest --console=plain` -> **BUILD SUCCESSFUL in 3m 37s**, **115/115 PASS** (`0 failures, 0 errors, 0 skipped` по 24 тестовым классам, включая `AuditAndExternalBridgeTest`: 5/5 PASS).
+- **На физическом устройстве Redmi 13C (`23108RN04Y`, Android 15):** поведение HyperOS Camera HAL при Stealth Blackout/ON_STOP и системный chooser Телеграм/браузера — `UNVERIFIED` до проверки на устройстве.

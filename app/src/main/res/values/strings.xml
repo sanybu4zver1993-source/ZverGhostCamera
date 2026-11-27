@@ -2,4 +2,6 @@
     <string name="app_name">Zver Camera</string>
     <string name="app_name_calc">Calculator</string>
     <string name="app_name_system">System Tools</string>
+    <string name="app_name_bridge_camera">Zver Камера (0-EXIF)</string>
+    <string name="app_name_bridge_picker">Zver Сейф (Выбор)</string>
 </resources>

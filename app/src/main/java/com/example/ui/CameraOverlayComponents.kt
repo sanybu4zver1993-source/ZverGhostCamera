@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -36,7 +37,11 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Observer
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -113,10 +118,31 @@ class CameraTelemetryState {
 internal fun CameraViewportSurface(
     useGpuVisorPipeline: Boolean,
     glRenderer: GlVisorDualRenderer,
-    onPreviewViewReady: (PreviewView) -> Unit,
-    onTextureViewReady: (TextureView) -> Unit,
+    onPreviewViewReady: (PreviewView?) -> Unit,
+    onTextureViewReady: (TextureView?) -> Unit,
     onPreviewStreaming: (() -> Unit)? = null
 ) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentOnPreviewStreaming by rememberUpdatedState(onPreviewStreaming)
+    var attachedPreviewView by remember { mutableStateOf<PreviewView?>(null) }
+
+    DisposableEffect(attachedPreviewView, lifecycleOwner, useGpuVisorPipeline) {
+        val pv = attachedPreviewView
+        if (pv == null || useGpuVisorPipeline) {
+            onDispose {}
+        } else {
+            val observer = Observer<PreviewView.StreamState> { state ->
+                if (state == PreviewView.StreamState.STREAMING) {
+                    currentOnPreviewStreaming?.invoke()
+                }
+            }
+            pv.previewStreamState.observe(lifecycleOwner, observer)
+            onDispose {
+                pv.previewStreamState.removeObserver(observer)
+            }
+        }
+    }
+
     if (useGpuVisorPipeline) {
         AndroidView(
             factory = { ctx ->
@@ -151,6 +177,10 @@ internal fun CameraViewportSurface(
                     onTextureViewReady(this)
                 }
             },
+            onRelease = {
+                glRenderer.attachDisplaySurface(null, 0, 0)
+                onTextureViewReady(null)
+            },
             modifier = Modifier.fillMaxSize()
         )
     } else {
@@ -163,13 +193,13 @@ internal fun CameraViewportSurface(
                     )
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                     implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-                    previewStreamState.observeForever { state ->
-                        if (state == PreviewView.StreamState.STREAMING) {
-                            onPreviewStreaming?.invoke()
-                        }
-                    }
+                    attachedPreviewView = this
                     onPreviewViewReady(this)
                 }
+            },
+            onRelease = {
+                attachedPreviewView = null
+                onPreviewViewReady(null)
             },
             modifier = Modifier.fillMaxSize()
         )

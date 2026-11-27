@@ -24,11 +24,19 @@ object Mp4Sanitizer {
     private val STRIPPED_TOP_BOXES = setOf("udta", "meta", "free", "skip", "uuid")
     private val STRIPPED_MOOV_CHILDREN = setOf("udta", "meta", "free", "skip", "uuid")
 
+    private const val MAX_IN_MEMORY_SANITIZE_BYTES = 48L * 1024L * 1024L
+
     fun sanitizeMp4File(inputFile: File, outputFile: File): Boolean {
         return try {
-            if (!inputFile.exists() || inputFile.length() < 32 || inputFile.length() > 150L * 1024 * 1024) {
+            if (!inputFile.exists() || inputFile.length() < 32 || inputFile.length() > MAX_IN_MEMORY_SANITIZE_BYTES) {
                 false
             } else {
+                val rt = Runtime.getRuntime()
+                val usedHeap = rt.totalMemory() - rt.freeMemory()
+                val availableHeap = (rt.maxMemory() - usedHeap).coerceAtLeast(0L)
+                if (inputFile.length() * 3L > availableHeap) {
+                    return false
+                }
                 val bytes = FileInputStream(inputFile).use { it.readBytes() }
                 val clean = sanitizeMp4Bytes(bytes)
                 FileOutputStream(outputFile).use { fos ->
@@ -37,7 +45,11 @@ object Mp4Sanitizer {
                 }
                 true
             }
+        } catch (_: OutOfMemoryError) {
+            try { if (outputFile.exists()) outputFile.delete() } catch (_: Exception) {}
+            false
         } catch (_: Exception) {
+            try { if (outputFile.exists()) outputFile.delete() } catch (_: Exception) {}
             false
         }
     }

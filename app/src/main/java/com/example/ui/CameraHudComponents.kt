@@ -188,7 +188,9 @@ internal fun CameraTopHudAndDrawer(
     onOpenSelfTest: () -> Unit,
     onOpenVikaSheet: () -> Unit,
     onOpenPanicShred: () -> Unit,
-    onDismissStatus: () -> Unit = {}
+    onDismissStatus: () -> Unit = {},
+    pinSessionLockedWarning: Boolean = false,
+    onUnlockPinRequested: () -> Unit = {}
 ) {
     val presetShort = when (compressionPreset) {
         ExifStripper.CompressionPreset.ULTRA_TINY -> "WebP"
@@ -300,6 +302,32 @@ internal fun CameraTopHudAndDrawer(
                 onOpenVikaSheet = onOpenVikaSheet,
                 onOpenPanicShred = onOpenPanicShred
             )
+        }
+
+        if (pinSessionLockedWarning) {
+            Row(
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(NeonYellow.copy(alpha = 0.16f))
+                    .border(1.dp, NeonYellow.copy(alpha = 0.65f), RoundedCornerShape(10.dp))
+                    .clickable(onClick = onUnlockPinRequested)
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .testTag("hud_pin_session_locked_pill"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = "Ввести ПИН", tint = NeonYellow, modifier = Modifier.size(13.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "СЕЙФ БЛОК (KEYSTORE) • НАЖМИ ВВЕСТИ ПИН",
+                    color = NeonYellow,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         CameraToolsDrawer(

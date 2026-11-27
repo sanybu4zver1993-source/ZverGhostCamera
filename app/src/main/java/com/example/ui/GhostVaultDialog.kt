@@ -54,6 +54,7 @@ import com.example.crypto.EncryptedMediaDataSource
 import com.example.crypto.GhostCryptoVault
 import com.example.crypto.MonoVaultEngine
 import com.example.crypto.VaultIndexEngine
+import com.example.crypto.VaultCleanExporter
 import com.example.crypto.BaitGalleryGenerator
 import com.example.crypto.ZverBackupEngine
 import com.example.security.ZverPrefs
@@ -363,7 +364,6 @@ fun GhostVaultDialog(
     Dialog(
         onDismissRequest = {
             cleanupPreviewMedia()
-            GhostCryptoVault.lockSession()
             onDismiss()
         },
         properties = DialogProperties(
@@ -380,7 +380,6 @@ fun GhostVaultDialog(
                 selectedMonoSigValid = null
             } else {
                 cleanupPreviewMedia()
-                GhostCryptoVault.lockSession()
                 onDismiss()
             }
         }
@@ -704,7 +703,6 @@ fun GhostVaultDialog(
                             IconButton(
                                 onClick = {
                                     cleanupPreviewMedia()
-                                    GhostCryptoVault.lockSession()
                                     onDismiss()
                                 },
                                 modifier = Modifier.size(48.dp).testTag("vault_close_btn")
@@ -989,6 +987,46 @@ fun GhostVaultDialog(
                                     Icon(Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(14.dp), tint = CyberGreen)
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("ОТПРАВИТЬ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberGreen)
+                                }
+
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            try {
+                                                val isVideo = selectedFile?.let { GhostCryptoVault.isVideoFile(it) }
+                                                    ?: (selectedRamId?.let { id -> ramShots.firstOrNull { it.id == id }?.isVideo } ?: false)
+                                                val exported = withContext(Dispatchers.IO) {
+                                                    val rawBytes = when {
+                                                        selectedFile != null -> GhostCryptoVault.decryptToRam(context, selectedFile!!)
+                                                        selectedMonoId != null -> decryptedRawBytes?.clone()
+                                                            ?: throw IllegalStateException("Блок монолита не расшифрован")
+                                                        else -> GhostCryptoVault.getRamShotBytes(selectedRamId!!)
+                                                            ?: throw IllegalStateException("Кадр не найден в ОЗУ")
+                                                    }
+                                                    try {
+                                                        VaultCleanExporter.exportBytesToSystemGallery(
+                                                            context = context,
+                                                            plainBytes = rawBytes,
+                                                            isVideo = isVideo
+                                                        )
+                                                    } finally {
+                                                        Arrays.fill(rawBytes, 0.toByte())
+                                                    }
+                                                }
+                                                statusMessage = "🖼 В ГАЛЕРЕЕ (0 EXIF): ${exported.displayName}"
+                                            } catch (e: Exception) {
+                                                statusMessage = "ОШИБКА ЭКСПОРТА В ГАЛЕРЕЮ: ${e.message}"
+                                            }
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CyberCyan.copy(alpha = 0.2f)),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.testTag("vault_export_gallery_btn")
+                                ) {
+                                    Icon(Icons.Default.PhotoLibrary, contentDescription = "В галерею", modifier = Modifier.size(14.dp), tint = CyberCyan)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("В ГАЛЕРЕЮ", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = CyberCyan)
                                 }
 
                                 if (selectedMonoId != null && decryptedRawBytes != null) {

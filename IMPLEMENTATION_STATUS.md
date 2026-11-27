@@ -12,7 +12,8 @@
 
 - **Сборка Debug (`compile_applet`):** `BUILD VERIFIED` (API 35: `compileSdk = 35`, `targetSdk = 35`, `coreKtx = 1.15.0`)
 - **Сборка Release R8 (`gradle :app:assembleRelease`):** `BUILD VERIFIED` (`isMinifyEnabled = true`, `isShrinkResources = true`, `proguard-rules.pro` — R8 минификация и упаковка пройдены с временным тестовым ключом, тестовый ключ удалён)
-- **Локальные тесты (`gradle :app:testDebugUnitTest --console=plain`):** `TEST VERIFIED` — **70/70 PASS** (`0 failures, 0 errors, 0 skipped` по 16 тестовым классам)
+- **Локальные тесты (`gradle :app:testDebugUnitTest --console=plain`):** `TEST VERIFIED` — **115/115 PASS** (`0 failures, 0 errors, 0 skipped` по 24 тестовым классам, включая `AuditAndExternalBridgeTest` 5/5)
+- **Аудит и Мост для чатов (`2026-11-27`):** Исправлены `BufferQueue`/Stealth Blackout, стоп видео перенесён с `ON_PAUSE` в `ON_STOP`, устранён split-brain PIN/KeyStore и утечка `observeForever`, снижен OOM-лимит `Mp4Sanitizer` до 48 МБ; добавлены opt-in `ExternalBridgeActivity` + `BridgeManager` и zero-permission экспорт/зачистка `VaultCleanExporter` (`ZverClean`).
 - **Документация Stage 0 + журналы:** **7/7 актуальны** (`DOCUMENT_INDEX.md`, `MASTER_SPEC.md`, `REQUIREMENTS_TRACEABILITY.md`, `ARCHITECTURE_DECISIONS.md`, `IMPLEMENTATION_PLAN.md`, `WORK_LOG.md`, `IMPLEMENTATION_STATUS.md`)
 - **Живая проверка на Xiaomi Redmi 13C (`23108RN04Y`, HyperOS 2.0.209):** `UNVERIFIED` (аппаратные тесты Camera2 HAL, Night Extension + 1500ms watchdog, FPS OpenGL ES 3.0 + CLAHE 4×4 LUT, Media3 Sonic WSOLA на видео из Сейфа, стилизованные маски/своя PNG, троттлинг `PowerManager` при нагреве MT6769Z и GitHub Actions Release APK выполняются на живом устройстве/GitHub)
 

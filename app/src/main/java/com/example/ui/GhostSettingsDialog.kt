@@ -32,9 +32,14 @@ import com.example.camera.ExifStripper
 import com.example.camera.PhotoIqEngine
 import com.example.camera.TimeLapseRecorder
 import com.example.crypto.GhostCryptoVault
+import com.example.crypto.VaultCleanExporter
+import com.example.security.BridgeManager
 import com.example.security.CamouflageManager
 import com.example.security.SecureClipboard
 import com.example.security.ZverPrefs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -69,6 +74,7 @@ fun GhostSettingsDialog(
     boundUseCasesSummary: String = "N/A"
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         ByokManager.syncFromPrefs(context)
     }
@@ -93,6 +99,9 @@ fun GhostSettingsDialog(
     var snatchLock by remember { mutableStateOf(ZverPrefs.isSnatchProtectionEnabled(context)) }
     var flipDisguise by remember { mutableStateOf(ZverPrefs.isFlipToDisguiseEnabled(context)) }
     var screenRecBlock by remember { mutableStateOf(ZverPrefs.isScreenRecBlockEnabled(context)) }
+    var externalBridgeEnabled by remember {
+        mutableStateOf(BridgeManager.isAnyBridgeAliasEnabled(context) || ZverPrefs.isExternalBridgeEnabled(context))
+    }
     var maxFailWipe by remember { mutableStateOf(ZverPrefs.getMaxFailedPinWipe(context)) }
     var deadManDays by remember { mutableStateOf(ZverPrefs.getDeadManDays(context)) }
     var photoIqProfile by remember { mutableStateOf(ZverPrefs.getPhotoIqProfile(context)) }
@@ -364,6 +373,45 @@ fun GhostSettingsDialog(
                                 ZverPrefs.setScreenRecBlockEnabled(context, it)
                                 com.example.MainActivity.onScreenCapturePolicyChanged?.invoke()
                                 onStatusMessage(if (it) "СКРИНШОТЫ И ЗАПИСЬ ЗАБЛОКИРОВАНЫ" else "СКРИНШОТЫ И ЗАПИСЬ РАЗРЕШЕНЫ")
+                            }
+                            SecurityToggleRow(
+                                title = "Мост для чатов и ИИ (Телеграм / Браузер)",
+                                subtitle = "Выкл = полная скрытность. Вкл = Zver видна при прикреплении фото/видео (0 EXIF и выбор по PIN из Сейфа)",
+                                checked = externalBridgeEnabled,
+                                testTag = "settings_external_bridge_switch"
+                            ) {
+                                externalBridgeEnabled = it
+                                BridgeManager.setBridgeEnabled(context, it)
+                                onStatusMessage(
+                                    if (it) "МОСТ ДЛЯ ЧАТОВ И ИИ: ВКЛ" else "МОСТ ВЫКЛЮЧЕН (ПОЛНАЯ СКРЫТНОСТЬ)"
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        val removed = withContext(Dispatchers.IO) {
+                                            VaultCleanExporter.purgeExportedGalleryCopies(context)
+                                        }
+                                        onStatusMessage(
+                                            if (removed > 0) "🧹 УДАЛЕНО ИЗ ГАЛЕРЕИ (ZverClean): $removed"
+                                            else "🧹 ГАЛЕРЕЯ ZverClean ЧИСТА"
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, CyberBorder),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp)
+                                    .testTag("settings_purge_zverclean_btn")
+                            ) {
+                                Text(
+                                    text = "🧹 УБРАТЬ КОПИИ ZverClean ИЗ ГАЛЕРЕИ",
+                                    color = NeonCyan,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
                             }
 
                             Spacer(modifier = Modifier.height(10.dp))
